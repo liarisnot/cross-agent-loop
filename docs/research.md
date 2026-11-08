@@ -1,0 +1,133 @@
+# Research: cross-agent coordination (Claude Code ↔ Cursor ↔ Antigravity)
+
+*Researched 2026-11-08. Things move fast; re-verify flags against official docs before relying on them.*
+
+## TL;DR
+
+- Cursor and Antigravity both have **headless CLIs with JSON output**, so Claude Code can call them as sub-agents through Bash. This is the path we're taking (local only).
+- Both also have **cloud APIs** (Cursor Cloud Agents API, Gemini Managed Agents). We're deferring these for now.
+- **Open question:** whether automated wrapping of `agy` is allowed on a consumer Google subscription (see [Antigravity caveat](#subscription--tos-caveat-important-for-us)).
+- Existing harnesses already do this: **hcom** (local messaging between agents) and **Omnigent** (full meta-harness). Worth trying before or alongside building our own.
+
+---
+
+## 1. Cursor
+
+Context: SpaceX acquired Anysphere (Cursor) in an all-stock deal valued at $60B. The deal was announced 2026-06-16 and closed 2026-08-14. Cursor now runs as a subsidiary inside SpaceXAI.
+
+### 1a. Headless CLI (our primary path)
+
+- Install: `curl https://cursor.com/install -fsS | bash`. *(Windows install method still to be checked; see test plan.)*
+- The binary is now `agent` (older docs call it `cursor-agent`).
+- Key flags:
+  - `-p, --print`: non-interactive. Has all tools, including write and shell.
+  - `--output-format text|json|stream-json`: only works together with `-p`. With `json`, the final answer is in `.result`.
+  - `--stream-partial-output`: character-level deltas (needs `stream-json`).
+  - `--force`: **without it, print mode only proposes changes and applies nothing.**
+  - `--trust`: trust the workspace without a prompt (headless only).
+  - Auth for CI: `CURSOR_API_KEY` env var. Locally, use the logged-in session.
+- Example: `agent -p --output-format json "Summarize the open TODOs" | jq -r '.result'`
+- Thinking events are never emitted in print mode.
+- If `json` mode fails, you get no well-formed JSON plus a non-zero exit. **Check the exit code before parsing.**
+- **Known bug:** forum reports of `-p` hanging forever with no output. **Always wrap calls in a timeout.**
+
+### 1b. Cloud Agents API v1 (public beta) — deferred
+
+- Base URL `https://api.cursor.com`. Basic or Bearer auth with a user or service-account API key.
+- `POST /v1/agents`: takes `prompt.text`, `repos[]` (url, startingRef), `model`, `autoCreatePR`, `workOnCurrentBranch`, `mcpServers`, `customSubagents`, `mode` (agent/plan), `envVars`.
+- `POST /v1/agents/{id}/runs`: follow-up on the same workspace. Returns `409 agent_busy` if a run is already active. `"delivery":"steer"` injects into the running turn.
+- `GET /v1/agents/{id}/runs/{runId}`: states are CREATING, RUNNING, WAITING_FOR_BACKGROUND_WORK, then FINISHED, ERROR, CANCELLED or EXPIRED. A finished run has `result`, `durationMs` and `git.branches[].prUrl`.
+- `GET .../runs/{runId}/stream`: SSE events (status, assistant, thinking, tool_call, result, error, done).
+- Artifacts endpoints return presigned S3 URLs.
+- **No webhooks in v1 yet** ("coming soon"; the legacy v0 API had them). Poll or use SSE instead.
+
+### 1c. TypeScript SDK `@cursor/sdk` (public beta since ~Apr 2026)
+
+- `Agent.create()` / `Agent.prompt()`. Same runtime as the IDE. You can open and take over SDK-started tasks in the Cursor UI.
+- MCP servers come from `.cursor/mcp.json` or can be passed inline.
+- Gap: the first cloud environment setup still has to be done in the dashboard.
+
+### 1d. Integrations
+
+- Slack (`@Cursor`), GitHub, Linear (assign an issue to Cursor), the CLI's `&` prefix (sends to a cloud agent), and an iOS app.
+
+## 2. Google Antigravity
+
+Timeline: v1 launched 2025-11-18. **Antigravity 2.0** launched at I/O on 2026-05-19 with a standalone desktop app (successor to the Agent Manager), the `agy` CLI, an SDK, and Managed Agents in the Gemini API. The `agy` CLI **replaced Gemini CLI**, which sunset for consumer tiers on 2026-06-18. It kept Gemini CLI's skills, hooks and subagents, and renamed extensions to plugins.
+
+### 2a. `agy` headless CLI (our primary path)
+
+- A Go binary. Windows install: `irm https://antigravity.google/cli/install.ps1 | iex`.
+- Key flags:
+  - `-p, --print, --prompt`: single prompt, non-interactive.
+  - `--output-format text|json|stream-json`: with `json`, the answer is in `.response`, alongside `status`, `duration_seconds`, `num_turns` and `usage` (input, output, thinking and cached tokens).
+  - `--input-format text|stream-json`: `stream-json` input requires `stream-json` output (NDJSON).
+  - `--json-schema <schema|file>`: **enforces structured output**. The root must be `"type":"object"`. Very useful for our result contract.
+  - `--disable-slash-commands`
+  - `--print-timeout` (default 5m): returns partial output and warns on stderr.
+  - `--continue`: chains onto the same conversation, so we can iterate after a review.
+  - `--dangerously-skip-permissions`: the unattended mode. There's no `--approve` policy flag.
+- Status values: SUCCESS, ERROR, CANCELED, INTERRUPTED, INVALID, WAITING, RUNNING. Exit code 0 means success.
+- Diagnostics go to stderr, so stdout stays clean for parsing.
+- An unauthenticated non-interactive run exits with an error rather than hanging.
+- Full audit log: `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`. Lifecycle hooks are configured in `.agents/hooks.json`.
+- Example: `echo "<prompt>" | agy -p - --output-format json --disable-slash-commands`
+
+### Subscription / ToS caveat (important for us)
+
+From the Google AI Developers Forum thread "Is external orchestration of Antigravity CLI headless mode supported with account-based usage?":
+- 2026-09-15: a reply from user "Engineer760" said **yes**. Running the official `agy` binary as a child process with its cached Google credentials is supported and draws on the same subscription limits. Extracting OAuth tokens or calling the backend directly is **not** supported. **That user has no staff badge, so this isn't confirmed as Google's position.**
+- 2026-10-27: another user said the **current FAQ calls wrapping `agy` in another application unsupported on consumer plans**. No answer yet. Several similar threads are also unresolved.
+- **Our action:** (1) read the current Antigravity FAQ and ToS ourselves; (2) test technically that it works on our Pro tier; (3) if the terms forbid it, fall back to an API-key path (Gemini Managed Agents / SDK, pay per token) or keep Antigravity manual.
+
+### 2b. Managed Agents (Gemini Interactions API) — deferred
+
+- Agent `antigravity-preview-09-2026` (Gemini 3.8 Flash; the model can be changed via `agent_config`). The `-05-2026` version was deprecated on 2026-10-05.
+- `ai.interactions.create({agent, environment: "remote", input})`: one call provisions a Linux sandbox, runs the agent loop and returns the result. State persists across turns.
+- A Files API, a Credentials API (e.g. the GitHub MCP), and custom agents defined with AGENTS.md / SKILL.md.
+- Reported pricing: about $0.75 / $3.75 per million tokens (Flash). Billed by API key, separate from the subscription.
+
+### 2c. Antigravity SDK
+
+- The same harness, self-hosted. The package and class names (`pip install google-antigravity`, `AntigravityClient`) come from third-party sites only and haven't been verified.
+
+### 2d. A2A
+
+- Antigravity is reported to support Google's Agent2Agent protocol (now under the Linux Foundation). **Cursor and Claude Code do not support A2A natively**, so A2A can't be the common layer for all three yet.
+
+## 3. Claude Code (the lead)
+
+- Calls the other CLIs via Bash or PowerShell, or through a skill or MCP tool that wraps them.
+- Has its own headless mode (`claude -p`), the Agent SDK, and subagents. Has cross-session messaging between Claude sessions only.
+- No native Linear assignee integration (anthropics/claude-code#12925). Use the Linear MCP instead.
+
+## 4. Existing harnesses
+
+| Project | What it does | Notes for us |
+|---|---|---|
+| [hcom](https://github.com/aannoo/hcom) (MIT, ~650★) | Prefix-launch agents (`hcom claude`, `hcom cursor-agent`, `hcom agy`). Uses each tool's hooks and a local SQLite store, so agents can message, watch and spawn each other. Messages arrive mid-turn or wake idle agents. MQTT relay for linking machines. | **Closest to our need, local-first.** Has a Windows installer. Try it early. |
+| [Omnigent](https://github.com/omnigent-ai/omnigent) (Apache-2.0, ~11k★, alpha) | Meta-harness with claude-sdk, cursor and antigravity harnesses, a web UI with live sharing, and policies and budgets. Orchestrator "Polly" writes no code itself and sends each diff to a reviewer from a different vendor. | Heavyweight. Polly's documented sub-agents are Claude Code, Codex and Pi. **Degraded on Windows** (no filesystem or network isolation). Collects telemetry by default. |
+| [kodo](https://github.com/ikamensh/kodo) | Orchestrator LLM with Claude Code as the "smart worker" and Cursor, Codex or Gemini as "fast workers", plus architect and tester checks. | Similar design idea. |
+| ORCH | Typed task queue (todo→in_progress→review→done), retries, messaging between agents, TUI. Supports Claude Code, Codex and Cursor. | |
+| [zetbrush/multiagents](https://github.com/zetbrush/multiagents) | Agent teams coordinating via MCP. | Claude, Codex and Gemini CLI. Antigravity untested. |
+| Bernstein, Munder Difflin, Vibe Kanban, Claude Squad, Emdash, OpenCastle | Parallel runners and worktree managers. | |
+
+Directory: [bradAGI/awesome-cli-coding-agents](https://github.com/bradagi/awesome-cli-coding-agents)
+
+## 5. Shared communication channel options
+
+Ranked by fit for agent-to-agent coordination:
+
+1. **Git / GitHub issues and PRs.** Every agent can read and write it, the review loop comes built in, and everything is logged. For local mode, git worktrees and branches play the same role.
+2. **Linear.** Cursor can be assigned issues natively. Linear's own Agent can run Claude Code. For Claude Code as lead, use the Linear MCP.
+3. **Slack.** `@Cursor` and Claude in Slack both work, but bot-to-bot threads are fragile, many bots ignore other bots' messages, and there's no structured status. Better for showing progress to humans.
+4. **Google Docs / email.** Slow, no status model, needs polling. Fine as a human-readable log, but not as the control channel.
+
+**Conclusion:** for local mode, the "channel" is the filesystem and git: a task file goes in, a structured JSON result and a diff come back.
+
+## Sources
+
+- Cursor: [Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints) · [Headless CLI](https://cursor.com/docs/cli/headless) · [CLI parameters](https://cursor.com/docs/cli/reference/parameters) · [SDK announcement (MarkTechPost)](https://www.marktechpost.com/2026/04/29/cursor-introduces-a-typescript-sdk-for-building-programmatic-coding-agents-with-sandboxed-cloud-vms-subagents-hooks-and-token-based-pricing/) · [SDK env-setup gap](https://forum.cursor.com/t/cursor-cloud-agents-sdk-start-agent-setup-via-api-or-flag/161634) · [-p hang bug](https://forum.cursor.com/t/cursor-agent-p-print-headless-mode-hangs-indefinitely-and-never-returns/150246) · [Joining SpaceX](https://cursor.com/blog/joining-spacex) · [TechCrunch](https://techcrunch.com/2026/06/16/spacex-to-acquire-cursor-for-60b-in-stock-days-after-blockbuster-ipo/)
+- Antigravity: [Headless mode](https://antigravity.google/docs/cli/headless/) · [CLI reference](https://antigravity.google/docs/cli/reference/) · [I/O 2026 highlights](https://blog.google/innovation-and-ai/technology/developers-tools/google-io-2026-developer-highlights/) · [Antigravity agent (Gemini API)](https://ai.google.dev/gemini-api/docs/antigravity-agent) · [Managed agents quickstart](https://ai.google.dev/gemini-api/docs/managed-agents-quickstart) · [Updated harness](https://aistudio.google.com/learn/managed-agents-updated-harness-files-credentials) · [Orchestration/ToS forum thread](https://discuss.ai.google.dev/t/is-external-orchestration-of-antigravity-cli-headless-mode-supported-with-account-based-usage/183051)
+- Interop: [A2A vs MCP (Augment)](https://www.augmentcode.com/guides/a2a-vs-mcp) · [Cross-vendor A2A swarms](https://researchut.com/blog/taming_the_ai_agents_part_2_a2a/) · [Linear coding sessions](https://linear.app/changelog/2026-06-11-coding-sessions) · [Linear agents](https://linear.app/integrations/agents) · [claude-code#12925](https://github.com/anthropics/claude-code/issues/12925)
+- Harnesses: [hcom](https://github.com/aannoo/hcom) · [Omnigent](https://github.com/omnigent-ai/omnigent) · [kodo](https://github.com/ikamensh/kodo) · [multiagents](https://github.com/zetbrush/multiagents) · [Augment: 9 orchestrators](https://www.augmentcode.com/tools/open-source-agent-orchestrators)

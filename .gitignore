@@ -1,0 +1,5 @@
+# runtime artifacts from delegated runs
+.xagent/runs/
+sandbox/
+*.log
+.env
