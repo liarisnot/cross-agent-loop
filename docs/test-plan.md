@@ -92,3 +92,29 @@ Result:
 
 - [ ] Go / no-go per worker
 - [ ] Choose: our own `delegate` skill vs. hcom vs. a hybrid
+
+## Results log, 2026-11-09: full loop through `delegate.ps1` ✅
+
+After the permission rule `Bash(pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 *)` was added, auto mode allowed the script. **The allow rule overrides the "Create Unsafe Agents" denial.**
+
+| Step | Cursor (`add-subtract`) | Antigravity (`add-multiply`) |
+|---|---|---|
+| Initial task | ✅ 20s, correct, in scope, tests pass | ✅ 49s, correct, in scope, tests pass (left an extra trailing blank line) |
+| Review 1 via `-Resume` | ✅ 15s, applied | ❌ then ✅. The first try changed nothing and returned the old summary. Fixed in the script (below); the retry took 39s and applied both changes |
+| Lead verification | read diff + reran tests ✅ | read diff + reran tests ✅ |
+| Merge | clean | conflict in `calc.py` / `test_calc.py` (both appended at the same spot), resolved by lead; 3 tests pass |
+| Cleanup | ✅ | ✅ |
+
+Fixes made during testing:
+1. **Stale follow-up (agy):** with `--conversation`, a fixed prompt plus the same `task.md` name led the worker to assume it had already read the file. Now every run gets a unique `.xagent/task-<stamp>.md`, and resumed runs get an explicit "FOLLOW-UP… NEW instructions you have not seen" prompt.
+2. agy returns `structured_output` (schema-validated) in its JSON. The script now uses it first.
+3. `-Cleanup` failed on untracked leftovers (`__pycache__`, `.xagent/`). Now it force-removes only when the branch is merged into HEAD **and** no tracked file has uncommitted changes. Otherwise it refuses.
+4. A helper named `Git` called itself recursively (PowerShell names aren't case-sensitive). Renamed it to `Invoke-Git`.
+
+Observations:
+- Headroom showed up in diff reviews as dedup markers (`[↑3L same as msg 97 …]`) rather than lossy compression. The review was still readable. Keep the "one file at a time" rule.
+- Workers on parallel branches that touch the same file will conflict. Splitting tasks along file boundaries reduces this. The lead resolving conflicts is expected.
+- The worker CLIs produce CRLF files on this machine (git autocrlf). Harmless.
+- Calls from Claude Code ran one after another, not at the same time. True parallel runs need `run_in_background` (still to test).
+
+Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro tiers, true parallel runs in the background, a real-repo trial (e.g. MyApp).

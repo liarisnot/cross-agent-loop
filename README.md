@@ -22,7 +22,7 @@ Today the alternatives are Haiku sub-agents or manually copy-pasting instruction
 ## Status
 
 - [x] Research
-- [ ] Install CLIs and run the feasibility tests (see test plan)
+- [x] Install CLIs and run the feasibility tests (see test plan)
 - [x] Draft skill + wrapper script (v0)
-- [ ] Add permission rule, run T2-T4 edit tests through the script
-- [ ] Build skill
+- [x] Add permission rule, run T2-T4 edit tests through the script
+- [ ] T0 ToS check, background parallel runs, real-repo trial

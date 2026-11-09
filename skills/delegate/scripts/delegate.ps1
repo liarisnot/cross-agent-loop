@@ -66,7 +66,15 @@ if (-not (Test-Path $exclude) -or -not (Select-String -LiteralPath $exclude -Sim
 # ---------- cleanup mode ----------
 if ($Cleanup) {
     $notes = @()
-    if (Test-Path $wt) { Invoke-Git -C $Repo worktree remove $wt | Out-Null; $notes += "removed worktree $wt" }
+    if (Test-Path $wt) {
+        $dirtyTracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
+        & git -C $Repo merge-base --is-ancestor $branch HEAD 2>$null
+        $merged = ($LASTEXITCODE -eq 0)
+        if ($dirtyTracked.Count -gt 0) { Fail "Worktree $wt has uncommitted changes to tracked files; not removing" }
+        if (-not $merged) { Fail "Branch $branch is not merged into $Repo HEAD; not removing worktree" }
+        # merged + no tracked changes: only untracked leftovers (__pycache__, .xagent logs) remain
+        Invoke-Git -C $Repo worktree remove --force $wt | Out-Null; $notes += "removed worktree $wt"
+    }
     & git -C $Repo branch -d $branch 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $notes += "deleted merged branch $branch" }
     else { $notes += "branch $branch kept (not merged, or missing); delete manually with git branch -D if intended" }
@@ -90,19 +98,26 @@ if ($wtTop.TrimEnd('\') -ne $wt -or $wt -eq $Repo) { Fail "Safety check failed: 
 # ---------- hand-off files ----------
 $xDir = Join-Path $wt '.xagent'
 New-Item -ItemType Directory -Force $xDir, $runDir | Out-Null
-Copy-Item -LiteralPath $TaskFile -Destination (Join-Path $xDir 'task.md') -Force
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+# Unique file name per run: a resumed worker must not assume it already read it.
+$taskName = "task-$stamp.md"
+Copy-Item -LiteralPath $TaskFile -Destination (Join-Path $xDir $taskName) -Force
 $resultFile = Join-Path $xDir 'result.json'
 Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
 
-$prompt = 'You are a sub-agent working in this git worktree. Your task is in .xagent/task.md - read it and complete it. ' +
-          'Work only inside this directory. Do NOT git commit or git push. ' +
-          'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary, files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
-          'Also reply with that same JSON object as your final message.'
+$contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
+            'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary (describe what you did in THIS run), files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
+            'Also reply with that same JSON object as your final message.'
+$prompt = if ($Resume) {
+    "FOLLOW-UP from the lead reviewer: there are NEW instructions you have not seen yet in .xagent/$taskName. " +
+    'Read that file now and apply the requested changes to the current files. ' + $contract
+} else {
+    "You are a sub-agent working in this git worktree. Your task is in .xagent/$taskName - read it and complete it. " + $contract
+}
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $logBase = Join-Path $runDir "$stamp-$Agent"
 $stdoutF = "$logBase.stdout.json"; $stderrF = "$logBase.stderr.txt"
-Set-Content -LiteralPath "$logBase.prompt.txt" -Value ($prompt + "`n`n--- task.md ---`n" + (Get-Content -Raw -LiteralPath $TaskFile))
+Set-Content -LiteralPath "$logBase.prompt.txt" -Value ($prompt + "`n`n--- $taskName ---`n" + (Get-Content -Raw -LiteralPath $TaskFile))
 
 # ---------- build command ----------
 $skillDir = Split-Path $PSScriptRoot -Parent
@@ -139,7 +154,7 @@ $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
 
 # ---------- parse output ----------
 $raw = if (Test-Path $stdoutF) { Get-Content -Raw -LiteralPath $stdoutF } else { '' }
-$sessionId = $null; $finalText = $null; $cliStatus = $null
+$j = $null; $sessionId = $null; $finalText = $null; $cliStatus = $null
 if ($raw) {
     $line = ($raw -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1)
     try {
@@ -150,7 +165,8 @@ if ($raw) {
 }
 
 $result = $null
-if (Test-Path $resultFile) { try { $result = Get-Content -Raw -LiteralPath $resultFile | ConvertFrom-Json } catch { } }
+if ($Agent -eq 'agy' -and $j -and $j.PSObject.Properties['structured_output'] -and $j.structured_output) { $result = $j.structured_output }
+if (-not $result -and (Test-Path $resultFile)) { try { $result = Get-Content -Raw -LiteralPath $resultFile | ConvertFrom-Json } catch { } }
 if (-not $result -and $finalText) {
     $t = ($finalText -replace '(?s)^\s*```(json)?\s*', '' -replace '(?s)\s*```\s*$', '')
     try { $result = $t | ConvertFrom-Json } catch { }
