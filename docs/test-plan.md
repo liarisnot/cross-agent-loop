@@ -13,11 +13,17 @@ Result:
 
 ## T1: Install
 
-- [ ] Cursor CLI on Windows. The official one-liner is a bash script; check the docs for a Windows/PowerShell installer or whether WSL is needed. Then run `agent --version`.
-- [ ] Antigravity CLI: `irm https://antigravity.google/cli/install.ps1 | iex`, then `agy --version`.
+- [x] Cursor CLI on Windows: native installer `irm 'https://cursor.com/install?win32=true' | iex`. Installs to `%LOCALAPPDATA%\cursor-agent` (`agent.exe` / `cursor-agent.exe`) and adds it to user PATH. Requires Git for Windows (present).
+- [x] Antigravity CLI: `irm https://antigravity.google/cli/install.ps1 | iex`. SHA-512 verified. Installs to `%LOCALAPPDATA%\agy\bin\agy.exe` and adds it to user PATH.
 - [ ] Log in interactively with each, using the Pro accounts (no API keys).
 
-Result:
+Result (2026-11-08): both installed. `agent` 2026.11.05-86047df, reports "Not logged in". `agy` 1.5.3, no login subcommand, so authentication presumably happens on the first interactive run. Both installer scripts were read before running.
+
+Notes from `agy --help` (1.5.3) that differ from the research docs:
+- `--print-timeout` now **defaults to 0** (wait until the turn completes), not 5m. So we need our own timeout wrapper.
+- New/extra flags: `--mode accept-edits|auto|plan`, `--sandbox`, `--effort`, `--model`, `--conversation <id>` (resume by ID, which beats `--continue` for parallel workers), `--add-dir`.
+- **`agy acp`**: starts an Agent Client Protocol stdio server. Possibly a cleaner integration than parsing `-p` output. Worth evaluating.
+- `agy models` lists the models available to our account. Useful for the tier check.
 
 ## T2: Cursor headless basics
 
