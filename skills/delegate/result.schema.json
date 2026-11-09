@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["done", "blocked", "partial"] },
+    "summary": { "type": "string" },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests_run": { "type": "string" },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["status", "summary", "files_changed"]
+}

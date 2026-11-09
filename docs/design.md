@@ -71,3 +71,12 @@ Every call:
 - Does Cursor's `-p` support resuming a session, or does each iteration start cold?
 - Is the Antigravity Pro subscription allowed and functional for headless use? (Test plan T3/T4.)
 - How do Windows paths and PowerShell quoting behave for long prompts? Prefer stdin or a prompt file over argv.
+
+## v0 implementation notes (2026-11-09)
+
+- Skill: `skills/delegate/SKILL.md`. Script: `skills/delegate/scripts/delegate.ps1`. Linked into `~/.claude/skills/delegate` with a junction, so the repo copy stays the only source.
+- Invoked from the Bash tool as `pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 ...`. This exact prefix is what the permission rule allows.
+- Instead of passing the long task text as a CLI argument (Windows quoting is fragile), the script copies the task file to `<worktree>/.xagent/task.md` and gives the worker a short fixed prompt that points to it. The worker writes `.xagent/result.json`, and the script falls back to parsing the final message.
+- Cursor is started through `cursor-agent.ps1` with Windows PowerShell (same as `agent.cmd`), which avoids `cmd.exe` quoting. Iteration uses `--resume <session_id>`. Antigravity uses `--conversation <conversation_id>`.
+- On timeout, `taskkill /T` kills the whole process tree.
+- `.xagent/` goes in `.git/info/exclude` (shared by all worktrees), so the target repo's `.gitignore` is never touched.
