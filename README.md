@@ -17,6 +17,7 @@ Today the alternatives are Haiku sub-agents or manually copy-pasting instruction
 | [docs/research.md](docs/research.md) | Research findings (Nov 2026): APIs and CLIs from Cursor and Antigravity, existing harnesses, shared-channel options |
 | [docs/design.md](docs/design.md) | Draft design of the `delegate` skill and the dev loop |
 | [docs/test-plan.md](docs/test-plan.md) | Feasibility tests to run before building, including the Antigravity subscription-tier question |
+| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Licenses and attribution for vendored third-party material (Google EGM personas, Apache-2.0) |
 | `skills/delegate/` | The Claude Code skill: `SKILL.md` + `scripts/delegate.ps1` (linked into `~/.claude/skills/delegate` via a directory junction) |
 
 ## Status
