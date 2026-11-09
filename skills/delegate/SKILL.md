@@ -29,6 +29,7 @@ pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -
 | `-Model` | overrides the profile's model. Claude models and Cursor `auto` are **blocked** |
 | `-TimeoutSec` | default 900; the process tree is killed on timeout |
 | `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes council worktrees for that TaskId |
+| `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a benchmark loser or a failed attempt), saving its diff as a patch in the run logs first |
 
 To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId`. Set the Bash tool `timeout` above `-TimeoutSec`. Use `run_in_background` for long tasks.
 
@@ -65,6 +66,23 @@ The user doesn't want Claude models used through Cursor or Antigravity: Claude i
 5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split.
 6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself.
 7. **Cleanup** with `-Cleanup`. Tell the user what each worker did, what you changed during review, and anything left open.
+
+## Benchmark mode (head-to-head; off by default)
+
+Check it at the start of every delegation session: `python D:/cross-agent-loop/benchmarks/bench.py status`. The user turns it on with "benchmark the next N tasks", which you run as `bench.py on N [--profile code]`, and off with `bench.py off`. It turns itself off when the countdown hits 0.
+
+When `enabled` is true, for each **implementation** subtask (not council runs or trivial edits):
+1. Write the task file as usual. **Also write held-out acceptance tests** the workers never see. Keep them outside the task file, e.g. `.xagent/tasks/<id>.heldout_test.py` (or the repo's test-framework equivalent). They should check the behaviour the task asks for, without being stricter than the task.
+2. Run **both** agents on the identical task file and base, with TaskIds `<id>--cursor` and `<id>--agy`, using the profile from `bench.py status`. Send both calls in the same message.
+3. **First-try check, before any feedback:** in each worktree, run the worker-visible test command plus the held-out tests (copy them in temporarily, then delete them). Record pass or fail.
+4. Review both the usual way. Give each one the review rounds it needs, judged by the same standard, and count the rounds.
+   - **Token fairness:** Cursor reports cache reads separately and agy (so far) doesn't, so compare the *incl. cache* totals.
+5. Score each 1–5 on **correctness**, **instructions** (followed the task and stayed in scope) and **quality** (readable, idiomatic, fits the codebase). Pick a winner: better final result, with fewer tokens and rounds as the tie-breaker.
+6. **Merge only the winner's branch.** Then run `-Cleanup` for the winner and `-Cleanup -Discard` for the loser. Discard saves the loser's diff to `.xagent/runs/<taskId>/discarded-*.patch`, then deletes the worktree and branch.
+7. Write a judgment JSON in the format shown in `bench.py`'s docstring and run `bench.py add <file>`. It pulls the tokens and wall time from `runs.jsonl` automatically, counts down, and rebuilds `benchmarks/REPORT.md`.
+8. Include the printed comparison table in your report to the user.
+
+Every delegate run, benchmarked or not, appends its token usage to `D:/cross-agent-loop/benchmarks/runs.jsonl`, which helps track quota use.
 
 ## Council: multi-model deliberation (read-only)
 

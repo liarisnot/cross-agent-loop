@@ -128,3 +128,12 @@ Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro t
   - Grok made a **factual error** (said `numbers.Number` excludes Decimal). Gemini found a **real gap** in the lead's position (`Decimal(0)/Decimal(0)` raises InvalidOperation, which isn't a ZeroDivisionError). The lead verified both in Python.
   - Round 2 (`-Resume`, verified facts plus A/B/C positions): Grok 197s, Gemini 53s. **Q1 converged 3/3**; **Q2 stayed 2-vs-1**, a real judgment call, so it was escalated (`sandbox/.xagent/decisions/validation.md`).
 - Headroom compressed long string fields in the council output (`<<ccr:…>>`). Reading specific fields from the `.stdout.json` log works around it.
+
+## Results log, 2026-11-09: benchmark mode ✅ (trial)
+
+- `delegate.ps1` now writes normalized token usage (`input/output/reasoning/cacheRead/cacheWrite/total`) to its summary and appends every run to `benchmarks/runs.jsonl`.
+- `benchmarks/bench.py` (on/off/status/add/report/last) and `benchmarks/config.json` (flag plus countdown). `REPORT.md` is regenerated after each recorded task.
+- Trial (`add-divide`, profile `code`, held-out tests): both passed all held-out tests on the first try, with no review rounds. agy won on quality (5/5/5 vs 5/5/4). Cursor composer-2.5: 15s, 81.8k tokens incl. 70k cache reads. agy gemini-3.8-flash: 62s, 180.7k tokens, 0 cached.
+- Lesson: the first comparison said "16x fewer tokens" but left out Cursor's cache reads. The fair figure is ~2.2x. The report now shows totals both ways.
+- Added `-Cleanup -Discard` for unmerged losers (saves a patch first).
+- The trial record was moved to `benchmarks/trial-records.jsonl`, so `REPORT.md` covers real tasks only.

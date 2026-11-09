@@ -33,7 +33,8 @@ param(
     [ValidateSet('code', 'code-hard', 'council')] [string]$Profile = 'code',
     [string]$Model,
     [ValidateRange(30, 3600)] [int]$TimeoutSec = 900,
-    [switch]$Cleanup
+    [switch]$Cleanup,
+    [switch]$Discard   # with -Cleanup: remove an UNMERGED worker worktree+branch, saving its diff to the run logs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,6 +89,19 @@ if ($Cleanup) {
     }
     if ($readOnly) { Out-Summary @{ ok = $true; cleanup = $notes } }
     $wt = Join-Path $wtRoot $TaskId
+    if ($Discard) {
+        # explicit throw-away of an unmerged worker branch (e.g. benchmark loser); keep its diff in the logs
+        if (Test-Path $wt) {
+            New-Item -ItemType Directory -Force $runDir | Out-Null
+            $patch = Join-Path $runDir ("discarded-{0}.patch" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            & git -C $wt add -A -- . ':!.xagent' 2>$null | Out-Null
+            & git -C $wt diff --cached HEAD | Set-Content -LiteralPath $patch
+            Invoke-Git -C $Repo worktree remove --force $wt | Out-Null; $notes += "discarded worktree $wt (diff saved to $patch)"
+        }
+        & git -C $Repo branch -D $branch 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $notes += "deleted branch $branch" }
+        Out-Summary @{ ok = $true; cleanup = $notes }
+    }
     if (Test-Path $wt) {
         $dirtyTracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
         & git -C $Repo merge-base --is-ancestor $branch HEAD 2>$null
@@ -221,6 +235,25 @@ $stderrTail = if (Test-Path $stderrF) {
     ((Get-Content -LiteralPath $stderrF | Where-Object { $_ -notmatch 'logging before google.Init' }) | Select-Object -Last 5) -join "`n"
 } else { '' }
 
+# ---------- normalized token usage + central run log ----------
+function N($o, [string[]]$names) { foreach ($n in $names) { if ($o -and $o.PSObject.Properties[$n]) { return [int64]$o.$n } }; return 0 }
+$u = if ($j -and $j.PSObject.Properties['usage']) { $j.usage } else { $null }
+$usage = [ordered]@{
+    input      = N $u 'inputTokens', 'input_tokens'
+    output     = N $u 'outputTokens', 'output_tokens'
+    reasoning  = N $u 'reasoningTokens', 'thinking_tokens'
+    cacheRead  = N $u 'cacheReadTokens', 'cache_read_tokens'
+    cacheWrite = N $u 'cacheWriteTokens', 'cache_write_tokens'
+}
+$usage.total = $usage.input + $usage.output + $usage.reasoning
+try {
+    $benchDir = Join-Path (Split-Path (Split-Path $skillDir -Parent) -Parent) 'benchmarks'
+    New-Item -ItemType Directory -Force $benchDir | Out-Null
+    $rec = [ordered]@{ ts = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss'); repo = $Repo; taskId = $TaskId; agent = $Agent; profile = $Profile; model = $Model
+                       resumed = [bool]$Resume; seconds = [int]$sw.Elapsed.TotalSeconds; exitCode = $exitCode; timedOut = $timedOut; usage = $usage }
+    Add-Content -LiteralPath (Join-Path $benchDir 'runs.jsonl') -Value ($rec | ConvertTo-Json -Compress -Depth 4)
+} catch { }
+
 $violation = $null
 if ($readOnly) {
     $tracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
@@ -232,6 +265,7 @@ Out-Summary @{
     violation   = $violation
     profile     = $Profile
     model       = $Model
+    usage       = $usage
     agent       = $Agent
     taskId      = $TaskId
     worktree    = $wt
