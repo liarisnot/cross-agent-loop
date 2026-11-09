@@ -101,6 +101,26 @@ From the Google AI Developers Forum thread "Is external orchestration of Antigra
 - Has its own headless mode (`claude -p`), the Agent SDK, and subagents. Has cross-session messaging between Claude sessions only.
 - No native Linear assignee integration (anthropics/claude-code#12925). Use the Linear MCP instead.
 
+## 3b. Headroom proxy (our local setup)
+
+Checked 2026-11-08 against local headroom 0.42.0. The proxy listens on `127.0.0.1:8787` with backend=anthropic, mode=cache, and compression ("kompress") on.
+
+**Lead (Claude Code):** routed through headroom via `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` and `ANTHROPIC_CUSTOM_HEADERS: X-Headroom-Session-Token`.
+- ⚠️ **Main risk: tool results get compressed.** Headroom compresses large tool outputs before they reach the model (we've seen `[N words compressed…]` markers). Worker results and **diffs that Claude reviews** could reach the lead summarized or cut short. That can make review lossy.
+  - Mitigations: workers write results to files; the lead reads diffs in small chunks (per file, `git diff -- <file>`) so each chunk stays under the compression threshold; use `headroom_retrieve` when a marker appears; maybe tune `min_tokens_to_crush` / `protect_analysis_context`. Test this in T6.
+- Child processes inherit the env. A `claude -p` subprocess would also go through headroom (fine). `agent` / `agy` ignore the `ANTHROPIC_*` variables.
+- Note: the health output shows `tls.process_injected: true` and the env has `HEADROOM_PROCESS_TRUST=1`. Check whether this affects TLS for child CLIs (T6).
+
+**Cursor:** `headroom wrap cursor` only prints IDE settings: *Settings → Models → OpenAI API Key → Override Base URL*. That path only applies to **bring-your-own OpenAI-key** models. Pro-subscription traffic goes to Cursor's own backend, which isn't an OpenAI-compatible API, so **headroom can't compress our Cursor usage**. No interference, but no savings either. Whether the `agent` CLI honors a base-URL override is unknown, and probably not useful on Pro anyway.
+
+**Antigravity:** the headroom help says Antigravity "does not support third-party model providers — agent models are Google-managed." Headroom covers two things for it:
+1. **MCP registration** (`headroom mcp install --agent antigravity`): gives the agent headroom's compress/retrieve tools. Harmless and allowed.
+2. **A native `POST /v1internal:streamGenerateContent` endpoint** (the Code Assist / cloudcode endpoint that Google-login clients use), plus a `cloudcode_api_url` config. In theory `agy` traffic could be proxied. But that means sending our **subscription OAuth traffic through a third-party proxy**, which sits right next to the ToS gray zone ("calling backend services directly" is unsupported). **Don't do this until the T0 policy check is resolved.**
+
+**Bottom line:** headroom doesn't block the plan. Only the lead gets compressed. Cursor and Antigravity bypass headroom on Pro tiers. The real thing to watch is lossy compression of the results and diffs the lead reviews.
+
+Sources: [Headroom proxy docs](https://headroomlabs-ai.github.io/headroom/proxy/) · [Headroom CLI](https://headroomlabs-ai.github.io/headroom/cli/) · [Integration guide](https://headroomlabs-ai.github.io/headroom/integration-guide/) · local `headroom wrap cursor|antigravity --help`
+
 ## 4. Existing harnesses
 
 | Project | What it does | Notes for us |

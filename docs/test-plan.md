@@ -60,6 +60,16 @@ Result:
 
 Result:
 
+## T6: Headroom interaction
+
+- [ ] With headroom running, run `agent -p` and `agy -p` from a Claude Code Bash call: any TLS or cert errors (`tls.process_injected`, `HEADROOM_PROCESS_TRUST`)? If so, retry with those vars unset for the child process.
+- [ ] Compression fidelity: have a worker produce a ~300-line diff. Does the lead see it in full via `git diff`? Note any `[compressed]` markers. Compare reading it per file vs. all at once.
+- [ ] Does a structured JSON result (`.result` / `.response`) reach the lead intact?
+- [ ] Optional (only if T0 allows it): `headroom mcp install --agent antigravity` and check that `agy` sees the tools.
+- [ ] Do NOT route `agy` model traffic through `/v1internal` until the ToS question is settled.
+
+Result:
+
 ## Decision after testing
 
 - [ ] Go / no-go per worker
