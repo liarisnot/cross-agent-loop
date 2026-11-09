@@ -25,6 +25,18 @@ Notes from `agy --help` (1.5.3) that differ from the research docs:
 - **`agy acp`**: starts an Agent Client Protocol stdio server. Possibly a cleaner integration than parsing `-p` output. Worth evaluating.
 - `agy models` lists the models available to our account. Useful for the tier check.
 
+## Results log, 2026-11-08
+
+- Login: `agent status` shows "Logged in as <user email>". `agy models` works on the Google Pro account and lists Gemini 4 Argon (low/med/high), Gemini 3.8 Flash, **Claude Opus 5.5 / Sonnet 5.5**, and GPT-OSS 120B.
+- **Hello test, both ✅** (sandbox repo, read-only prompt, 180s timeout):
+  - Cursor: `cmd.exe /c agent.cmd -p --trust --output-format json "..."` gave exit 0 in ~8s. JSON: `{"type":"result","subtype":"success","is_error":false,"result":"...","session_id":"...","usage":{...}}`. **The answer is in `.result`, and `session_id` should allow resuming.**
+  - Antigravity: `agy.exe -p "..." --output-format json` gave exit 0 in ~6s. JSON: `{"conversation_id":"...","status":"SUCCESS","response":"...","num_turns":1,"usage":{...}}`. **Headless works on the Pro tier (technically). ToS (T0) is still open.**
+- Windows gotchas: in Git Bash, call `agent.cmd` via `cmd.exe //c "<windows path>"`. A Windows-style PATH append doesn't work there, so use absolute paths. `agy.exe` runs directly.
+- **Blocker found: Claude Code auto mode refuses to launch workers with approvals turned off** (`--force` / `--dangerously-skip-permissions`). It reports "Create Unsafe Agents". The `delegate` skill needs one of:
+  1. an explicit Bash permission rule in `settings.json` allowing our wrapper script (narrowest: allow only `delegate.ps1`), or
+  2. the user running the delegation step themselves, or
+  3. workers in a restricted mode: `agy --sandbox` plus `--mode accept-edits`, and Cursor without `--force` (proposes only, so Claude applies the changes). Needs testing.
+
 ## T2: Cursor headless basics
 
 Run in a throwaway repo (e.g. `sandbox/` with a tiny project):
