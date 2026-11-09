@@ -27,3 +27,7 @@ Today the alternatives are Haiku sub-agents or manually copy-pasting instruction
 - [x] Draft skill + wrapper script (v0)
 - [x] Add permission rule, run T2-T4 edit tests through the script
 - [ ] T0 ToS check, background parallel runs, real-repo trial
+
+## License
+
+Apache License 2.0 (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). Third-party material and its attribution are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
