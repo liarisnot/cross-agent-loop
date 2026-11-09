@@ -68,9 +68,10 @@ Every call:
 
 ## Open questions
 
-- Does Cursor's `-p` support resuming a session, or does each iteration start cold?
-- Is the Antigravity Pro subscription allowed and functional for headless use? (Test plan T3/T4.)
-- How do Windows paths and PowerShell quoting behave for long prompts? Prefer stdin or a prompt file over argv.
+*(Answered 2026-11-09; see test-plan.md results logs.)*
+- ~~Does Cursor's `-p` support resuming?~~ Yes: `--resume <session_id>` keeps context (verified in review round 1).
+- Antigravity Pro headless: **functional** (verified). **Allowed by the ToS: still open** (T0).
+- Long prompts on Windows: hand-off files work for write-mode workers. For agy read-only runs the content is embedded in argv with proper escaping (stdin `-p -` is ignored in plan mode). Cap 28k chars.
 
 ## v0 implementation notes (2026-11-09)
 

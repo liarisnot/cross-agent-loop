@@ -7,7 +7,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - Permission rule in `~/.claude/settings.json`: `Bash(pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 *)`.
 - Skill is linked into `~/.claude/skills/delegate` with a junction.
 - Repo is Apache-2.0 with `NOTICE` and `THIRD_PARTY_NOTICES.md`. History was rewritten to remove a personal email (pushed 2026-11-09). Still private.
-- **EGM plugin installed** (`egm@egm` 0.1.1, user scope). Its skills use the `/egm:` prefix: brainstorm, draft, review, resolve, review-loop, bootstrap, drift-report.
+- **EGM plugin installed** (`egm@egm` 0.1.1, user scope). Its skills use the `/egm:` prefix: brainstorm, draft, review, resolve, review-loop, bootstrap, drift-report. Note: EGM's own goldfish reviewers are spawned as **Claude subagents** (the `Agent` tool), so they use the user's Claude quota, not Cursor/Google. Routing them through our cross-vendor `review` profile is a later option.
 
 ## Next: design the `feature` skill using EGM itself (dogfooding)
 The user approved this plan:
@@ -36,6 +36,8 @@ Missing pieces to design:
 - routing EGM's goldfish through our cross-vendor `review` profile (optional, later).
 
 ## Open items
+- Benchmark mode is **off**; `benchmarks/REPORT.md` has 0 real tasks (the sandbox trial is in `trial-records.jsonl`). The user turns it on per real work ("benchmark the next N tasks").
+- The local backup bundle in the old session's scratchpad still contains the pre-rewrite history (with the email). Delete it once confident.
 - Google ToS on automated `agy` use with a consumer Pro plan: unresolved (research.md §2).
 - Before making the repo public: old commit SHAs may stay reachable on GitHub by direct URL until GitHub garbage-collects them. Safest is to delete and recreate the GitHub repo (or ask GitHub Support to purge) right before flipping to public.
 - Background parallel runs (`run_in_background`) not yet tested.
