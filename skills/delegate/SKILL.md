@@ -26,6 +26,7 @@ pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -
 | `-Base` | starting ref for a new worktree (default `HEAD`) |
 | `-Resume` | `sessionId` from a previous run, to continue the same conversation |
 | `-Profile` | `code` (default), `code-hard` or `council`; picks the model from `models.json` (see below) |
+| `-Persona` | with `-Profile review`: `implementation_readiness`, `comprehension` or `design_critic` (EGM goldfish personas in `personas/`) |
 | `-Model` | overrides the profile's model. Claude models and Cursor `auto` are **blocked** |
 | `-TimeoutSec` | default 900; the process tree is killed on timeout |
 | `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes council worktrees for that TaskId |
@@ -41,6 +42,7 @@ The script prints **one compact JSON line**: `ok, profile, model, violation, age
 |---|---|---|---|
 | `code` | `composer-2.5` | `gemini-3.8-flash-medium` | well-specified tasks that follow your task file (the default) |
 | `code-hard` | `grok-4.7-medium` | `gemini-4-argon-medium` | tricky bugs, bigger refactors, or a task that failed review twice on `code` |
+| `review` | `composer-2.5` | `gemini-3.8-flash-medium` | **read-only** goldfish review with `-Persona` (see Goldfish preflight below) |
 | `council` | `grok-4.7-high` | `gemini-4-argon-high` | **read-only** deliberation (see Council below) |
 
 The user doesn't want Claude models used through Cursor or Antigravity: Claude is already the lead, and those are expensive there. Never pass `-Model claude-*` or `auto`; the script refuses them. Edit `models.json` to change the mapping.
@@ -54,6 +56,7 @@ The user doesn't want Claude models used through Cursor or Antigravity: Claude i
    - **Constraints**: no new dependencies, follow existing style, etc.
    - **Acceptance criteria** and the **exact test command**.
    - Relevant context: interfaces, gotchas, links to code.
+   - **Goldfish preflight** (see below) for anything beyond a trivial task.
 3. **Delegate** with the script. Route work like this:
    - `cursor`: well-scoped implementation inside an existing codebase; UI work.
    - `agy`: exploration, tests, migrations, structured or mechanical changes.
@@ -66,6 +69,22 @@ The user doesn't want Claude models used through Cursor or Antigravity: Claude i
 5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split.
 6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself.
 7. **Cleanup** with `-Cleanup`. Tell the user what each worker did, what you changed during review, and anything left open.
+
+## Goldfish preflight & review (from Google's Elephant-Goldfish Model)
+
+You're the *elephant*: you hold the whole conversation's context, so you can't see what your task file leaves unsaid. The workers are *goldfish*: they see only the task file. Before delegating, have a goldfish with no context check the task file:
+
+```bash
+pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Repo <repo> -TaskId pre-<id> -TaskFile <task.md>
+pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -Agent agy -Profile review -Persona implementation_readiness -Repo <repo> -TaskId pre-<id> -TaskFile <task.md>
+```
+
+- **When:** tasks touching more than two files, `code-hard` tasks, interface or validation changes, and **always in benchmark mode** (so neither worker is penalized for an ambiguity in the task). Skip it for trivial edits; each preflight costs about 15–50 seconds and 15–80k cheap tokens.
+- **comprehension** paraphrases the task. If its paraphrase doesn't match what you meant, that's the most important finding. **implementation_readiness** applies the "zero-decision rule": does the task leave design choices to the worker?
+- The report goes to `reviewFile` (Markdown, findings with Blocker/Major/Nit severity). Read it from the file.
+- **Triage, don't obey blindly.** EGM's standard was written for design docs and over-asks on small tasks (exact helper names, error strings, phase plans). Fix findings where two reasonable workers could build *different behaviour or interfaces*. Ignore pure over-specification.
+- **Optional goldfish code review:** for risky diffs, put the task file plus `git diff` into one file and run `-Profile review -Persona design_critic` on the **other vendor** from the one that wrote the code. Your own review still comes first.
+- Clean up with `-Cleanup -Profile review -TaskId pre-<id>`.
 
 ## Benchmark mode (head-to-head; off by default)
 

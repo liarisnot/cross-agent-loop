@@ -137,3 +137,13 @@ Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro t
 - Lesson: the first comparison said "16x fewer tokens" but left out Cursor's cache reads. The fair figure is ~2.2x. The report now shows totals both ways.
 - Added `-Cleanup -Discard` for unmerged losers (saves a patch first).
 - The trial record was moved to `benchmarks/trial-records.jsonl`, so `REPORT.md` covers real tasks only.
+
+## Results log, 2026-11-09: goldfish preflight (EGM personas) ✅
+
+- Cursor `--mode ask` + `comprehension` persona (composer-2.5, 19s, 13k tokens): good paraphrase plus 3 Major / 3 Nit findings. Best one: the task title "add divide()" undersells a refactor that touches all four functions. `--mode plan` made composer narrate without writing a report.
+- agy `implementation_readiness` (gemini-3.8-flash-medium, 48s, 77k tokens): verdict "ready-with-fixes". It flagged the unspecified helper signature, which is exactly where the two benchmark workers diverged (single-arg vs variadic). Some findings over-specify (phases, exact error strings). Triage rule added to SKILL.md.
+- agy headless pitfalls found:
+  1. flash models run `Get-ChildItem`/`cat` to read the hand-off file. Plan mode auto-denies shell commands, and the run aborts with "no output produced". Fix: embed the file in the prompt.
+  2. `-p -` (stdin) is **not** honored with `--mode plan`: agy builds `/plan -` and the model sees a literal "-". Fix: pass the embedded prompt as an escaped argv argument (proper MSVCRT/Go quoting; capped at 28k chars).
+  3. Without `--json-schema`, plan-mode runs tend not to end with a reply. All read-only agy runs now use a schema (`review.schema.json` / `council.schema.json`).
+- Council plumbing re-verified after the change (flash-low override, 15s).

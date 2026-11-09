@@ -13,6 +13,12 @@
       "cursor": "grok-4.7-medium",
       "agy": "gemini-4-argon-medium"
     },
+    "review": {
+      "purpose": "Read-only goldfish review with an EGM persona (-Persona): task-file preflight, or a fresh-context review of a diff/design. Cheap models; free-form report.",
+      "readOnly": true,
+      "cursor": "composer-2.5",
+      "agy": "gemini-3.8-flash-medium"
+    },
     "council": {
       "purpose": "Read-only deliberation: independent positions on a design or decision question. No file edits.",
       "readOnly": true,

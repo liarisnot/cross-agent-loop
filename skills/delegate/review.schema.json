@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "paraphrase": { "type": "string", "description": "Your own-words paraphrase of what the document asks for (required by the comprehension persona; brief otherwise)" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["Blocker", "Major", "Nit"] },
+          "scope": { "type": "string", "description": "Section, line range, file or concept affected" },
+          "description": { "type": "string", "description": "The gap/risk and why it matters" },
+          "recommendation": { "type": "string" }
+        },
+        "required": ["severity", "scope", "description"]
+      }
+    },
+    "verdict": { "type": "string", "enum": ["ready", "ready-with-fixes", "not-ready"] }
+  },
+  "required": ["findings", "verdict"]
+}

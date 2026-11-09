@@ -30,7 +30,8 @@ param(
     [string]$TaskFile,
     [string]$Base = 'HEAD',
     [string]$Resume,
-    [ValidateSet('code', 'code-hard', 'council')] [string]$Profile = 'code',
+    [ValidateSet('code', 'code-hard', 'review', 'council')] [string]$Profile = 'code',
+    [ValidatePattern('^[a-z_]+$')] [string]$Persona,   # review profile: personas/<name>.md (EGM goldfish)
     [string]$Model,
     [ValidateRange(30, 3600)] [int]$TimeoutSec = 900,
     [switch]$Cleanup,
@@ -43,7 +44,13 @@ Set-StrictMode -Version Latest
 function Out-Summary([hashtable]$h) { $h | ConvertTo-Json -Depth 6 -Compress; exit 0 }
 function Fail([string]$msg) { @{ ok = $false; error = $msg } | ConvertTo-Json -Compress; exit 1 }
 function Invoke-Git { param([Parameter(ValueFromRemainingArguments)] $a) $out = & git.exe @a 2>&1; if ($LASTEXITCODE -ne 0) { throw "git $($a -join ' '): $out" }; $out }
-function Quote([string]$s) { if ($s -match '[\s"]') { '"' + ($s -replace '"', '\"') + '"' } else { $s } }
+function Quote([string]$s) {
+    # MSVCRT/Go command-line escaping: backslashes are literal unless they precede a quote
+    if ($s -and $s -notmatch '[\s"]') { return $s }
+    $s = [regex]::Replace($s, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $s = [regex]::Replace($s, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    '"' + $s + '"'
+}
 
 # ---------- resolve repo & worktree paths ----------
 $Repo = (Resolve-Path -LiteralPath $Repo).Path.TrimEnd('\')
@@ -61,6 +68,7 @@ $skillDir = Split-Path $PSScriptRoot -Parent
 $cfg = Get-Content -Raw -LiteralPath (Join-Path $skillDir 'models.json') | ConvertFrom-Json
 $prof = $cfg.profiles.$Profile
 $readOnly = [bool]$prof.readOnly
+$isReview = ($Profile -eq 'review')
 if ($readOnly) {
     # council members run side by side on a detached, throwaway worktree each
     $wt = Join-Path $wtRoot "$TaskId-$Agent"
@@ -146,7 +154,19 @@ New-Item -ItemType Directory -Force $xDir, $runDir | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # Unique file name per run: a resumed worker must not assume it already read it.
 $taskName = "task-$stamp.md"
-Copy-Item -LiteralPath $TaskFile -Destination (Join-Path $xDir $taskName) -Force
+if ($isReview) {
+    if (-not $Persona) { Fail "-Profile review requires -Persona (one of: $((Get-ChildItem (Join-Path $skillDir 'personas') -Filter *.md | Where-Object Name -ne 'README.md' | ForEach-Object BaseName) -join ', '))" }
+    $personaFile = Join-Path $skillDir "personas\$Persona.md"
+    if (-not (Test-Path $personaFile)) { Fail "Persona not found: $personaFile" }
+    $parts = @((Get-Content -Raw -LiteralPath $personaFile), "`n---`n# Caller parameters`n`nMode: REVIEW`n")
+    if ($Persona -eq 'implementation_readiness') {
+        $parts += "Target Standard (follow it):`n`n" + (Get-Content -Raw -LiteralPath (Join-Path $skillDir 'personas\implementation-readiness-standard.md'))
+    }
+    $parts += "`n---`n# Target document (review this; the repository is available read-only for context)`n`n" + (Get-Content -Raw -LiteralPath $TaskFile)
+    Set-Content -LiteralPath (Join-Path $xDir $taskName) -Value ($parts -join "`n")
+} else {
+    Copy-Item -LiteralPath $TaskFile -Destination (Join-Path $xDir $taskName) -Force
+}
 $resultFile = Join-Path $xDir 'result.json'
 Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
 
@@ -155,8 +175,12 @@ $contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
             'Also reply with that same JSON object as your final message.'
 $councilContract = 'This is a READ-ONLY consultation: do NOT create, modify or delete any files, and do not run commands that change state. ' +
             'You may read any file in this repository for context. Think independently and be candid; disagreement is valuable, agreement for its own sake is not. ' +
+            'Critique first: find the weakest points, edge cases and blind spots before affirming anything; earn your agreement. No flattery or validating adjectives. ' +
             'Reply ONLY with a JSON object with keys: position, reasoning, risks (array), objections (array), missed_considerations (array), confidence (low|medium|high), would_change_mind_if, changed_position (boolean).'
-$prompt = if ($readOnly -and $Resume) {
+$prompt = if ($isReview) {
+    "Read .xagent/$taskName. It starts with your reviewer persona and instructions, followed by the caller parameters and the target document. " +
+    'Follow the persona exactly. This is READ-ONLY: do not create, modify or delete files. Reply with your full review report as your final message.'
+} elseif ($readOnly -and $Resume) {
     "NEW ROUND from the lead: read .xagent/$taskName, which contains the other council members' positions and/or follow-up questions you have not seen yet. " +
     'Respond to their strongest arguments; concede where they are right, hold firm where they are not. ' + $councilContract
 } elseif ($readOnly) {
@@ -181,7 +205,9 @@ switch ($Agent) {
         $cliArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher,
                      '-p', '--trust', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
         # council: plan mode is read-only (analyze/propose, no edits); no --force
-        if ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--force' }
+        # review: ask mode (read-only Q&A; plan mode made composer narrate without reporting)
+        # council: plan mode (read-only analysis). Neither gets --force.
+        if ($isReview) { $cliArgs += @('--mode', 'ask') } elseif ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--force' }
         if ($Resume) { $cliArgs += @('--resume', $Resume) }
         $cliArgs += $prompt
         $env:CURSOR_INVOKED_AS = 'agent.cmd'
@@ -189,8 +215,22 @@ switch ($Agent) {
     'agy' {
         $exe = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
         if (-not (Test-Path $exe)) { Fail "Antigravity CLI not found at $exe" }
-        $schema = Join-Path $skillDir $(if ($readOnly) { 'council.schema.json' } else { 'result.schema.json' })
-        $cliArgs = @('-p', $prompt, '--output-format', 'json', '--json-schema', $schema, '--model', $Model)
+        if ($readOnly) {
+            # Headless plan mode auto-denies shell tools, and flash models like to `ls`/`cat` the hand-off file,
+            # which aborts the run. So embed the file in the prompt itself. Not via stdin: with --mode plan agy
+            # wraps the prompt as "/plan <prompt>" and takes "-" literally.
+            $embedded = ($prompt +
+                "`n`nIMPORTANT: shell/terminal commands are disabled in this session and any attempt aborts the run. Do NOT run commands. " +
+                "You may use file viewing/search tools to read repository files if needed.`n`n" +
+                "The full contents of .xagent/$taskName follow (already loaded for you; no need to open the file):`n`n" + (Get-Content -Raw -LiteralPath (Join-Path $xDir $taskName)))
+            if ($embedded.Length -gt 28000) { Fail "Embedded review/council prompt too long for the Windows command line ($($embedded.Length) chars); shorten the target document" }
+            $cliArgs = @('-p', $embedded, '--output-format', 'json', '--model', $Model)
+        } else {
+            $cliArgs = @('-p', $prompt, '--output-format', 'json', '--model', $Model)
+        }
+        # a schema is also what lets plan mode finish with a reply instead of attempting a plan write
+        $schema = Join-Path $skillDir $(if ($isReview) { 'review.schema.json' } elseif ($readOnly) { 'council.schema.json' } else { 'result.schema.json' })
+        $cliArgs += @('--json-schema', $schema)
         if ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--dangerously-skip-permissions' }
         if ($Resume) { $cliArgs += @('--conversation', $Resume) }
     }
@@ -254,6 +294,25 @@ try {
     Add-Content -LiteralPath (Join-Path $benchDir 'runs.jsonl') -Value ($rec | ConvertTo-Json -Compress -Depth 4)
 } catch { }
 
+$reviewFile = $null
+if ($isReview -and ($finalText -or $result)) {
+    # full report goes to a file: read it in sections (headroom compresses long tool output)
+    $reviewFile = "$logBase.review.md"
+    $body = $finalText
+    if ($result -and $result.PSObject.Properties['findings']) {
+        $md = @()
+        if ($result.PSObject.Properties['paraphrase'] -and $result.paraphrase) { $md += "## Paraphrase`n`n$($result.paraphrase)`n" }
+        $md += "## Verdict: $($result.verdict)`n"
+        foreach ($f in $result.findings) {
+            $md += "### [$($f.severity)] $($f.scope)`n`n$($f.description)"
+            if ($f.PSObject.Properties['recommendation'] -and $f.recommendation) { $md += "`n**Recommendation:** $($f.recommendation)" }
+            $md += ''
+        }
+        $body = $md -join "`n"
+    }
+    Set-Content -LiteralPath $reviewFile -Value "<!-- persona: $Persona | agent: $Agent | model: $Model -->`n$body"
+}
+
 $violation = $null
 if ($readOnly) {
     $tracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
@@ -275,7 +334,8 @@ Out-Summary @{
     seconds     = [int]$sw.Elapsed.TotalSeconds
     cliStatus   = $cliStatus
     sessionId   = $sessionId
-    result      = $(if ($result) { $result } elseif ($finalText) { $finalText.Substring(0, [Math]::Min(1500, $finalText.Length)) } else { $null })
+    result      = $(if ($isReview) { $null } elseif ($result) { $result } elseif ($finalText) { $finalText.Substring(0, [Math]::Min(1500, $finalText.Length)) } else { $null })
+    reviewFile  = $reviewFile
     changes     = $changes
     diffStat    = $diffStat
     stderrTail  = $stderrTail
