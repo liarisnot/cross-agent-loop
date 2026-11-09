@@ -1,0 +1,24 @@
+{
+  "_comment": "Model profiles for delegate.ps1. Always pinned: Cursor's default is 'auto' and both CLIs offer Claude models, so an unpinned worker could silently use Claude. Check model IDs with: agent --list-models / agy models",
+  "profiles": {
+    "code": {
+      "purpose": "Well-specified implementation tasks that follow the lead's instructions. Cheap and fast.",
+      "readOnly": false,
+      "cursor": "composer-2.5",
+      "agy": "gemini-3.8-flash-medium"
+    },
+    "code-hard": {
+      "purpose": "Implementation tasks needing more reasoning (tricky bugs, larger refactors), or a retry after a 'code' worker failed review twice.",
+      "readOnly": false,
+      "cursor": "grok-4.7-medium",
+      "agy": "gemini-4-argon-medium"
+    },
+    "council": {
+      "purpose": "Read-only deliberation: independent positions on a design or decision question. No file edits.",
+      "readOnly": true,
+      "cursor": "grok-4.7-high",
+      "agy": "gemini-4-argon-high"
+    }
+  },
+  "blockedModelPatterns": ["claude", "^auto$"]
+}

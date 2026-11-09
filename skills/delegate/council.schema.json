@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "position": { "type": "string", "description": "Your recommended answer/option, stated in one or two sentences" },
+    "reasoning": { "type": "string" },
+    "risks": { "type": "array", "items": { "type": "string" }, "description": "Risks or downsides of your own position" },
+    "objections": { "type": "array", "items": { "type": "string" }, "description": "Concrete objections to the other positions (if shown)" },
+    "missed_considerations": { "type": "array", "items": { "type": "string" }, "description": "Things the question/others may have overlooked" },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "would_change_mind_if": { "type": "string" },
+    "changed_position": { "type": "boolean", "description": "Round 2+: true if you changed your position since your last round" }
+  },
+  "required": ["position", "reasoning", "risks", "confidence", "would_change_mind_if"]
+}

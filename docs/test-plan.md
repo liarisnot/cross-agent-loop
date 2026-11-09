@@ -118,3 +118,13 @@ Observations:
 - Calls from Claude Code ran one after another, not at the same time. True parallel runs need `run_in_background` (still to test).
 
 Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro tiers, true parallel runs in the background, a real-repo trial (e.g. MyApp).
+
+## Results log, 2026-11-09: model profiles + council ✅
+
+- `models.json` profiles: code = composer-2.5 / gemini-3.8-flash-medium; code-hard = grok-4.7-medium / gemini-4-argon-medium; council = grok-4.7-high / gemini-4-argon-high.
+- The blocklist rejects `claude*` and Cursor `auto` (`auto` slipped through on the first test and actually ran a worker; now blocked).
+- Council test in the sandbox ("input validation + divide-by-zero policy"):
+  - Round 1: Grok 139s (put a preamble before its JSON, so the parser was fixed to extract the `{…}` span), Gemini 60s. Neither modified files in plan mode (`violation: null`).
+  - Grok made a **factual error** (said `numbers.Number` excludes Decimal). Gemini found a **real gap** in the lead's position (`Decimal(0)/Decimal(0)` raises InvalidOperation, which isn't a ZeroDivisionError). The lead verified both in Python.
+  - Round 2 (`-Resume`, verified facts plus A/B/C positions): Grok 197s, Gemini 53s. **Q1 converged 3/3**; **Q2 stayed 2-vs-1**, a real judgment call, so it was escalated (`sandbox/.xagent/decisions/validation.md`).
+- Headroom compressed long string fields in the council output (`<<ccr:…>>`). Reading specific fields from the `.stdout.json` log works around it.

@@ -30,6 +30,7 @@ param(
     [string]$TaskFile,
     [string]$Base = 'HEAD',
     [string]$Resume,
+    [ValidateSet('code', 'code-hard', 'council')] [string]$Profile = 'code',
     [string]$Model,
     [ValidateRange(30, 3600)] [int]$TimeoutSec = 900,
     [switch]$Cleanup
@@ -54,6 +55,17 @@ $wt = Join-Path $wtRoot $TaskId
 $branch = "xagent/$TaskId"
 $runDir = Join-Path $Repo ".xagent\runs\$TaskId"
 
+# ---------- model profile ----------
+$skillDir = Split-Path $PSScriptRoot -Parent
+$cfg = Get-Content -Raw -LiteralPath (Join-Path $skillDir 'models.json') | ConvertFrom-Json
+$prof = $cfg.profiles.$Profile
+$readOnly = [bool]$prof.readOnly
+if ($readOnly) {
+    # council members run side by side on a detached, throwaway worktree each
+    $wt = Join-Path $wtRoot "$TaskId-$Agent"
+    $branch = $null
+}
+
 # keep .xagent/ out of git status in every worktree (info/exclude is shared)
 $commonDir = (Invoke-Git -C $Repo rev-parse --git-common-dir | Select-Object -First 1)
 if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $Repo $commonDir }
@@ -66,6 +78,16 @@ if (-not (Test-Path $exclude) -or -not (Select-String -LiteralPath $exclude -Sim
 # ---------- cleanup mode ----------
 if ($Cleanup) {
     $notes = @()
+    # read-only council worktrees: detached, nothing to merge
+    foreach ($a in 'cursor', 'agy') {
+        $cwt = Join-Path $wtRoot "$TaskId-$a"
+        if (-not (Test-Path $cwt)) { continue }
+        $dirty = @(& git -C $cwt status --porcelain --untracked-files=no 2>$null)
+        if ($dirty.Count -gt 0) { Fail "Council worktree $cwt has tracked changes (read-only violation?); inspect before removing" }
+        Invoke-Git -C $Repo worktree remove --force $cwt | Out-Null; $notes += "removed council worktree $cwt"
+    }
+    if ($readOnly) { Out-Summary @{ ok = $true; cleanup = $notes } }
+    $wt = Join-Path $wtRoot $TaskId
     if (Test-Path $wt) {
         $dirtyTracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
         & git -C $Repo merge-base --is-ancestor $branch HEAD 2>$null
@@ -85,12 +107,21 @@ if (-not $Agent) { Fail '-Agent is required (cursor|agy)' }
 if (-not $TaskFile) { Fail '-TaskFile is required' }
 $TaskFile = (Resolve-Path -LiteralPath $TaskFile).Path
 
+if (-not $Model) { $Model = $prof.$Agent }
+if (-not $Model) { Fail "No model configured for profile '$Profile' / agent '$Agent' in models.json" }
+foreach ($pat in $cfg.blockedModelPatterns) {
+    if ($Model -match $pat) { Fail "Model '$Model' is blocked by models.json (pattern '$pat')" }
+}
+
 # ---------- create or reuse worktree ----------
 if (-not (Test-Path $wt)) {
     New-Item -ItemType Directory -Force $wtRoot | Out-Null
-    & git -C $Repo rev-parse --verify --quiet "refs/heads/$branch" | Out-Null
-    if ($LASTEXITCODE -eq 0) { Invoke-Git -C $Repo worktree add $wt $branch | Out-Null }
-    else { Invoke-Git -C $Repo worktree add -b $branch $wt $Base | Out-Null }
+    if ($readOnly) { Invoke-Git -C $Repo worktree add --detach $wt $Base | Out-Null }
+    else {
+        & git -C $Repo rev-parse --verify --quiet "refs/heads/$branch" | Out-Null
+        if ($LASTEXITCODE -eq 0) { Invoke-Git -C $Repo worktree add $wt $branch | Out-Null }
+        else { Invoke-Git -C $Repo worktree add -b $branch $wt $Base | Out-Null }
+    }
 }
 $wtTop = (Invoke-Git -C $wt rev-parse --show-toplevel | Select-Object -First 1) -replace '/', '\'
 if ($wtTop.TrimEnd('\') -ne $wt -or $wt -eq $Repo) { Fail "Safety check failed: worktree toplevel is $wtTop, expected $wt" }
@@ -108,7 +139,15 @@ Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
 $contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
             'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary (describe what you did in THIS run), files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
             'Also reply with that same JSON object as your final message.'
-$prompt = if ($Resume) {
+$councilContract = 'This is a READ-ONLY consultation: do NOT create, modify or delete any files, and do not run commands that change state. ' +
+            'You may read any file in this repository for context. Think independently and be candid; disagreement is valuable, agreement for its own sake is not. ' +
+            'Reply ONLY with a JSON object with keys: position, reasoning, risks (array), objections (array), missed_considerations (array), confidence (low|medium|high), would_change_mind_if, changed_position (boolean).'
+$prompt = if ($readOnly -and $Resume) {
+    "NEW ROUND from the lead: read .xagent/$taskName, which contains the other council members' positions and/or follow-up questions you have not seen yet. " +
+    'Respond to their strongest arguments; concede where they are right, hold firm where they are not. ' + $councilContract
+} elseif ($readOnly) {
+    "You are one member of a design council of independent AI models from different vendors, advising a lead engineer. The question is in .xagent/$taskName - read it. " + $councilContract
+} elseif ($Resume) {
     "FOLLOW-UP from the lead reviewer: there are NEW instructions you have not seen yet in .xagent/$taskName. " +
     'Read that file now and apply the requested changes to the current files. ' + $contract
 } else {
@@ -120,26 +159,26 @@ $stdoutF = "$logBase.stdout.json"; $stderrF = "$logBase.stderr.txt"
 Set-Content -LiteralPath "$logBase.prompt.txt" -Value ($prompt + "`n`n--- $taskName ---`n" + (Get-Content -Raw -LiteralPath $TaskFile))
 
 # ---------- build command ----------
-$skillDir = Split-Path $PSScriptRoot -Parent
 switch ($Agent) {
     'cursor' {
         $launcher = Join-Path $env:LOCALAPPDATA 'cursor-agent\cursor-agent.ps1'
         if (-not (Test-Path $launcher)) { Fail "Cursor CLI not found at $launcher" }
         $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $cliArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher,
-                     '-p', '--force', '--trust', '--output-format', 'json', '--workspace', $wt)
+                     '-p', '--trust', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
+        # council: plan mode is read-only (analyze/propose, no edits); no --force
+        if ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--force' }
         if ($Resume) { $cliArgs += @('--resume', $Resume) }
-        if ($Model) { $cliArgs += @('--model', $Model) }
         $cliArgs += $prompt
         $env:CURSOR_INVOKED_AS = 'agent.cmd'
     }
     'agy' {
         $exe = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
         if (-not (Test-Path $exe)) { Fail "Antigravity CLI not found at $exe" }
-        $schema = Join-Path $skillDir 'result.schema.json'
-        $cliArgs = @('-p', $prompt, '--output-format', 'json', '--json-schema', $schema, '--dangerously-skip-permissions')
+        $schema = Join-Path $skillDir $(if ($readOnly) { 'council.schema.json' } else { 'result.schema.json' })
+        $cliArgs = @('-p', $prompt, '--output-format', 'json', '--json-schema', $schema, '--model', $Model)
+        if ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--dangerously-skip-permissions' }
         if ($Resume) { $cliArgs += @('--conversation', $Resume) }
-        if ($Model) { $cliArgs += @('--model', $Model) }
     }
 }
 
@@ -168,8 +207,12 @@ $result = $null
 if ($Agent -eq 'agy' -and $j -and $j.PSObject.Properties['structured_output'] -and $j.structured_output) { $result = $j.structured_output }
 if (-not $result -and (Test-Path $resultFile)) { try { $result = Get-Content -Raw -LiteralPath $resultFile | ConvertFrom-Json } catch { } }
 if (-not $result -and $finalText) {
+    # models sometimes add a preamble or code fences; try the outermost {...} span
     $t = ($finalText -replace '(?s)^\s*```(json)?\s*', '' -replace '(?s)\s*```\s*$', '')
-    try { $result = $t | ConvertFrom-Json } catch { }
+    try { $result = $t | ConvertFrom-Json } catch {
+        $i = $finalText.IndexOf('{'); $k = $finalText.LastIndexOf('}')
+        if ($i -ge 0 -and $k -gt $i) { try { $result = $finalText.Substring($i, $k - $i + 1) | ConvertFrom-Json } catch { } }
+    }
 }
 
 $changes = @(& git -C $wt status --porcelain --untracked-files=all 2>$null | Where-Object { $_ -notmatch '\.xagent/' })
@@ -178,8 +221,17 @@ $stderrTail = if (Test-Path $stderrF) {
     ((Get-Content -LiteralPath $stderrF | Where-Object { $_ -notmatch 'logging before google.Init' }) | Select-Object -Last 5) -join "`n"
 } else { '' }
 
+$violation = $null
+if ($readOnly) {
+    $tracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
+    if ($tracked.Count -gt 0) { $violation = "read-only council member modified tracked files: $($tracked -join '; ')" }
+}
+
 Out-Summary @{
-    ok          = (-not $timedOut -and $exitCode -eq 0)
+    ok          = (-not $timedOut -and $exitCode -eq 0 -and -not $violation)
+    violation   = $violation
+    profile     = $Profile
+    model       = $Model
     agent       = $Agent
     taskId      = $TaskId
     worktree    = $wt
