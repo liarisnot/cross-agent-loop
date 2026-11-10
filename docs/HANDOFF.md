@@ -7,12 +7,12 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - Permission rule in `~/.claude/settings.json`: `Bash(pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 *)`.
 - Skill is linked into `~/.claude/skills/delegate` with a junction.
 - Repo is Apache-2.0 with `NOTICE` and `THIRD_PARTY_NOTICES.md`. History was rewritten to remove a personal email (pushed 2026-11-09). Still private.
-- **EGM plugin installed** (`egm@egm` 0.1.1, user scope). Its skills use the `/egm:` prefix: brainstorm, draft, review, resolve, review-loop, bootstrap, drift-report. Note: EGM's own goldfish reviewers are spawned as **Claude subagents** (the `Agent` tool), so they use the user's Claude quota, not Cursor/Google. Routing them through our cross-vendor `review` profile is a later option.
+- **EGM plugin installed** (`egm@egm` 0.1.1, user scope). Its skills are typed as `/egm-<name>` (e.g. `/egm-draft`) and all set `disable-model-invocation`, so only the user can start them (see `docs/decisions/001-vendor-egm-workflow.md`): brainstorm, draft, review, resolve, review-loop, bootstrap, drift-report. Note: EGM's own goldfish reviewers are spawned as **Claude subagents** (the `Agent` tool), so they use the user's Claude quota, not Cursor/Google. Routing them through our cross-vendor `review` profile is a later option.
 
 ## Next: design the `feature` skill using EGM itself (dogfooding)
 The user approved this plan:
-1. `/egm:draft` → `docs/designs/feature-skill.md`, one section at a time with the user. Input is the proposal below.
-2. `/egm:review` (5 goldfish stages), then `/egm:resolve` with the user. **The user locks the design.**
+1. `/egm-draft` → `docs/designs/feature-skill.md`, one section at a time with the user. Input is the proposal below.
+2. `/egm-review` (5 goldfish stages), then `/egm-resolve` with the user. **The user locks the design.**
 3. Build it, ideally delegating parts of the build through the `delegate` skill.
 
 ### Proposal to draft from

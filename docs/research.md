@@ -162,3 +162,55 @@ What we adopted:
 - The review output format (Blocker/Major/Nit plus a verdict) as `review.schema.json`.
 
 Not adopted (yet): the full EGM design workflow (draft → five-phase review → resolve). For larger features we could install the plugin itself (`claude plugin marketplace add google/elephant-goldfish-model`, then `claude plugin install egm@egm`) and use its `docs/designs/*.md` output as the input we break into delegate task files.
+
+## 7. Landscape survey: similar projects, 2026-11-09
+
+How much of what we build already exists. Only the delegate-skills and kodo READMEs were read in full. Everything else comes from search summaries, so treat star counts and feature claims as rough.
+
+**Delegating to another vendor's CLI, then reviewing the diff** (our `delegate` code profiles). Crowded.
+- [amElnagdy/delegate-skills](https://github.com/amElnagdy/delegate-skills) (MIT, ~2.6k★) is the closest twin.
+  - It has one `*-delegate` skill per CLI, for 19 CLIs including `cursor-agent` and `agy`. A `relay.mjs` writes `result.json` with status, exit code, the worker's report, `touchedFiles` and a session id.
+  - Follow-ups resume the session with a short "delta" brief. The relay never commits, so the lead does.
+  - It has named "lanes" (feature/tests/ui) and multi-task queues.
+  - It has no worktree management, no council and no benchmarking. Native Windows runs are recorded for cursor and agy.
+- [shinpr/sub-agents-skills](https://github.com/shinpr/sub-agents-skills) routes tasks to about 11 backends, with read-only, safe-edit and yolo permission levels.
+- Single-vendor versions for agy:
+  - [markfulton/claude-antigravity-agents](https://github.com/markfulton/claude-antigravity-agents) runs coding tasks in a worktree and reviews in a read-only sandbox.
+  - [yuting0624/antigravity-for-claude-code](https://github.com/yuting0624/antigravity-for-claude-code) includes `/antigravity:review --adversarial`.
+  - [SafeMantella/claude-code-agy-CLI-skill](https://github.com/SafeMantella/claude-code-agy-CLI-skill) is another.
+
+**Multi-model council** (our `council`/`review` profiles). Crowded.
+- [epicsagas/council](https://github.com/epicsagas/council) is a single skill covering claude, codex, agy and grok. The models answer independently, review each other anonymously (no model reviews its own answer), and a chairman writes the synthesis.
+- [WiktorStarczewski/review-council](https://github.com/WiktorStarczewski/review-council) triages findings and fixes them in a loop.
+- Others: [OSideMedia/model-council](https://github.com/OSideMedia/model-council) (Gemini via agy), [sshkeda/pi-council](https://github.com/sshkeda/pi-council), [rachittshah/llmcouncil](https://github.com/rachittshah/llmcouncil), [DantesPeak85/the-council](https://github.com/DantesPeak85/the-council), [laurencelwarde/ai-council](https://github.com/laurencelwarde/ai-council).
+
+**Running agents in parallel worktrees** (session managers, not lead-and-reviewer loops): Emdash, Vibe Kanban, Claude Squad, ccmanager, dmux, Craig, diri, Rove, brgr, Friday, Scion and CAO.
+- Friday passes work to another agent when one hits its usage limit, which is relevant to budget.
+- Concord MCP lets agents claim files, which is relevant to scheduling parallel tasks that must not touch the same files.
+- Directories: [andyrewlee/awesome-agent-orchestrators](https://github.com/andyrewlee/awesome-agent-orchestrators), [Agent-Analytics/awesome-multi-agent-orchestrators](https://github.com/Agent-Analytics/awesome-multi-agent-orchestrators), and the bradAGI list in §4.
+
+**Feature-level flow with stages** (our planned `feature` skill).
+- Spec-driven frameworks: Superpowers, GitHub Spec Kit, BMAD, OpenSpec and GSD ([comparison, Oct 2026](https://felipefontoura.com/articles/spec-driven-development-tools-compared/)).
+  - They cover brainstorm → spec → plan → tasks → build, with gates.
+  - Every stage runs on Claude (sub)agents only, with no cross-vendor workers.
+  - In that head-to-head test, Superpowers skipped its own brainstorm stage.
+- [kodo](https://github.com/ikamensh/kodo) (MIT, ~140★) is the closest to the `feature` skill.
+  - Flow: intake/plan → architect survey → workers (Claude as "smart", Cursor/Codex/Gemini as "fast"), in parallel worktrees → tester and architect review with a rejection loop.
+  - Runs are saved on disk and can be resumed.
+  - Cost is tracked in two buckets: real API spend and subscription use counted as "virtual".
+  - Weak points: the README admits there is no independent verification gate, and agents run with permission checks bypassed.
+
+**What is still distinct about ours:**
+- An EGM-reviewed design that the user locks before any code exists.
+- Native Windows/PowerShell, and workers are other vendors only, to protect the Claude quota.
+- Benchmark mode with trial records.
+- A feature integration branch, plus a final check of the whole diff against the design.
+
+**Worth borrowing:**
+- From delegate-skills: the `touchedFiles` field in results, delta-brief resume, and named lanes.
+- From kodo: the real-versus-virtual cost split.
+- From Spec Kit: the `tasks.md` shape, for our plan stage.
+- From Concord MCP: file claims, for scheduling parallel work.
+- From epicsagas/council: anonymized peer review between models before the synthesis.
+
+Sources: the links above, plus the [Augment orchestrator roundup](https://www.augmentcode.com/tools/open-source-agent-orchestrators) and [Nimbalyst on parallel agent tools](https://nimbalyst.com/blog/best-tools-for-running-parallel-ai-coding-agents/).
