@@ -5,3 +5,7 @@ sandbox/
 .env
 sandbox.xagent/
 *.xagent/
+
+# Local tool state
+.headroom/
+.serena/
