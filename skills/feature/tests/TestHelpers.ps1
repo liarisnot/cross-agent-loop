@@ -66,3 +66,41 @@ function Test-Schema {
     $schemaFile = Join-Path $PSScriptRoot "../schemas/$SchemaName.schema.json"
     Test-Json -Json $Json -SchemaFile $schemaFile -ErrorAction SilentlyContinue
 }
+
+function Assert-FeatureOk {
+    param($Result)
+    if ($Result.ExitCode -ne 0 -or -not $Result.Json -or -not $Result.Json.ok) {
+        $err = if ($Result.Json) { $Result.Json.error } else { $Result.Raw }
+        throw "feature command failed: $err"
+    }
+    return $Result.Json
+}
+
+function New-FeatureAtStage {
+    param(
+        [string]$Repo,
+        [string]$Name,
+        [string]$Stage
+    )
+    $common = @{ '-Repo' = $Repo; '-WorkingDirectory' = $Repo; '-Name' = $Name }
+    Assert-FeatureOk (Invoke-Feature @('new', '-Name', $Name, '-Repo', $Repo) -WorkingDirectory $Repo)
+    if ($Stage -eq 'design') { return }
+    if (@('design-review', 'plan', 'build', 'signoff') -contains $Stage) {
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'design-review', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    }
+    if (@('plan', 'build', 'signoff') -contains $Stage) {
+        $designPath = Join-Path $Repo "docs/designs/$Name.md"
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# design' -NoNewline
+        Assert-FeatureOk (Invoke-Feature @('commit-design', '-Section', 'intro', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'design-locked', '-Quote', 'lock it', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'plan', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    }
+    if (@('build', 'signoff') -contains $Stage) {
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'plan-approved', '-Quote', 'approve', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'build', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    }
+    if ($Stage -eq 'signoff') {
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'signoff', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    }
+}
