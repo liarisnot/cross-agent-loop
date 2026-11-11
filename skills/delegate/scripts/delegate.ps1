@@ -54,6 +54,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Decode git's output as UTF-8, not the console code page (437 here), so non-ASCII file names survive (dogfood D14).
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Out-Summary([hashtable]$h) { $h | ConvertTo-Json -Depth 6 -Compress; exit 0 }
 function Fail([string]$msg) { @{ ok = $false; error = $msg } | ConvertTo-Json -Compress; exit 1 }

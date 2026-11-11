@@ -35,7 +35,7 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Repo D:/pa
 | `-TargetFile` | `<path>[,<path>]`: files not in the commit (a diff, a draft) copied into the worktree's `.xagent/`; the prompt names them |
 | `-KeepRuleFiles` | read-only runs remove `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.cursor/` and `.agents/` (at any depth) so the reviewer doesn't load project instructions. Pass this when rule files are part of what's reviewed |
 | `-Feature` | the `feature` skill's feature name, written to `runs.jsonl` and the pid file |
-| `-TimeoutSec` | default 900; the process tree is killed on timeout |
+| `-TimeoutSec` | default 900; the process tree is killed on timeout. **A timed-out run loses its session** (Cursor writes `session_id` and usage only at the end), so it can't be resumed: size this to the work, counting how long the test suite takes. To continue after a timeout, rerun the same `-TaskId` without `-Resume`: the worktree and its uncommitted changes are reused; hand over the original task with `-TargetFile` and say what's left |
 | `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes every read-only worktree `<TaskId>-<label>`, restoring rule files first. Pass `-Repo` |
 | `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a failed attempt), saving its diff as a patch in the run logs first |
 
@@ -67,6 +67,7 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
    - **Constraints**: no new dependencies, follow existing style, etc.
    - **Acceptance criteria** and the **exact test command**. You'll run it from Bash, so quote PowerShell one-liners with single quotes (`pwsh -NoProfile -c '…$r…'`); in double quotes Bash expands `$` first. For a longer check, write a `.ps1` and hand it over with `-TargetFile` (the worker runs `pwsh -NoProfile -File .xagent/<name>.ps1`).
    - If the task adds a helper nothing can call yet, have it tested against a stub, or its bugs wait for the next task.
+   - If the test suite is slow (minutes), give the worker a command that runs a subset while iterating (for Pester, a `New-PesterConfiguration` with `Filter.FullName`), and say to run the full suite once at the end.
    - Relevant context: interfaces, gotchas, links to code.
    - **Goldfish preflight** (see below) for anything beyond a trivial task.
 3. **Delegate** with the script. Start with `-Profile code`; escalate to `code-hard` only when needed. If a worker reports a usage limit, stop and tell the user (there is no second provider).
