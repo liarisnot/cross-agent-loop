@@ -190,7 +190,7 @@ function Get-EffectiveStage {
     if ($stored -eq 'abandoned') { return 'abandoned' }
     $branch = "feature/$BranchName"
     $isAncestor = Test-MergeBaseIsAncestor $Repository $branch 'main'
-    if ($null -eq $isAncestor) { return $null }
+    if ($null -eq $isAncestor) { return $stored }   # no main branch: nothing can be done yet
     if ($isAncestor -and $Feature.gates.PSObject.Properties['signed-off']) {
         return 'done'
     }
