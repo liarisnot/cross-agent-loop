@@ -12,6 +12,12 @@ This repository includes material from the following third-party projects.
   - `skills/delegate/personas/comprehension.md`
   - `skills/delegate/personas/design_critic.md`
   - `skills/delegate/personas/implementation-readiness-standard.md`
+  - `skills/delegate/personas/zoom_out.md`
+  - `skills/delegate/personas/inventive_catalyst.md`
+  - `skills/delegate/personas/codebase_details.md`
+  - `skills/delegate/personas/structural.md`
+  - `skills/delegate/personas/style.md`
+  - `skills/delegate/personas/zoom-out-standard.md` (upstream `resources/document_standards/zoom-out-standard.md`)
 - **Upstream NOTICE file:** none at the retrieved commit.
 - **How they are used:** at runtime, `skills/delegate/scripts/delegate.ps1` reads these files and adds caller parameters and a target document before sending them to a model. The files themselves are distributed unchanged. If any of them is modified in the future, the modified file must carry a prominent notice saying so (Apache-2.0 §4(b)), and this list must be updated.
 

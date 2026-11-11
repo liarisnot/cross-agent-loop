@@ -2,6 +2,8 @@
 
 *Status: draft. Pending results of [test-plan.md](test-plan.md).*
 
+> **Superseded in part (2026-11-10).** The Antigravity (`agy`) worker and council paths described below are no longer used: Google's FAQ forbids wrapping `agy` on consumer plans (`test-plan.md` T0). All models now run through the Cursor CLI. See [`designs/feature-skill.md`](designs/feature-skill.md), "Changes to `delegate` in v1".
+
 ## Goal
 
 Claude Code (the lead) runs the dev loop:

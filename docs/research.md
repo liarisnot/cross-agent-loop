@@ -6,7 +6,7 @@
 
 - Cursor and Antigravity both have **headless CLIs with JSON output**, so Claude Code can call them as sub-agents through Bash. This is the path we're taking (local only).
 - Both also have **cloud APIs** (Cursor Cloud Agents API, Gemini Managed Agents). We're deferring these for now.
-- **Open question:** whether automated wrapping of `agy` is allowed on a consumer Google subscription (see [Antigravity caveat](#subscription--tos-caveat-important-for-us)).
+- **Resolved 2026-11-10: not allowed.** Google's FAQ says wrapping `agy` inside third-party agents, Claude Code included, is unsupported on consumer plans (see [Antigravity caveat](#subscription--tos-caveat-important-for-us) and `docs/test-plan.md` T0). The project now runs every model through the Cursor CLI instead (§1e).
 - Existing harnesses already do this: **hcom** (local messaging between agents) and **Omnigent** (full meta-harness). Worth trying before or alongside building our own.
 
 ---
@@ -51,6 +51,30 @@ Context: SpaceX acquired Anysphere (Cursor) in an all-stock deal valued at $60B.
 
 - Slack (`@Cursor`), GitHub, Linear (assign an issue to Cursor), the CLI's `&` prefix (sends to a cloud agent), and an iOS app.
 
+### 1e. Models and pricing through the Cursor CLI (checked 2026-11-10)
+
+*   **Models offered.** Besides Composer and Grok, `--list-models` offers third-party families on the user's account:
+    *   Gemini: `gemini-4-argon-*`, `gemini-4-carbon-*`, `gemini-3.8-flash-*`
+    *   GPT-5.x and Codex
+    *   Kimi K3
+    *   GLM 5.2: `glm-5.2-high` and `glm-5.2-max` only, with no lower effort
+    *   DeepSeek V4.1 Flash
+    *   Claude, which stays blocked
+*   **Grok 4.7** comes in `low`, `medium`, `high` and `xhigh`, each also as `-fast` (2× price).
+*   **List prices** per 1M tokens, input / cache read / output, from [cursor.com/docs/models](https://cursor.com/docs/models):
+
+    | Model | Price |
+    |---|---|
+    | Grok 4.7 | $2 / 0.5 / 6 |
+    | Composer 2.5 | $0.5 / 0.2 / 2.5 |
+    | Gemini 4 Argon | $2 / 0.1 / 10 |
+    | GLM 5.2 | $1.4 / 0.26 / 4.4 |
+    | DeepSeek V4.1 Flash | $0.3 / 0.006 / 1.2 |
+    | Kimi K3 | $3 / 0.3 / 15 |
+    | GPT-5.3 Codex | $1.75 / 0.175 / 14 |
+
+*   **Legacy Pro ($20) has two monthly pools.** Cursor Models (Grok, Composer) and Other Models (third-party). The Spending page shows them as a percentage used. The pool sizes and rough rates are in `docs/test-plan.md`.
+
 ## 2. Google Antigravity
 
 Timeline: v1 launched 2025-11-18. **Antigravity 2.0** launched at I/O on 2026-05-19 with a standalone desktop app (successor to the Agent Manager), the `agy` CLI, an SDK, and Managed Agents in the Gemini API. The `agy` CLI **replaced Gemini CLI**, which sunset for consumer tiers on 2026-06-18. It kept Gemini CLI's skills, hooks and subagents, and renamed extensions to plugins.
@@ -79,6 +103,11 @@ From the Google AI Developers Forum thread "Is external orchestration of Antigra
 - 2026-09-15: a reply from user "Engineer760" said **yes**. Running the official `agy` binary as a child process with its cached Google credentials is supported and draws on the same subscription limits. Extracting OAuth tokens or calling the backend directly is **not** supported. **That user has no staff badge, so this isn't confirmed as Google's position.**
 - 2026-10-27: another user said the **current FAQ calls wrapping `agy` in another application unsupported on consumer plans**. No answer yet. Several similar threads are also unresolved.
 - **Our action:** (1) read the current Antigravity FAQ and ToS ourselves; (2) test technically that it works on our Pro tier; (3) if the terms forbid it, fall back to an API-key path (Gemini Managed Agents / SDK, pay per token) or keep Antigravity manual.
+- **Outcome (2026-11-10):**
+  - (1) Done: the FAQ forbids it. The quotes are in `docs/test-plan.md` T0, and the September forum "yes" is superseded.
+  - (2) Done: it works technically.
+  - (3) The user chose to keep Antigravity manual (no per-token API key) and to move all automated models to the Cursor CLI.
+  - **The `delegate` skill's agy path must not be used.**
 
 ### 2b. Managed Agents (Gemini Interactions API) — deferred
 

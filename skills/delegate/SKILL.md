@@ -5,6 +5,13 @@ description: Delegate coding subtasks from Claude Code (as lead programmer) to C
 
 # delegate: cross-agent dev loop
 
+> **⚠️ Antigravity (`-Agent agy`) must not be used (2026-11-10).**
+>
+> *   **Why.** Google's FAQ forbids wrapping `agy` inside third-party agents, Claude Code included, on consumer plans (`docs/test-plan.md` T0 in the cross-agent-loop repo).
+> *   **What to do instead.** Use `-Agent cursor` for every role. Pass `-Model` for the non-Cursor seats: `glm-5.2-high` for the judgement and council seat, and `deepseek-v41-flash-1017-medium` for readiness.
+> *   **Two Cursor runs at once need different `-TaskId`s.** The worktree is named `<TaskId>-<agent>`, so the same id would collide.
+> *   **The routing and council text below still describes agy.** It gets rewritten in the `feature` build (see `docs/designs/feature-skill.md`).
+
 You are the **lead**. You plan, split the work, delegate, review and merge. Workers are the Cursor CLI (`cursor`) and the Antigravity CLI (`agy`). They run headless, with full tool permissions, but **only** inside a dedicated git worktree created by `scripts/delegate.ps1`.
 
 **Never call `agent` / `agy` directly with `--force` / `--dangerously-skip-permissions`. Always go through the script.** Only the script is allow-listed.

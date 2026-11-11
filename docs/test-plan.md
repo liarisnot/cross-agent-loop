@@ -166,3 +166,12 @@ Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro t
     *   **GLM 5.2:** 4 review runs took Other Models from 0% to 3%, so about 0.75% per run, or roughly 130 runs a month.
     *   **Grok 4.7:** about 7 review runs plus some Composer took Cursor Models to 4%, so about 0.5% per Grok run.
     *   **To refine:** re-check after the next review.
+
+## Pitfalls and measurements from the feature-design review (2026-11-10)
+
+*   **Two Cursor runs with the same `-TaskId` collide.** The read-only worktree is named `<TaskId>-<agent>`. Give each concurrent run its own id. The `feature` design adds `-Seat` for council seats.
+*   **agy's read-only path embeds the target in the command line**, and fails above 28,000 characters (a 795-line design gave 66,915). Passing a short task file that names the target's path worked. Cursor reviewers read targets by path with no problem.
+*   **The effort level barely matters for review lenses.** `grok-4.7-medium` took 421 s and about the same tokens as `grok-4.7-high` (414–632 s). Most of the time and tokens go into reading files. Grok reads about 3× more input than GLM.
+*   **GLM 5.2 as a reviewer:** 49–79 s and 32k–44k tokens (excluding cache reads) per lens, against 400–630 s and 157k–176k for Grok. Its findings were comparable, with one invented citation (a quoted phrase not in the doc) out of about 23 findings. The lead's triage should verify quotes.
+*   **The fourth review round brought churn.** Fixes added in earlier rounds generated new findings, which is EGM's signal to stop adding mechanism. The intermediate zoom-out (stage 8) then cut it. Expect this on large designs, and run stage 8 before a fourth critic round.
+*   **`git commit -am` picks up `benchmarks/runs.jsonl`**, which is still tracked and changes on every run. Stage files explicitly until it moves to `%LOCALAPPDATA%\xagent\`.
