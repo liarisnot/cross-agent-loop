@@ -1,3 +1,5 @@
+Status: resolved (2026-11-10)
+
 # Goldfish annotated review report: Stage 7 (Critic Review), round 1
 
 **Target:** `docs/designs/feature-skill.md` at `6bdf3c8`. FeatureRange is lines 1–477. The Stage 6 comprehension findings on the whole file are carried in, at the author's request.
@@ -155,3 +157,25 @@
     *   CO15: name the `*.review.md` pattern exactly.
 *   **DECLINE:**
     *   DC-n6 (Open Questions): it resolves itself once F1, F5 and F7 land.
+
+## Resolution (interactive breakdown with the author, 2026-11-10)
+
+*   **E1: the author decided.**
+    *   No `lead` profile: Claude never writes feature code from the plan.
+    *   Fix-ups are a judgement call, with "about 3 files and 30 lines" as a guideline, not a cap. Each is logged, and `verify` runs again afterwards.
+    *   Deploy steps: workers never do them. The lead may, with the user's approval and using secret references only. v1 has no deploy stage.
+*   **E2: the author decided, after the T0 check found that Google's FAQ forbids wrapping `agy` on consumer plans.**
+    *   No `agy` automation, and no per-token API key.
+    *   Everything runs through the Cursor CLI. Workers: Composer 2.5 and Grok 4.7 high. Judgement and council: Grok 4.7 high and GLM 5.2. Readiness: DeepSeek V4.1 Flash.
+    *   The kind table and rebalance were dropped. A slimmer `outcomes.jsonl` was kept. Cooldowns are per Cursor pool.
+*   **E3: the author decided.** `status` shows the feature's token total and estimated third-party dollars. No budget stop.
+*   **F1–F25: accepted**, with these changes:
+    *   **F16:** plus the plan-mode handling.
+    *   **F17:** the logs moved to `%LOCALAPPDATA%\xagent\` (option b). An Installation section was added to v1. Plugin packaging comes after v1.
+    *   **F11:** worker sandboxing became the high-priority first item after v1.
+    *   **F24:** was already applied.
+*   **C1: the contest was upheld.** "Rejected by author:" stays, with links added for F, I and J.
+*   **C2: the author overruled the contest.** The "remaining risk" line was dropped.
+*   **Nits: all proposed fixes were applied** (by the author's instruction). DC-n6 was declined, as it resolves itself.
+
+The design doc was rewritten as a whole (commit `94c32fb`) to apply all of these.
