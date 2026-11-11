@@ -22,7 +22,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
    - Pass the doc by file path. Task-file templates are in `.xagent/tasks/fr-s8.md`.
 2. **Resolve the findings with the user, then the user locks the design** (Status: Approved).
 3. **Build it**, in the order the design gives:
-   - **Step 1: the `delegate` changes.** This also commits the six personas copied for this review, which are now untracked in `skills/delegate/personas/`.
+   - **Step 1: the `delegate` changes.** The six personas copied for this review are already committed, and listed in `THIRD_PARTY_NOTICES.md`.
    - **Step 2 onward:** delegate parts of the build where it makes sense.
 4. **Since the vendor change, the stage 7 critic hasn't run on a clean round.** It ended at "accept and proceed" because of churn, and stage 8 then cut that machinery. Recommended: a fresh stage 7 pass **before** stage 9:
    - **Start a new convergence count**: 2 clean rounds in a row, with a cap of 5.
