@@ -24,7 +24,13 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Build it**, in the order the design gives:
    - **Step 1: the `delegate` changes.** This also commits the six personas copied for this review, which are now untracked in `skills/delegate/personas/`.
    - **Step 2 onward:** delegate parts of the build where it makes sense.
-4. **Since the vendor change, the stage 7 critic hasn't run on a clean round.** It ended at "accept and proceed" because of churn, and stage 8 then cut that machinery. Stage 9's readiness check covers the implementation half. Consider one more `design_critic` pass before locking.
+4. **Since the vendor change, the stage 7 critic hasn't run on a clean round.** It ended at "accept and proceed" because of churn, and stage 8 then cut that machinery. Recommended: a fresh stage 7 pass **before** stage 9:
+   - **Start a new convergence count**: 2 clean rounds in a row, with a cap of 5.
+   - **Keep the settled list:** "Rejected by author", the heading names, the sync stub, the single-lens sign-off, and the invented "trickiest step" citation. It stays in the lead's triage and is never given to reviewers.
+   - **Re-measure FeatureRange.** The `## Detailed Implementation Plan` heading moved, so the old `fr-s7r3-*.md` task files say lines 1–682, which is stale.
+   - **Use new task ids** (`fr-s7r4-dc`, `-st`, `-sy`).
+   - **Seats:** `design_critic` and `style` on GLM 5.2, and `structural` on `grok-4.7-medium`.
+   - **If the pass edits the doc,** re-run stage 8 once before stage 9.
 
 ## Open items
 - **`benchmarks/runs.jsonl` is still tracked.** The design moves it to `%LOCALAPPDATA%\xagent\` in build step 1. Until then, don't commit runs from private repos.
