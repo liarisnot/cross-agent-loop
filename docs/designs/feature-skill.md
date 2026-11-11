@@ -37,13 +37,13 @@ Similar tools exist (see [research §7](../research.md)). The spec-driven framew
 
 *   **G1. Plain-language entry.** Every v1 stage and the status query start from a plain-language request. No step requires the user to type a slash command or a parameter. Pass: each phrase in the entry-point table, said in a fresh session, starts the right stage.
 *   **G2. Resumable from disk.** A fresh session that knows nothing about the feature can answer "where are we?". It gives the current stage, what is done, what is waiting on the user, and the next action. It reads only files in the repo. Pass: the answer is correct after `/clear`, for a feature paused at each stage.
-*   **G3. Recorded user gates.** The flow stops at four gates: design locked, plan approved, each build phase checked in, and final sign-off. It does not move past a gate until the user approves. Each approval is written to the feature's state with a timestamp.
+*   **G3. Recorded user gates.** The flow stops at three gates: design locked, plan approved, and final sign-off. It does not move past a gate until the user approves. Each approval is written to the feature's state with a timestamp. During the build, the flow also stops on problems. It stops after each phase only when the user has turned on phase check-ins for that feature.
 *   **G4. Isolated build.** All code for a feature lands on one integration branch, `feature/<name>`. `main` changes only after the user signs off. Coding tasks go to Cursor or Antigravity workers through `delegate`. Claude reviews and merges, and does not write the feature code itself, except for small fix-ups it records.
 *   **G5. Safe parallelism.** Two tasks run at the same time only if their declared file sets do not overlap and neither depends on the other. Otherwise they run one after another.
 *   **G6. Final check against the design.** Before sign-off, the whole feature diff is checked against the locked design for missing, extra or changed behaviour, and the user sees the result.
 *   **G7. Council on hard problems.** The skill brings in the existing multi-model council (`delegate`'s `council` profile: Grok via Cursor and Gemini Argon via agy, with Claude as lead) at three points. It is not a separate stage.
     *   **Design or plan:** the skill offers it for a decision that is hard to reverse or contested.
-    *   **Build:** it convenes one automatically when a task fails review twice, or when a task is tagged `hard` in the plan.
+    *   **Build:** it convenes one automatically when a `code` task fails review twice, or a `code-hard` task fails review once.
     *   **Any stage:** it convenes one when the user asks.
 
     It does not convene one for routine work, because a council costs about 1–3 minutes plus frontier-model tokens on both subscriptions. Each council's outcome is recorded in the feature's decisions.
@@ -55,8 +55,9 @@ Similar tools exist (see [research §7](../research.md)). The spec-driven framew
 *   **Cloud or remote agents.** Workers run locally through the `cursor-agent` and `agy` CLIs only, as `delegate` does today.
 *   **macOS or Linux support.** v1 targets Windows and PowerShell 7, matching `delegate.ps1`.
 *   **Several people on one feature.** One user and one lead session own a feature at a time. No locking between machines.
+*   **More than one active feature (side mode).** Deferred. v1 runs one feature at a time, in the user's checkout. A side mode that runs a second feature in its own worktree is in Future Improvements.
 *   **Merging to `main` without the user.** The skill never merges to `main` or pushes without explicit sign-off.
-*   **Replacing EGM's review content.** We reuse EGM's personas and standards. Changing how a goldfish reviews is out of scope. Where reviewers run (Claude or another vendor) is an open question.
+*   **Replacing EGM's review content.** We reuse EGM's personas and standards. Changing how a goldfish reviews is out of scope.
 
 ## Open Questions
 
@@ -98,7 +99,7 @@ None open. Q1 (active feature), Q2 (state versus git), Q3 (goldfish vendor) and 
 *   **Given**: The design for `export` is locked.
 *   **When**: The user says "plan it".
 *   **Then**:
-    *   The skill writes a plan with phases and tasks. Each task has its dependencies, its declared file set, a test command and a profile (`code`, `code-hard`, or tagged `hard`).
+    *   The skill writes a plan with phases and tasks. Each task has its dependencies, its declared file set, a test command and a profile (`code`, `code-hard` or `lead`).
     *   It runs a goldfish implementation-readiness check on the plan and fixes the findings.
     *   It asks for the plan-approval gate.
     *   It asks whether to check in after every phase. The default is to stop only on problems.
@@ -151,7 +152,7 @@ stages/*.md     scripts/feature.ps1   egm/ (vendored EGM workflow,
    |                 |                        |
    v                 v                        v
 delegate.ps1  -->  Cursor / agy workers  (code, code-hard, review,
-(existing)         in worktrees           review-strong, council profiles)
+(existing)         in worktrees           council profiles)
 ```
 
 *   **Router (`skills/feature/SKILL.md`).** It is the only entry point and has one description. On every invocation it does four things in order:
@@ -169,15 +170,17 @@ delegate.ps1  -->  Cursor / agy workers  (code, code-hard, review,
     *   `plan`: import and check the plan.
     *   `schedule`: list the tasks that are ready to run now.
     *   `task`: update one task's runtime fields.
+    *   `verify`: check a finished worker run's scope and run its test.
+    *   `lens`: record the progress of one goldfish lens run in a review.
+    *   `cooldown`: mark a vendor as out of quota for a while.
     *   `merge`: merge a task's branch, adding its `Xagent-Task` trailer.
     *   `decision`: append to the decision log.
     *   `wait`: record what the flow is waiting on.
     *   `checkin`: set the check-in mode.
-    *   `promote`: make a side feature the main-mode feature.
     *   `finish`: merge the feature into `main` after sign-off.
 
     The full interface is in the Detailed Implementation Plan.
-*   **Vendored EGM (`skills/feature/egm/`).** A copy of the EGM skill text, personas and standards that our stages use, pinned and kept in sync per [decision 001](../decisions/001-vendor-egm-workflow.md).
+*   **Vendored EGM (`skills/feature/egm/`).** A copy of the EGM skill text and standards that our stages use, pinned per [decision 001](../decisions/001-vendor-egm-workflow.md). The goldfish personas live with the other personas in `skills/delegate/personas/`.
 *   **`delegate.ps1` (existing).** Runs every worker, goldfish and council run. `feature` adds no new way to launch an agent.
 
 ### Stages and gates
@@ -213,22 +216,23 @@ The skill checks these in order:
 3.  The only feature in progress, if there is exactly one.
 4.  Otherwise, it asks the user.
 
-### Main mode and side mode
+### Where the feature runs (one active feature, in the user's checkout)
 
-*   **Main mode (default).** `feature.ps1 new` refuses if the working tree has uncommitted changes, so the user commits or stashes first. Otherwise it runs `git switch -c feature/<name> main` in the user's repo folder. Only one feature can be in main mode at a time.
-*   **Side mode (on request: "side feature", "try this in a worktree").** `feature.ps1 new -Side` runs `git worktree add <repo>.xagent/_feature-<name> -b feature/<name> main`. The `_` prefix cannot collide with a `delegate` task id, because task ids allow only `[a-z0-9-]`. The user can continue from the same session (naming the feature) or open a second Claude Code session in that folder.
-    *   A side feature can be promoted to main mode later. The worktree is removed, and the user's checkout switches to the branch.
-*   **In both modes:**
-    *   Local state lives in the main repo's `.xagent/features/<name>/`.
-    *   Workers are launched with `-Repo <main repo> -Base feature/<name>`, so worker worktrees and run logs stay in one place.
-    *   The lead merges worker branches in whichever folder has `feature/<name>` checked out.
-*   **Overlap warning.** At plan approval, the skill warns if the plan's declared files overlap another in-progress feature's files, since the second one to reach `main` would conflict.
+*   **Start.** `feature.ps1 new` refuses if:
+    *   the working tree has uncommitted changes (the user commits or stashes first);
+    *   another feature is active (not `done` or `abandoned`).
+
+    Otherwise it runs `git switch -c feature/<name> main` in the user's repo folder.
+*   **Location.** Local state lives in `<repo>/.xagent/features/<name>/`.
+*   **Workers.** They are launched with `-Repo <repo> -Base feature/<name>`. The lead merges worker branches in `<repo>`, which has `feature/<name>` checked out.
+*   **Side work.** While a feature is active, side work happens outside the skill, for example by hand on another branch after committing or stashing. The checkout must be back on `feature/<name>` before the skill continues. Reconcile checks this and asks the user to switch back if it isn't.
+*   **Side mode** (a second feature in its own worktree) was designed and then deferred (see Alternative F and Future Improvements). The `mode` field is kept in `feature.json`, always `main` in v1, so side mode can be added without migrating records.
 
 ### State model (split: committed records plus local runtime state)
 
 Committed on `feature/<name>`, in `docs/features/<name>/`:
 
-*   `feature.json`: name, mode, base, stage, check-in mode, path to the design doc, gates (each with a timestamp and the user's quote), and the plan's phases and tasks (id, title, depends-on, declared files, test command, profile, `hard` tag). The script is the only writer.
+*   `feature.json`: name, mode, base, stage, check-in mode, path to the design doc, gates (each with a timestamp and the user's quote), and the plan's phases and tasks (id, title, depends-on, declared files, test command, profile, vendor, brief). The script is the only writer.
 *   `plan.md`: the plan as the user reviews it, in prose plus a task table generated from `feature.json`.
 *   `decisions.md`: an append-only log of decisions, gate approvals, council outcomes, scope changes and moves back to an earlier stage.
 
@@ -237,7 +241,9 @@ The design doc itself is `docs/designs/<name>.md` on the branch. It is drafted i
 Local, in `<main repo>/.xagent/features/<name>/state.json` (git-excluded):
 
 *   For each task: status (`pending`, `running`, `in-review`, `merged`, `failed`, `escalated`), worker vendor, delegate task id, session id, review round, worktree path, and last result file.
-*   For the feature: the worktree path in side mode, the time of the last reconcile, and what the flow is waiting for (`user:<gate>`, `user:problem`, `worker:<task>`, or nothing).
+*   For each goldfish review in progress (design, plan or sign-off): each lens's status (`pending`, `running`, `done`, `failed`), vendor, model and report file. A review interrupted by compaction resumes at the first lens not `done`.
+*   For each vendor: `cooldownUntil`, set when that vendor hits a quota limit.
+*   For the feature: the time of the last reconcile, and what the flow is waiting for (`user:<gate>`, `user:problem`, `worker:<task>`, or nothing).
 
 ### Reconcile rules (resolves Q2)
 
@@ -246,32 +252,53 @@ Local, in `<main repo>/.xagent/features/<name>/state.json` (git-excluded):
 | Fact | Source | Rule |
 |---|---|---|
 | Feature branch exists | git | Missing branch while the stage is not `done`/`abandoned` → **contradiction, ask** |
+| Feature branch checked out | git: `git -C <repo> branch --show-current` | Another branch checked out while the feature is active → **ask the user to switch back** (no change is made) |
 | Task merged | git: a merge commit on `feature/<name>` with trailer `Xagent-Task: <id>` | Found → mark `merged`, even if local said otherwise (absorbs manual merges that keep the trailer) |
 | Task merged per local state, no trailer commit found | — | **contradiction, ask** |
 | Feature merged into `main` | git: `feature/<name>` is an ancestor of `main` | Mark `done` if `signed-off` is recorded. Without that gate → **contradiction, ask** |
 | Gates, stage, plan | committed `feature.json` | Always taken from the committed copy |
-| Review rounds, session ids, waiting-on | local only | Kept. If the local file is missing, reset to defaults and report what was lost |
+| Review rounds, session ids, waiting-on, lens progress, cooldowns | local only | Kept. If the local file is missing, reset to defaults and report what was lost |
 
 All worker merges into a feature branch use `git merge --no-ff` with the trailer, so task completion can be proven from history after `delegate -Cleanup` deletes the task branch.
 
 ### Build scheduling
 
 *   **Task ids** are `<feature>-<task>`, shortened to fit `delegate`'s 49-character limit.
-*   **Ready tasks.** A task is ready when all of its `depends-on` tasks are merged. `feature.ps1 schedule` returns the ready tasks of the current phase that can start now. A task can start only if its declared files overlap no running task's declared files. Two paths overlap when they are equal or one is a parent folder of the other.
+*   **Ready tasks.** A task is ready when all of its `depends-on` tasks are merged. `feature.ps1 schedule` returns the ready tasks of the current phase that can start now. A task can start only if its declared files overlap no running task's declared files. Two paths overlap when they are equal or one is a parent folder of the other. An entry in `files` can be a glob (`*`, `**`). For the overlap check, a glob counts as its literal folder prefix, the part before the first wildcard, which is conservative. For the scope check, a glob matches files the normal way. So two tasks that add files to the same folder run in parallel only if each lists its exact file names.
 *   **At most 2 workers at a time.** This keeps load on the two $20 subscriptions predictable.
 *   **Vendor choice (by kind, then balance).**
     *   **Kind.** Each task in the plan has a `kind`: `ui`, `impl`, `test`, `migration`, `mechanical` or `explore`.
-    *   **Kind table.** `skills/feature/routing.json` maps `ui` and `impl` to Cursor and the other kinds to agy. The table is a starting guess, to be revised once benchmark data exists.
+    *   **Kind table.** `skills/feature/routing.json` maps `ui` and `impl` to Cursor and the other kinds to agy.
+    *   **Provisional by design.** No benchmark data exists yet, so every routing rule is a guess. The kind table is the chosen heuristic. It is kept in config so it can be replaced without code changes once routing outcomes (below) and benchmark results show a better rule.
     *   **Balance.** `feature.ps1 plan` assigns vendors from the table. If one vendor then has more than 60% of a phase's worker tasks, it moves `impl` tasks to the other vendor, in plan order, until the share is at or below 60% or no `impl` tasks are left.
     *   **Visible in the plan.** The vendor is written into the plan, so the user sees and can change it before **plan-approved**.
-    *   **Quota switch.** A quota limit during the build switches that task to the other vendor, and the switch is logged as a decision.
+    *   **Quota cooldown.** When a worker reports a quota limit:
+        1.  `feature.ps1` sets that vendor's `cooldownUntil` to now plus 60 minutes.
+        2.  While the cooldown lasts, `schedule` routes every task assigned to that vendor to the other one, including the task that failed. The first reroute of each cooldown is logged as one decision.
+        3.  If both vendors are cooling down, that's a problem stop.
+        4.  The user can clear a cooldown early ("Cursor is back").
 *   **Profile.** Each task starts on the profile the plan gives it.
-*   **Preflight models.**
-    *   **Comprehension** runs on the same vendor and the same model as the assigned worker (for example Composer 2.5 for a Cursor `code` task, Grok 4.7 medium for a Cursor `code-hard` task). If the worker misreads the task, this reviewer should too.
+*   **Routing outcomes recorded.** Every merged task, benchmark mode or not, appends one line to `benchmarks/routing.jsonl` in this project. The line holds:
+    *   the feature, task, kind and profile
+    *   the vendor, and whether the task was rerouted
+    *   the number of review rounds, whether its first `verify` passed, and whether it went to council
+    *   its `delegate` task id, which links it to the token counts already in `benchmarks/runs.jsonl`
+
+    Real work builds up the data that the next routing rule will come from.
+*   **Task preflight models (build only).** This rule is for the per-task preflight in the build. The design and plan reviews follow the routing table in "Goldfish review routing".
+    *   **Comprehension** runs on the same vendor and the same model as the worker the task is routed to (for example Composer 2.5 for a Cursor `code` task, Grok 4.7 medium for a Cursor `code-hard` task). If the worker misreads the task, this reviewer should too.
     *   **Implementation readiness** runs on the other vendor.
-    *   **After a vendor switch,** the comprehension preflight runs again on the new worker's model.
-*   **Scope check.** After each worker run, the lead compares the worker's changed files against the task's declared files. A change outside them is a problem stop.
-*   **Merge.** Each task is reviewed and merged per `delegate`'s loop. A phase ends when all its tasks are merged and the phase test command passes on `feature/<name>`.
+    *   **Order.** The preflight runs after `schedule` has applied any cooldown reroute, so it uses the model that will actually do the work.
+*   **Scope check and test (`feature.ps1 verify`).**
+    *   **What it does.** After each worker run, one script call:
+        1.  lists the worker's changed and untracked files;
+        2.  matches them against the task's `files`;
+        3.  runs the task's test command in the worker worktree;
+        4.  records the result in the state.
+    *   **What it returns.** One compact summary. The lead then reviews only the diff's content.
+    *   **When it stops the build.** A change outside `files` is a problem stop. The script does not revert it automatically, because silently undoing a worker's change could hide a real problem.
+    *   **What it needs from the plan.** Task test commands must be non-interactive.
+*   **Merge.** Each task is reviewed and merged per `delegate`'s loop, with the differences listed in the build stage file. A phase ends when all its tasks are merged and the phase test command passes on `feature/<name>`.
 *   **Problem stops.** In `on-problems` mode (the default), the build runs through phases without stopping, except for:
     *   a council escalation
     *   a test failure on `feature/<name>` that the lead cannot fix in one small fix-up
@@ -284,21 +311,28 @@ All worker merges into a feature branch use `git merge --no-ff` with the trailer
 ### Council (G7)
 
 *   **Design and plan.** When the lead faces a choice that is hard to reverse or contested, it offers a council and runs one only if the user agrees.
-*   **Build.** A task that fails review twice, or is tagged `hard` and fails review once, triggers a council automatically. The council uses `delegate`'s council procedure. The outcome is appended to `decisions.md`, and the build makes a problem stop showing the outcome and the proposed retry (with the `code-hard` profile and the council's guidance).
+*   **Build.** A `code` task that fails review twice, or a `code-hard` task that fails review once, triggers a council automatically. This is the one place the round limit is set for feature tasks, and it replaces `delegate`'s "about 3 rounds" rule for them. The council uses `delegate`'s council procedure. The outcome is appended to `decisions.md`, and the build makes a problem stop showing the outcome and the proposed retry (with the `code-hard` profile and the council's guidance).
 *   **On request.** At any stage, the user can ask for a council.
 
 ### Goldfish review routing (resolves Q3)
 
 All goldfish are non-Claude, so the reviewer is always a different vendor from the author (the Claude lead).
 
-| Lens | Tier | Profile | Why |
+This table applies to the design review, the plan review and the sign-off check. The build's task preflights follow "Task preflight models" above.
+
+| Lens | Tier | How it is run | Why |
 |---|---|---|---|
-| comprehension, implementation_readiness | worker tier (Composer 2.5, Gemini Flash) | `review` (existing) | Same tier as the workers who will read the tasks. If they misread, a worker will too. |
-| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style | strong tier (Grok 4.7 high, Gemini Argon high) | `review-strong` (new) | Needs judgement about architecture and hidden complexity. |
+| comprehension, implementation_readiness | worker tier (Composer 2.5, Gemini Flash) | `-Profile review` | Same tier as the workers who will read the tasks. If they misread, a worker will too. |
+| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style, drift_report | strong tier (Grok 4.7 high, Gemini Argon high) | `-Profile review -Model <review.strong model from models.json>` | Needs judgement about architecture and hidden complexity. |
 
 *   **Vendor per lens.** Within a tier, lenses are split between Cursor and agy so both vendors review each document.
 *   **Diff reviews.** Reviews of a diff keep `delegate`'s rule: the reviewer is the other vendor from the worker that wrote the code.
-*   **Report format.** Findings use `review.schema.json` (Blocker/Major/Nit). The lead does the synthesis EGM's synthesizer would do, deduplicating and ranking findings into one report at `docs/features/<name>/reviews/<stage>-<n>.md`.
+*   **Target passed by file.** The review target (design doc, plan, or diff) is never embedded in the command line. `delegate.ps1` writes it to the read-only worktree's `.xagent/` and gives the reviewer the path. A trial run of this review showed that agy fails on a design-sized target otherwise (66,915 characters against the 28,000 limit).
+*   **Rule files removed.** Before a read-only run, `delegate.ps1` removes the CLIs' project rule files from the throwaway worktree, so the reviewer does not load project instructions as system context.
+*   **Report format.**
+    *   Cursor reviewers return free-form Markdown. agy reviewers return `review.schema.json` JSON. Both use Blocker/Major/Nit.
+    *   The lead does the synthesis EGM's synthesizer would do: it deduplicates and ranks findings into one report at `docs/features/<name>/reviews/<stage>-<n>.md`.
+    *   Lens progress is tracked with `feature.ps1 lens`, so a review survives compaction.
 
 ### EGM integration
 
@@ -307,16 +341,18 @@ All goldfish are non-Claude, so the reviewer is always a different vendor from t
     *   where EGM writes `design_draft.md`, write to `docs/designs/<name>.md`;
     *   EGM's question gates map to our gate recording.
 *   **Unmodified text.** The vendored text stays unmodified. All differences live in our stage files, per decision 001.
-*   **Sync.** `scripts/egm-sync.ps1` diffs upstream EGM from the pinned commit for the vendored paths and copies unchanged files.
+*   **Sync.** v1 copies the files once and records commit `b7d9e27` in `THIRD_PARTY_NOTICES.md`. The sync script from decision 001 is written when the first upstream change arrives.
 
 ### Sign-off and final check (G6)
 
 1.  Run the repo's full test command on `feature/<name>`.
-2.  Run the final check, a judgement-tier goldfish:
-    *   **`design_critic`** gets the locked design plus the diff from `main` to `feature/<name>`. For a large diff, it gets one file group per run.
-    *   **The vendored `egm-drift-report` procedure** lists behaviour that is missing from the code, added beyond the design, or changed from it.
+2.  Run the final check:
+    *   It runs as one strong-tier goldfish, using the vendored `egm-drift-report` procedure as its persona (`drift_report`).
+    *   Its worktree is detached at `feature/<name>`. It is given the locked design and the path of a `git diff main...feature/<name>` file, both passed by file.
+    *   It lists behaviour that is missing from the code, added beyond the design, or changed from it.
+    *   `design_critic` on the whole diff is left out of v1. The drift report plus the full test suite is the G6 check.
 3.  Show the results and ask for the **signed-off** gate.
-4.  On approval, run `git switch main` and `git merge --no-ff feature/<name>` in the main checkout. In side mode the worktree is removed first. Then mark the feature `done`. Pushing happens only if the user asks.
+4.  On approval, run `git switch main` and `git merge --no-ff feature/<name>` in the user's checkout. Then mark the feature `done`. Pushing happens only if the user asks.
 
 ## Alternatives Considered
 
@@ -359,11 +395,12 @@ Candidates from [research §7](../research.md):
 *   **Cons**: An abandoned design leaves commits on `main`. One feature's records end up split across `main` and its branch, and a design changed during the build diverges from the copy on `main`.
 *   **Reason for Rejection**: Rejected by author: everything for a feature lives on its branch, and `main` changes only at sign-off.
 
-### Alternative F: Only one working place for the lead
+### Alternative F: Side mode in v1 (a second feature in its own worktree)
 
-*   **Always switch the main checkout**: Rejected by author. Side work, or a quick experiment, would be blocked while a major feature is in progress.
+*   **Considered while drafting**: main mode by default, plus a side mode on request. The side feature would get its own lead worktree at `<repo>.xagent/_feature-<name>`, and a `promote` command would later move it into the main checkout.
 *   **Always a worktree per feature**: Rejected by author. To try a major feature, the user would have to open a different folder, and the checked-out branch could no longer pick the active feature.
-*   **Chosen instead**: Main mode by default, and side mode (a worktree) on request.
+*   **Side mode without `promote`**: Rejected by author, as a half-built side mode.
+*   **Outcome**: Deferred by author after the zoom-out review. Side mode added a worktree, a name prefix, `promote`, two dirty-tree checks, overlap warnings between features, and two-folder logic in every subcommand. v1 is main mode only, and side mode is in Future Improvements.
 
 ### Alternative G: Other ways to handle state that disagrees with git
 
@@ -382,17 +419,24 @@ Candidates from [research §7](../research.md):
 *   **Always check in after every phase**: Rejected by author. Too many interruptions for routine features, and the build can't run while the user is away.
 *   **Always check in only on problems**: Rejected by author. Some complex features need a check after every phase, so the user needs to be able to turn that on.
 *   **Chosen instead**: `on-problems` is the default, and the user can explicitly switch to `every-phase` for a feature.
+*   **Reconfirmed after review**: The zoom-out reviewer proposed dropping `every-phase` and pausing only on request. Rejected by author: a pause request made once would not be remembered across phases or compaction, and the mode records it in `feature.json`.
 
 --------------------------------------------------------------------------------
 
 ## Non-Functional Requirements
 
-*   **Quota.** Claude runs only the lead. Workers, goldfish and councils run on Cursor and Google. The cost added per feature is about one goldfish review of the design (7 lens runs), one of the plan (2 runs), one final check, plus any councils. At most 2 workers run at once.
+*   **Quota.** Claude runs only the lead. Workers, goldfish and councils run on Cursor and Google.
+    *   **Cost per feature.** One goldfish review of the design (about 9 lens runs over 5 stages), one of the plan (2 runs), one final check, plus any councils.
+    *   **Measured during this design's own review.** A strong-tier lens run took 3–7 minutes and 80k–160k tokens.
+    *   **Workers.** At most 2 run at once.
+    *   **Lead bookkeeping.** Mechanical steps (scope check, tests, state updates, lens tracking) are done by `feature.ps1` in one call each, so the lead's context and Claude quota go to review and judgement.
 *   **Safety.**
     *   The skill never merges to `main` or pushes without the **signed-off** gate.
     *   `feature.ps1` refuses to start a feature on a dirty working tree, and never runs `git reset --hard`, `git clean`, or a force push.
     *   Worker permissions are unchanged from `delegate`.
-*   **Isolation risk (accepted).** Cross-vendor goldfish load their own CLI's project rules (`AGENTS.md`, `.cursor/rules`), so their context is less isolated than EGM's Claude adapters. Each persona prompt tells the reviewer to judge only the given document.
+*   **Isolation.**
+    *   **Mitigation.** Cross-vendor goldfish would load their CLI's project rules (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/`, `.agents/`). `delegate.ps1` removes those from the throwaway review worktree before launch.
+    *   **Remaining risk (accepted).** User-level CLI settings outside the repo still load, so isolation is weaker than with EGM's Claude adapters.
 *   **Rollback.**
     *   Abandoning a feature leaves `main` untouched. The branch and records stay until the user deletes them.
     *   Removing the skill means deleting the `~/.claude/skills/feature` junction. `delegate` keeps working on its own.
@@ -401,17 +445,20 @@ Candidates from [research §7](../research.md):
 
 ### Future Improvements
 
+*   **Side mode**: a second active feature in its own lead worktree (`<repo>.xagent/_feature-<name>`). It would come with `promote` to move it into the main checkout, and overlap warnings between features at plan approval. It was designed in the first draft and deferred (Alternative F).
 *   **Brainstorm stage**: put the vendored `egm-brainstorm` in front of `design`, with an optional council.
 *   **Benchmark mode per feature**: run `delegate`'s head-to-head benchmark on the tasks of a feature.
 *   **Cost report per feature**: split API spend from subscription use (the kodo idea), using `benchmarks/runs.jsonl`.
 *   **Anonymized peer review in the council** (the epicsagas idea).
-*   **Data-driven routing**: revise `routing.json`'s kind table from benchmark results, once benchmark mode has real tasks.
+*   **Data-driven routing**: replace `routing.json`'s kind table with a rule derived from `benchmarks/routing.jsonl` and benchmark results, once enough real tasks are recorded.
+*   **EGM sync script** (`scripts/egm-sync.ps1`, per decision 001): written when the first upstream EGM change arrives.
+*   **Whole-diff `design_critic` at sign-off**: add it if real features show the drift report is too weak on its own.
 
 --------------------------------------------------------------------------------
 
 ## Detailed Implementation Plan
 
-Names used below: `<repo>` is the main checkout of the target repo, `<name>` is the feature name, and `<fdir>` is the folder that has `feature/<name>` checked out (`<repo>` in main mode, `<repo>.xagent/_feature-<name>` in side mode).
+Names used below: `<repo>` is the user's checkout of the target repo, where `feature/<name>` is checked out while the feature is active, and `<name>` is the feature name.
 
 ### Target Files to Create/Modify
 
@@ -421,7 +468,7 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 *   **Proposed Changes**:
     *   **Frontmatter `description`**:
         *   It names the trigger: a request to design, review the design of, plan, build, continue, test, sign off, abandon, or check the status of a feature in this repo.
-        *   It lists example phrases: "design a feature for X", "review the design", "plan it", "build it", "continue", "where are we?", "side feature: X", "sign off".
+        *   It lists example phrases: "design a feature for X", "review the design", "plan it", "build it", "continue", "where are we?", "sign off".
         *   It says that a sentence only mentioning a feature is not a request.
     *   **Body**: the steps every invocation runs, in order:
         1.  Run `feature.ps1 status` with the current folder, which applies the active-feature rules.
@@ -439,9 +486,9 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 
 *   **Type / Scope**: Stage instructions.
 *   **Proposed Changes**:
-    *   If no feature exists, call `feature.ps1 new` (`-Side` when the user asked for a side feature). Ask for a name if none can be derived. Names are lowercase kebab-case of at most 31 characters.
+    *   If no feature exists, call `feature.ps1 new`. Ask for a name if none can be derived. Names are lowercase kebab-case of at most 31 characters.
     *   Then read and follow `skills/feature/egm/skills/egm-draft/SKILL.md`, applying these differences:
-        *   Write to `docs/designs/<name>.md` in `<fdir>`, not to `design_draft.md`.
+        *   Write to `docs/designs/<name>.md` in `<repo>`, not to `design_draft.md`.
         *   Commit after each approved section, with the message `feature(<name>): design – <section>`.
         *   Skip EGM Step 6.2 (picking the target folder).
         *   If the problem statement is missing, ask for it in chat. Don't point to `egm-brainstorm`.
@@ -452,7 +499,9 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 *   **Type / Scope**: Stage instructions.
 *   **Proposed Changes**:
     *   Read and follow the vendored `egm-review` SKILL.md, then the vendored `egm-resolve` SKILL.md. Where `egm-review` invokes `egm-review-loop`, read the vendored copy of that too. Apply these differences:
-        *   **Reviewer runs.** Instead of spawning `egm:*` agents, run `delegate.ps1 -Profile <review|review-strong> -Persona <lens> -Agent <cursor|agy>`. Use the lens-to-tier table and alternate vendors within each tier. The task file is the design doc, plus the `GoldfishContext` EGM would pass.
+        *   **Reviewer runs.** Instead of spawning `egm:*` agents, run `delegate.ps1 -Profile review -Persona <lens> -Agent <cursor|agy>`, adding `-Model <review.strong model>` for strong-tier lenses. Use the lens-to-tier table and alternate vendors within each tier.
+        *   **Task file.** It names the design doc's path and the `GoldfishContext` reading list, which the reviewer reads with its file tools. It does not embed the document.
+        *   **Lens tracking.** Before and after each lens run, call `feature.ps1 lens`. On resume, continue from the first lens not `done`.
         *   **Synthesis.** The lead does the synthesizer's job, following `egm/agents/synthesizer.md`. It writes `docs/features/<name>/reviews/design-<n>.md`.
         *   **Checkpoints.** The stage checkpoints in EGM become chat questions. They are not recorded gates.
     *   After resolution, ask for **design-locked**. On a clear yes:
@@ -464,7 +513,7 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 
 *   **Type / Scope**: Stage instructions.
 *   **Proposed Changes**:
-    *   **Write the plan.** Produce a plan JSON file in `<repo>/.xagent/features/<name>/plan.json`, matching `plan.schema.json`. It is split into phases, and each task has:
+    *   **Write the plan.** Produce a plan as JSON, matching `plan.schema.json`, in a temporary input file at `<repo>/.xagent/features/<name>/plan-input.json`. `feature.ps1 plan` imports it into `feature.json`, which is the only source of the plan, and then deletes the input file. The plan has a `summary` paragraph and is split into phases. Each phase has a `rationale` and a test command, and each task has:
         *   an id
         *   a title
         *   `dependsOn`
@@ -472,41 +521,34 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
         *   `test`: the exact test command
         *   `profile`: `code` or `code-hard`
         *   `kind`: `ui`, `impl`, `test`, `migration`, `mechanical` or `explore`
-        *   `hard`: true or false
         *   `brief`: one paragraph the task file will expand
     *   **Plan rules.** Architecture, cross-cutting and security-sensitive work is assigned to `lead`, which means the lead does it, not a worker. Each phase has a phase test command, and the last phase's test is the full suite.
     *   **Import and check it.**
-        1.  Run `feature.ps1 plan -PlanFile <path>`. It validates the plan and writes `feature.json`, `plan.md` and `decisions.md`.
+        1.  Run `feature.ps1 plan -PlanFile <path>`. It validates the plan, writes it into `feature.json`, generates `plan.md` from `feature.json`, and appends a decision.
         2.  Run the plan goldfish: `comprehension` and `implementation_readiness` on `plan.md`, with the worker tier on both vendors.
         3.  Triage the findings per `delegate`'s rule (fix what would make two workers build different things).
-        4.  Re-import the fixed plan.
+        4.  To change the plan, write a new complete input file and import it again. `plan.md` is never edited by hand.
     *   **Offer a council** if the plan contains a choice that is hard to reverse.
     *   **Approve.**
-        *   Show the overlap warnings from `feature.ps1 plan`'s output.
         *   Ask for **plan-approved**, stating that the check-in mode is `on-problems` unless the user says "check in every phase".
         *   On a clear yes, run `feature.ps1 gate -Gate plan-approved -Quote ... -Checkin <mode>`, then `stage -To build`.
 
 #### 5. `skills/feature/stages/build.md` (Create)
 
 *   **Type / Scope**: Stage instructions.
-*   **Proposed Changes**: a loop.
-    *   **Pick tasks.** `feature.ps1 schedule` returns the ready tasks.
-    *   **Run each task.** For each ready task:
-        1.  Write the task file `<repo>/.xagent/tasks/<taskId>.md` from its brief, using `delegate`'s task-file format.
-        2.  Run the goldfish preflight on the task file if `delegate`'s rules call for it:
-            *   `comprehension` with `-Agent <task vendor> -Model <the worker's model for the task's profile>`;
-            *   `implementation_readiness` on the other vendor.
-        3.  Run `feature.ps1 task -Status running`.
-        4.  Run `delegate.ps1 -Agent <task vendor> -Repo <repo> -Base feature/<name> -TaskId <taskId> -Profile <profile>`, with both ready tasks in the same message when two are ready.
-    *   **Quota limit.** If a worker reports one:
-        1.  Run `feature.ps1 task -Vendor <other>`.
-        2.  Log it with `feature.ps1 decision -Kind decision`.
-        3.  Rerun the comprehension preflight on the new model.
-        4.  Run the task again on the other vendor.
-        5.  If both vendors hit their limit, make a problem stop.
-    *   **Review** per `delegate`'s loop, and update `task -Round <n>` each round.
-    *   **Scope check.** If the worker changed files outside the task's `files`, that's a problem stop.
-    *   **Council escalation.** Two failed rounds, or one failed round on a task with `hard: true`, triggers the council per `delegate`'s procedure:
+*   **Proposed Changes**: The file says first: "Follow `delegate`'s loop (task file, preflight, run, review, iterate, merge, cleanup). This file lists only what differs for feature tasks." The differences:
+    *   **Picking tasks.** Take tasks only from `feature.ps1 schedule`, which returns each ready task with its vendor (after any cooldown reroute) and its worker model. Run both ready tasks in the same message when two are ready.
+    *   **Running a task.**
+        *   Before the run, call `feature.ps1 task -Status running`.
+        *   Pass `-Agent <vendor from schedule> -Base feature/<name> -Repo <repo>` to `delegate.ps1`.
+    *   **Preflight.**
+        *   `comprehension` runs with `-Agent <task vendor> -Model <worker model from schedule>`.
+        *   `implementation_readiness` runs on the other vendor.
+        *   It runs when `delegate`'s preflight rules call for it.
+    *   **After each worker run.** Call `feature.ps1 verify -Task <id>` before reading the diff. If it reports files out of scope, make a problem stop.
+    *   **Quota limit.** Call `feature.ps1 cooldown -Vendor <v>`, then take the task again from `schedule`. It now comes back on the other vendor, so the preflight reruns on that vendor's model.
+    *   **Review rounds.** Update `task -Round <n>` each round.
+    *   **Council escalation.** The round limit is the feature rule in the Technical Plan (`code`: 2 failed rounds, `code-hard`: 1), which replaces `delegate`'s "about 3 rounds" for feature tasks. When it is reached, convene the council per `delegate`'s procedure, then:
         1.  Append the outcome to `decisions.md` (`feature.ps1 decision`).
         2.  Run `task -Status escalated`.
         3.  Make a problem stop.
@@ -515,7 +557,7 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
         2.  Run `feature.ps1 merge -Task <id> -Message "<msg>"`.
         3.  Run `delegate -Cleanup`.
     *   **Phase end.** When all tasks of a phase are merged:
-        1.  Run the phase test in `<fdir>`. Fix it if the fix is small (logged as a fix-up decision). Otherwise make a problem stop.
+        1.  Run the phase test in `<repo>`. Fix it if the fix is small (logged as a fix-up decision). Otherwise make a problem stop.
         2.  If the check-in mode is `every-phase`, report and stop.
         3.  Otherwise, continue to the next phase.
     *   **End of build.** When the last phase is done, run `stage -To signoff` and report.
@@ -525,14 +567,12 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 
 *   **Type / Scope**: Stage instructions.
 *   **Proposed Changes**:
-    1.  Run the full test command in `<fdir>`.
-    2.  Build the final-check input:
-        *   the locked design
-        *   `git diff main...feature/<name>`
-        *   if the diff is over 1,500 lines, one input per file group, as declared in the plan phases
-    3.  Run `design_critic` with `review-strong` on one vendor. Run the vendored `egm-drift-report` procedure with the lead as the reader.
-    4.  Show the test results and the findings, grouped as missing, added or changed behaviour.
-    5.  Ask for **signed-off**. On a clear yes:
+    1.  Run the full test command in `<repo>`.
+    2.  Write `git diff main...feature/<name>` to `<repo>/.xagent/features/<name>/final.diff`.
+    3.  Write a task file naming the locked design's path and the diff file's path.
+    4.  Run `delegate.ps1 -Profile review -Persona drift_report -Model <review.strong model> -Base feature/<name>` on one vendor, tracked with `feature.ps1 lens`.
+    5.  Show the test results and the findings, grouped as missing, added or changed behaviour.
+    6.  Ask for **signed-off**. On a clear yes:
         1.  Run `feature.ps1 gate -Gate signed-off -Quote ...`.
         2.  Run `feature.ps1 finish`.
         3.  Ask whether to push.
@@ -559,24 +599,26 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
         *   `-Cwd` (used only by `status`)
     *   **Folders and commits.**
         *   `.xagent/` is added to `info/exclude` the same way `delegate.ps1` does it.
-        *   Record commits are made in `<fdir>`. Each commit stages only the files under `docs/features/<name>/`, or the design doc for `design` commits.
+        *   Record commits are made in `<repo>`. Each commit stages only the files under `docs/features/<name>/`, or the design doc for `design` commits.
 
     | Subcommand | Arguments | Behaviour |
     |---|---|---|
-    | `new` | `-Name`, `-Side` | Fail if the working tree is dirty, the branch exists, or (main mode) another main-mode feature is not `done`/`abandoned`. Main mode: `git switch -c feature/<name> main`. Side mode: `git worktree add <repo>.xagent/_feature-<name> -b feature/<name> main`. Write `feature.json` (stage `design`, mode, `checkin: on-problems`) and `decisions.md`, and commit `feature(<name>): start`. Write the local `state.json`. |
+    | `new` | `-Name` | Fail if the working tree is dirty, the branch exists, or another feature is not `done`/`abandoned`. Run `git switch -c feature/<name> main`. Write `feature.json` (stage `design`, `mode: main`, `checkin: on-problems`) and `decisions.md`, and commit `feature(<name>): start`. Write the local `state.json`. |
     | `status` | `[-Name]`, `-Cwd` | Without `-Name`, apply the selection rules. Rule 2 reads `git -C <Cwd> branch --show-current`. Rule 3 scans `.xagent/features/*/state.json` plus branches `feature/*` whose stage is not `done`/`abandoned`. Output the selected feature's merged view (committed plus local) with `nextAction`, or `{selected:null, features:[...]}`. |
     | `reconcile` | `-Name` | Apply the reconcile table. Output `{changes:[], contradictions:[], lost:[]}`. Contradictions don't change anything. |
     | `stage` | `-Name`, `-To`, `-Reason` | Forward moves are allowed only one step at a time, and only when the gate is recorded. Backward moves are allowed to any earlier stage: they clear later gates and append a decision. `abandoned` is allowed from any stage. Commit. |
     | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the current stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. `-Checkin` is allowed only with `plan-approved`. |
-    | `plan` | `-Name`, `-PlanFile` | Validate against `plan.schema.json`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, `taskId` ≤ 49 characters. Assign `vendor` to each worker task from `routing.json` (unless the plan sets `vendor` explicitly, which the user can ask for), then apply the 60% balance rule for each phase, moving `impl` tasks in plan order. Write the phases into `feature.json` and regenerate the table in `plan.md` between `<!-- tasks:begin -->` and `<!-- tasks:end -->`. Compute overlap warnings against other in-progress features' `files`. Commit. Allowed only in stage `plan`. |
-    | `schedule` | `-Name` | From the current phase (the lowest phase with tasks not yet merged), return tasks that are `pending`, have every dependency `merged`, and whose files overlap no `running`/`in-review` task. Cap the total of running plus in-review tasks at 2. Tasks with `profile: lead` are returned with `assignee: lead`. Each worker task includes its `vendor` and the worker `model` for its profile, read from `delegate`'s `models.json`. |
+    | `plan` | `-Name`, `-PlanFile` | Validate against `plan.schema.json`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, `taskId` ≤ 49 characters. Assign `vendor` to each worker task from `routing.json` (unless the plan sets `vendor` explicitly, which the user can ask for), then apply the 60% balance rule for each phase, moving `impl` tasks in plan order. Write the summary and phases into `feature.json`, generate the whole `plan.md` from it (summary, then each phase's rationale and test, then a task table), and delete the input file. Commit. Allowed only in stage `plan`. |
+    | `schedule` | `-Name` | From the current phase (the lowest phase with tasks not yet merged), return tasks that are `pending`, have every dependency `merged`, and whose files overlap no `running`/`in-review` task. Cap the total of running plus in-review tasks at 2. Tasks with `profile: lead` are returned with `assignee: lead`. If a task's vendor is cooling down and the other is not, return it on the other vendor and say so (`rerouted: true`). If both are cooling down, return `{blocked: "quota"}`. Each worker task includes its effective `vendor` and the worker `model` for its profile, read from `delegate`'s `models.json`. |
     | `task` | `-Name`, `-Task`, `[-Status] [-Vendor] [-DelegateTaskId] [-SessionId] [-Round] [-ResultFile]` | Update local `state.json` only. |
-    | `merge` | `-Name`, `-Task`, `-Message` | In `<fdir>`: `git merge --no-ff xagent/<delegateTaskId>` with the message `<Message>` plus a blank line plus `Xagent-Task: <task id>`. On conflict, run `git merge --abort` and fail with the conflicting files. On success, set the task to `merged`. |
+    | `verify` | `-Name`, `-Task` | In the task's worker worktree: list the changed files (`git diff --name-only <base>...HEAD` plus uncommitted and untracked files), and match them against the task's `files` (exact, parent folder, or glob). Run the task's `test` command there with a 15-minute timeout. Store the result and print `{inScope, outOfScope:[], test:{command, passed, exitCode, tail}}`. Change nothing in the worktree. |
+| `lens` | `-Name`, `-Review <design\|plan\|signoff>-<n>`, `-Lens`, `[-Status] [-Vendor] [-Model] [-ReportFile]` | Update that lens in local `state.json`. Without `-Status`, print the review's lens list and the next lens not `done`. |
+| `cooldown` | `-Name`, `-Vendor`, `[-Clear]` | Set the vendor's `cooldownUntil` to now plus 60 minutes, or clear it. On the first set of each cooldown, append a decision. |
+| `merge` | `-Name`, `-Task`, `-Message` | In `<repo>`: `git merge --no-ff xagent/<delegateTaskId>` with the message `<Message>` plus a blank line plus `Xagent-Task: <task id>`. On conflict, run `git merge --abort` and fail with the conflicting files. On success, set the task to `merged` and append the routing outcome line to `benchmarks/routing.jsonl` (in the cross-agent-loop repo, next to `runs.jsonl`). |
     | `decision` | `-Name`, `-Kind`, `-Text` | Append `- <ISO time> [<kind>] <text>` to `decisions.md` and commit. Kinds: `decision`, `council`, `fix-up`, `scope`, `gate`, `stage`. |
     | `wait` | `-Name`, `-On`, `[-Note]` | Set the local `waitingOn`. `-On none` clears it. |
     | `checkin` | `-Name`, `-Mode` | Set `on-problems` or `every-phase` in `feature.json`, append a decision and commit. |
-    | `promote` | `-Name` | Side to main. Fail if another main-mode feature is active or the main checkout is dirty. Remove the side worktree (fail if it is dirty), `git switch feature/<name>` in `<repo>`, and set the mode to main. |
-    | `finish` | `-Name` | Require `signed-off`. Side mode: remove the worktree. In `<repo>`: `git switch main` and `git merge --no-ff feature/<name> -m "Merge feature/<name>"`. Set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
+        | `finish` | `-Name` | Require `signed-off`. In `<repo>`: `git switch main` and `git merge --no-ff feature/<name> -m "Merge feature/<name>"`. Set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
 
     *   **Path overlap.** Normalize both paths (forward slashes, no trailing slash, lowercase on Windows). They overlap if they are equal or one starts with the other plus `/`.
 
@@ -585,19 +627,21 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 *   **Type / Scope**: JSON Schemas.
 *   **Proposed Changes**:
     *   **`feature.json` fields**:
-        *   `name`, `mode` (`main`|`side`), `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
+        *   `name`, `mode` (always `main` in v1; `side` is reserved), `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
         *   `checkin` (`on-problems`|`every-phase`), `designDoc`
         *   `gates`: an object keyed by the gate name, each holding `{at, quote}`
-        *   `phases`: an array of `{n, test, tasks:[task]}`
-    *   **`plan.json` task fields**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`|`lead`), `kind` (`ui`|`impl`|`test`|`migration`|`mechanical`|`explore`), `hard`, `brief`, and an optional `vendor` (`cursor`|`agy`) that overrides the table.
+        *   `summary`, and `phases`: an array of `{n, rationale, test, tasks:[task]}`
+    *   **`plan.json` task fields**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`|`lead`), `kind` (`ui`|`impl`|`test`|`migration`|`mechanical`|`explore`), `brief`, and an optional `vendor` (`cursor`|`agy`) that overrides the table.
     *   **`feature.json` task fields**: every task field, with `vendor` always filled in for worker tasks.
 
 #### 10. `skills/feature/state.schema.json` (Create)
 
 *   **Type / Scope**: JSON Schema for the local `state.json`.
 *   **Proposed Changes**:
-    *   `name`, `fdir`, `lastReconcile`, `waitingOn`, `waitingNote`
-    *   `tasks`: keyed by task id, each holding `status`, `vendor`, `delegateTaskId`, `sessionId`, `round`, `resultFile`
+    *   `name`, `lastReconcile`, `waitingOn`, `waitingNote`
+    *   `tasks`: keyed by task id, each holding `status`, `vendor`, `delegateTaskId`, `sessionId`, `round`, `resultFile`, `verify` (the last `verify` output)
+    *   `reviews`: keyed by review id, each holding `lenses`: `{lens: {status, vendor, model, reportFile}}`
+    *   `vendors`: `{cursor: {cooldownUntil}, agy: {cooldownUntil}}`
 
 #### 10b. `skills/feature/routing.json` (Create)
 
@@ -608,36 +652,29 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
     *   `rebalanceKind: impl`
     *   `_comment`: the table is a guess and should be revised from benchmark data.
 
-#### 11. `skills/feature/templates/decisions.md` and `skills/feature/templates/plan.md` (Create)
+#### 11. `skills/feature/templates/decisions.md` (Create)
 
-*   **Type / Scope**: Templates that `feature.ps1 new` and `plan` copy.
+*   **Type / Scope**: The template that `feature.ps1 new` copies.
 *   **Proposed Changes**:
     *   `decisions.md` has a header and an empty log.
-    *   `plan.md` has a header, a placeholder for the lead's prose, and the task-table markers.
+    *   `plan.md` is fully generated by `feature.ps1 plan`, so it needs no template.
 
 #### 12. `skills/feature/egm/` (Create, vendored, unmodified)
 
 *   **Type / Scope**: A copy of upstream EGM at commit `b7d9e27`. The upstream relative paths are kept, so diffing is direct.
 *   **Proposed Changes**: Copy these files:
     *   `skills/egm-draft/SKILL.md` and `skills/egm-draft/references/design_doc.md`
-    *   `skills/egm-review/SKILL.md`, `skills/egm-resolve/SKILL.md`, `skills/egm-review-loop/SKILL.md`, `skills/egm-drift-report/SKILL.md`
+    *   `skills/egm-review/SKILL.md`, `skills/egm-resolve/SKILL.md`, `skills/egm-review-loop/SKILL.md`
     *   `resources/execution_instructions.md` and `resources/document_standards/*.md` (5 files)
     *   `agents/synthesizer.md`
     *   `LICENSE` (as `LICENSE-egm`)
-
-#### 13. `skills/feature/egm/MANIFEST.json` (Create)
-
-*   **Type / Scope**: The sync manifest.
-*   **Proposed Changes**:
-    *   `upstream`: the repo URL.
-    *   `pinnedCommit`: `b7d9e27`.
-    *   `files`: a list of `{upstream, local, modified:false}`. It covers items 12 and 14, including the personas that live under `skills/delegate/personas/`.
 
 #### 14. `skills/delegate/personas/` (Modify: add files)
 
 *   **Type / Scope**: Goldfish personas run by `delegate.ps1`. Keeping one copy here avoids duplicating persona files between the skills.
 *   **Proposed Changes**:
-    *   Add the unmodified upstream `zoom_out.md`, `inventive_catalyst.md`, `codebase_details.md`, `structural.md`, `style.md` and `zoom-out-standard.md`.
+    *   Add the unmodified upstream `zoom_out.md`, `inventive_catalyst.md`, `codebase_details.md`, `structural.md`, `style.md` and `zoom-out-standard.md`. These were copied during this design's review.
+    *   Add the unmodified upstream `skills/egm-drift-report/SKILL.md` as `drift_report.md`, so the sign-off check can run it as a persona.
     *   Add `standards.json`, which maps each persona to the standard file appended to it: `implementation_readiness` → `implementation-readiness-standard.md`, `zoom_out` → `zoom-out-standard.md`.
     *   Update `README.md`.
 
@@ -645,38 +682,30 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 
 *   **Type / Scope**: Worker launcher.
 *   **Proposed Changes**:
-    *   Add `review-strong` to the `-Profile` ValidateSet.
-    *   Treat `review-strong` exactly like `review` (read-only, needs `-Persona`, writes `reviewFile`).
-    *   Replace the hard-coded `implementation_readiness` standard injection with a lookup in `personas/standards.json`.
-    *   Make no other behaviour changes.
+    *   **Target by file (both vendors, review and council runs).**
+        *   The hand-off file holds the persona, the standard and the caller parameters, then a line naming the target's path.
+        *   The target itself (the `-TaskFile` content) is written to `.xagent/target-<stamp>.md` in the worktree.
+        *   For agy, only the control part is embedded in the command line. The 28,000-character check then applies only to that part.
+        *   The prompt tells the reviewer to read the target file with its file tools.
+    *   **Rule files removed.** In read-only runs:
+        *   Before launch, delete `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/`, `.cursorrules` and `.agents/` from the throwaway worktree, wherever they exist in its tree. Record the deleted paths.
+        *   After the process exits, and before the read-only check, restore them with `git -C <wt> checkout -- <paths>`. The read-only check then does not report them.
+    *   **Standards lookup.** Replace the hard-coded `implementation_readiness` standard injection with a lookup in `personas/standards.json`.
+    *   **No new profile.** Strong-tier reviews use `-Profile review -Model <id>`, which already works.
 
 #### 16. `skills/delegate/models.json` (Modify)
 
 *   **Type / Scope**: Model profiles.
-*   **Proposed Changes**: Add the `review-strong` profile:
-    *   `readOnly: true`
-    *   `cursor: grok-4.7-high`, `agy: gemini-4-argon-high`
-    *   purpose: "Read-only goldfish review needing judgement (zoom-out, design critic, etc.)".
+*   **Proposed Changes**: Add `strong: {cursor: grok-4.7-high, agy: gemini-4-argon-high}` to the `review` profile, for the judgement lenses. Stage files read these ids and pass them as `-Model`. Claude models stay blocked.
 
 #### 17. `skills/delegate/SKILL.md` (Modify)
 
 *   **Type / Scope**: Docs.
 *   **Proposed Changes**:
-    *   Document `review-strong` in the profile table.
+    *   Document `review.strong` and when to pass it as `-Model`.
+    *   Document that review and council targets are passed by file, and that rule files are removed in read-only runs.
     *   Note that `feature` uses `delegate` and merges with the `Xagent-Task` trailer.
     *   Add the `-Base feature/<name>` usage.
-
-#### 18. `scripts/egm-sync.ps1` (Create)
-
-*   **Type / Scope**: Maintenance script.
-*   **Proposed Changes**:
-    *   **Parameters**: `-Upstream <path to a local clone of EGM>` and `-Apply`.
-    *   **Comparison.** For each manifest entry, compare upstream at `pinnedCommit` and at HEAD.
-    *   **Report.** Print JSON listing `unchanged`, `changedUpstream`, `modifiedLocally`, `conflict` (changed upstream and modified locally) and `newUpstreamFiles` (new files in the vendored folders).
-    *   **`-Apply`.**
-        1.  Copy the `changedUpstream` files that are not modified locally.
-        2.  Update `pinnedCommit` in the manifest and `THIRD_PARTY_NOTICES.md`.
-        3.  Print the conflicts, which are left for a hand merge.
 
 #### 19. `skills/feature/tests/feature.Tests.ps1` (Create)
 
@@ -685,9 +714,8 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
     *   **`new`**:
         *   refuses a dirty tree
         *   refuses a bad name
-        *   refuses a second main-mode feature
-        *   main mode creates the branch and commit
-        *   side mode creates the worktree at the `_feature-` path
+        *   refuses a second active feature
+        *   creates the branch, switches to it, and commits
     *   **`stage` and `gate`**:
         *   a forward move without the gate fails
         *   the gate in the wrong stage fails
@@ -699,12 +727,11 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
         *   rejects a dependency in a later phase
         *   rejects a duplicate id
         *   rejects an over-long task id
-        *   regenerates the table between the markers
+        *   generates `plan.md` from `feature.json` and deletes the input file
         *   assigns vendors from the kind table
         *   keeps an explicit `vendor`
         *   rebalances a phase at 4 of 5 `impl` tasks (80%), so Cursor ends at or below 60%
         *   leaves a phase alone when there are no `impl` tasks to move
-        *   reports an overlap with another feature
     *   **`schedule`**:
         *   dependency gating
         *   exact-path overlap
@@ -712,14 +739,30 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
         *   the cap of 2
         *   `lead` tasks returned with `assignee: lead`
         *   returned tasks include `vendor` and the profile's worker `model`
+        *   a cooling-down vendor's tasks are rerouted (`rerouted: true`)
+        *   both vendors cooling down returns `blocked: quota`
+        *   a glob entry counts as its literal folder for overlap
         *   phase advance
     *   **`merge` and `reconcile`**:
         *   a trailer merge is marked merged after the task branch is deleted
+        *   a merge appends one routing outcome line with every field filled in
         *   a manual merge with the trailer is absorbed
         *   local `merged` without a trailer is a contradiction
         *   a missing branch is a contradiction
+        *   another branch checked out while the feature is active asks to switch back
         *   a feature merged to `main` without `signed-off` is a contradiction
         *   a missing local file is rebuilt and the losses are reported
+    *   **`verify`**:
+        *   in-scope changes, including glob matches
+        *   an out-of-scope file is reported
+        *   an untracked new file is counted
+        *   a failing test is reported with its exit code
+        *   the worktree is left unchanged
+    *   **`lens` and `cooldown`**:
+        *   the next lens not `done` is returned after a simulated interruption
+        *   a cooldown expires after its time
+        *   `-Clear` clears it
+        *   only the first set of a cooldown logs a decision
     *   **`status`**: each of the 4 selection rules.
     *   **`finish`**:
         *   fails without signed-off
@@ -739,7 +782,7 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 *   **Type / Scope**: Licensing.
 *   **Proposed Changes**:
     *   List every file from items 12 and 14 under EGM, at commit `b7d9e27`, as unmodified.
-    *   Mention the manifest and the sync script.
+    *   Include `drift_report.md` (from `skills/egm-drift-report/SKILL.md`) and the six persona and standard files added in item 14.
 
 #### 22. `docs/decisions/001-vendor-egm-workflow.md` (Modify)
 
@@ -747,8 +790,7 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 *   **Proposed Changes**: Record the final layout:
     *   the workflow text in `skills/feature/egm/`
     *   the personas in `skills/delegate/personas/`
-    *   the manifest
-    *   the sync script path `scripts/egm-sync.ps1`
+    *   the sync script deferred until the first upstream change
 
 #### 23. `README.md` and `docs/HANDOFF.md` (Modify)
 
@@ -769,9 +811,9 @@ Names used below: `<repo>` is the main checkout of the target repo, `<name>` is 
 
 ### Build order
 
-1.  **delegate changes** (items 14–17), with the existing `delegate` checks re-run.
+1.  **delegate changes** (items 14–17): target by file, rule-file removal, standards lookup, `review.strong`. Re-run the existing `delegate` checks.
 2.  **`feature.ps1`, its schemas, templates and routing config, and the Pester tests** (items 8–11, 10b and 19). These are written test-first.
-3.  **Vendored EGM, the manifest and the sync script** (items 12, 13, 18 and 21).
+3.  **Vendored EGM and the notices** (items 12 and 21).
 4.  **The router and stage files** (items 1–7).
 5.  **Docs and machine setup** (items 20 and 22–25).
 6.  **The manual CUJ checklist** on `sandbox`.
@@ -781,8 +823,10 @@ Steps 2 and 3 do not share files and can be delegated in parallel. Step 4 is wri
 ### Verification Plan
 
 *   **Unit tests**: `pwsh -NoProfile -c "Import-Module Pester -MinimumVersion 5.0; Invoke-Pester skills/feature/tests -Output Detailed"`. All cases in item 19 pass.
-*   **delegate regression**: re-run the `delegate` checks in `docs/test-plan.md` that touch profiles and personas. Add one `review-strong` run on each vendor.
-*   **Sync script**: run `egm-sync.ps1` against a local EGM clone at the pinned commit (expect all `unchanged`), then with one file edited locally (expect `modifiedLocally`).
+*   **delegate regression**: re-run the `delegate` checks in `docs/test-plan.md` that touch profiles and personas. Also add these checks:
+    *   One strong-tier review on each vendor, of a target over 28,000 characters (this design doc). It must succeed on agy.
+    *   One read-only run in a repo that has an `AGENTS.md`. It must report no violation, and the rule file must be back after the run.
+    *   One `council` run, to confirm the target-by-file change did not break it.
 *   **End to end**: the manual CUJ 1–7 checklist on the `sandbox` repo, in fresh sessions:
     *   CUJ 2 is run after `/clear`.
     *   CUJ 7 checks that "ok" does not pass a gate.
