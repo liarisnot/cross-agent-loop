@@ -1,3 +1,6 @@
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
+
 function New-TestRepo {
     $dir = Join-Path $TestDrive ("repo-{0}" -f [guid]::NewGuid())
     New-Item -ItemType Directory -Path $dir | Out-Null
@@ -102,5 +105,157 @@ function New-FeatureAtStage {
     }
     if ($Stage -eq 'signoff') {
         Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'signoff', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    }
+}
+
+function New-PlanFile {
+    param(
+        [string]$Path,
+        [hashtable]$Plan
+    )
+    $json = $Plan | ConvertTo-Json -Depth 12
+    $json = $json -replace "`r`n", "`n" -replace "`r", "`n"
+    if (-not $json.EndsWith("`n")) { $json += "`n" }
+    [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function Set-TaskState {
+    param(
+        [string]$Repo,
+        [string]$Name,
+        [hashtable]$States
+    )
+    $dir = Join-Path $Repo ".xagent/features/$Name"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $tasks = [ordered]@{}
+    foreach ($id in $States.Keys) {
+        $tasks[$id] = [ordered]@{ status = [string]$States[$id]; failures = 0 }
+    }
+    $body = [ordered]@{
+        name          = $Name
+        lastReconcile = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        tasks         = $tasks
+    }
+    $json = $body | ConvertTo-Json -Depth 10
+    $json = $json -replace "`r`n", "`n" -replace "`r", "`n"
+    if (-not $json.EndsWith("`n")) { $json += "`n" }
+    [IO.File]::WriteAllText((Join-Path $dir 'state.json'), $json, [Text.UTF8Encoding]::new($false))
+}
+
+function Get-StandardTwoPhasePlan {
+    return @{
+        summary = 'Test plan summary'
+        phases  = @(
+            @{
+                n         = 1
+                rationale = 'Phase one rationale'
+                test      = 'pwsh -NoProfile -c "exit 0"'
+                tasks     = @(
+                    @{
+                        id        = 't1'
+                        title     = 'Task one'
+                        dependsOn = @()
+                        files     = @('src/a.ts')
+                        test      = 'npm test'
+                        profile   = 'code'
+                        brief     = 'Do task one.'
+                    },
+                    @{
+                        id        = 't2'
+                        title     = 'Task two'
+                        dependsOn = @('t1')
+                        files     = @('src/b.ts')
+                        test      = 'npm test'
+                        profile   = 'code-hard'
+                        brief     = 'Do task two.'
+                    }
+                )
+            },
+            @{
+                n         = 2
+                rationale = 'Phase two rationale'
+                test      = 'pwsh -NoProfile -c "exit 0"'
+                tasks     = @(
+                    @{
+                        id        = 't3'
+                        title     = 'Task three'
+                        dependsOn = @('t2')
+                        files     = @('docs/readme.md')
+                        test      = 'npm test'
+                        profile   = 'code'
+                        brief     = 'Do task three.'
+                    }
+                )
+            }
+        )
+    }
+}
+
+function Import-TestPlan {
+    param(
+        [string]$Repo,
+        [string]$Name,
+        [hashtable]$Plan
+    )
+    New-FeatureAtStage -Repo $Repo -Name $Name -Stage 'plan'
+    $planPath = Join-Path $TestDrive ("plan-$Name-{0}.json" -f [guid]::NewGuid())
+    New-PlanFile -Path $planPath -Plan $Plan
+    $r = Invoke-Feature @('plan', '-PlanFile', $planPath, '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo
+    Assert-FeatureOk $r
+    return $r
+}
+
+function Write-FeatureJsonFileLocal {
+    param([string]$Path, [object]$Feature)
+    if ($Feature.gates -and $Feature.gates.PSObject.Properties) {
+        foreach ($prop in $Feature.gates.PSObject.Properties) {
+            $atP = $prop.Value.PSObject.Properties['at']
+            if ($null -eq $atP) { continue }
+            $atP.Value = ([datetime]$atP.Value).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        }
+    }
+    $json = $Feature | ConvertTo-Json -Depth 12
+    $json = $json -replace '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+Z', '$1Z'
+    $json = $json -replace "`r`n", "`n" -replace "`r", "`n"
+    if (-not $json.EndsWith("`n")) { $json += "`n" }
+    [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function New-OverlapTestPlan {
+    param(
+        [string]$FileA,
+        [string]$FileB,
+        [string]$IdA = 'ta',
+        [string]$IdB = 'tb'
+    )
+    return @{
+        summary = 'overlap test'
+        phases  = @(
+            @{
+                n         = 1
+                rationale = 'r'
+                test      = 'pwsh -NoProfile -c "exit 0"'
+                tasks     = @(
+                    @{
+                        id        = $IdA
+                        title     = 'A'
+                        dependsOn = @()
+                        files     = @($FileA)
+                        test      = 'pwsh -NoProfile -c "exit 0"'
+                        profile   = 'code'
+                        brief     = 'a'
+                    },
+                    @{
+                        id        = $IdB
+                        title     = 'B'
+                        dependsOn = @()
+                        files     = @($FileB)
+                        test      = 'pwsh -NoProfile -c "exit 0"'
+                        profile   = 'code'
+                        brief     = 'b'
+                    }
+                )
+            }
+        )
     }
 }

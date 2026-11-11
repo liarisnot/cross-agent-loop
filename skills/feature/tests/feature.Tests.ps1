@@ -1,4 +1,4 @@
-#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
+﻿#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -273,6 +273,20 @@ Describe 'feature.ps1 commit-design and commit-records' {
 }
 
 Describe 'feature.ps1 checkin' {
+    It 'preserves non-ASCII gate quote after checkin rewrites feature.json' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'utf' -Stage 'design-review'
+        $designPath = Join-Path $repo 'docs/designs/utf.md'
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value 'design body'
+        Assert-FeatureOk (Invoke-Feature @('commit-design', '-Section', 'body', '-Repo', $repo, '-Name', 'utf') -WorkingDirectory $repo)
+        $quote = "caf$([char]0xE9) $([char]0x2014) ok"
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'design-locked', '-Quote', $quote, '-Repo', $repo, '-Name', 'utf') -WorkingDirectory $repo)
+        Assert-FeatureOk (Invoke-Feature @('checkin', '-Mode', 'every-phase', '-Repo', $repo, '-Name', 'utf') -WorkingDirectory $repo)
+        $feat = (& git -C $repo show 'HEAD:docs/features/utf/feature.json' | ConvertFrom-Json)
+        $feat.gates.'design-locked'.quote | Should -Be $quote
+    }
+
     It 'switches checkin mode both ways' {
         $repo = New-TestRepo
         New-FeatureAtStage -Repo $repo -Name 'ck' -Stage 'design'
@@ -439,5 +453,612 @@ Describe 'feature.ps1 errors' {
         $r = Invoke-Feature @('decision', '-Kind', 'decision', '-Text', 'x', '-Repo', $repo, '-Name', 'br') -WorkingDirectory $repo
         $r.ExitCode | Should -Be 1
         $r.Json.error | Should -Match 'check out feature/br first'
+    }
+}
+
+Describe 'feature.ps1 plan' {
+    It 'imports a valid two-phase plan' {
+        $repo = New-TestRepo
+        $r = Import-TestPlan -Repo $repo -Name 'pl1' -Plan (Get-StandardTwoPhasePlan)
+        $r.Json.ok | Should -BeTrue
+        $r.Json.phases | Should -Be 2
+        $r.Json.tasks | Should -Be 3
+        $feat = (& git -C $repo show 'HEAD:docs/features/pl1/feature.json' | ConvertFrom-Json)
+        Test-Schema -Json ($feat | ConvertTo-Json -Depth 12) -SchemaName 'feature' | Should -BeTrue
+        $feat.phases[0].tasks[0].delegateTaskId | Should -Be 'pl1-t1'
+        $md = (& git -C $repo show 'HEAD:docs/features/pl1/plan.md') -join "`n"
+        $md | Should -Match '# Plan: pl1'
+        $md | Should -Match '## Phase 1'
+        $md | Should -Match '## Phase 2'
+        $md | Should -Match '\| t1 \|'
+        $md | Should -Match '\| t2 \|'
+        $md | Should -Match '\| t3 \|'
+        $md | Should -Match '\*\*t1\.\*\*'
+        $md | Should -Match '\*\*t2\.\*\*'
+        $md | Should -Match '\*\*t3\.\*\*'
+    }
+
+    It 'commits dependsOn and files as arrays for a one-task plan' {
+        $repo = New-TestRepo
+        $plan = @{
+            summary = 'one task'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(@{
+                            id = 'solo'; title = 'solo'; dependsOn = @(); files = @('src/a.ts')
+                            test = 't'; profile = 'code'; brief = 'b'
+                        })
+                })
+        }
+        Import-TestPlan -Repo $repo -Name 'one' -Plan $plan | Out-Null
+        $raw = (& git -C $repo show 'HEAD:docs/features/one/feature.json') -join "`n"
+        $raw | Should -Match '"dependsOn": \[\]'
+        $feat = $raw | ConvertFrom-Json -AsHashtable
+        $task = $feat.phases[0].tasks[0]
+        $task.dependsOn -is [array] | Should -BeTrue
+        $task.dependsOn.Count | Should -Be 0
+        $task.files -is [array] | Should -BeTrue
+        $task.files.Count | Should -Be 1
+        $task.files[0] | Should -Be 'src/a.ts'
+    }
+
+    It 'delegateTaskId uses 12-character name cut for long names' {
+        $repo = New-TestRepo
+        $name = 'averyveryverylongname'
+        $plan = Get-StandardTwoPhasePlan
+        Import-TestPlan -Repo $repo -Name $name -Plan $plan | Out-Null
+        $feat = (& git -C $repo show "HEAD:docs/features/$name/feature.json" | ConvertFrom-Json)
+        $feat.phases[0].tasks[0].delegateTaskId | Should -Be 'averyveryver-t1'
+    }
+
+    It 'delegateTaskId strips trailing hyphen from 12-char cut' {
+        $repo = New-TestRepo
+        $name = 'abcdefghijk-x'
+        Import-TestPlan -Repo $repo -Name $name -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $feat = (& git -C $repo show "HEAD:docs/features/$name/feature.json" | ConvertFrom-Json)
+        $feat.phases[0].tasks[0].delegateTaskId | Should -Be 'abcdefghijk-t1'
+    }
+
+    It 'rejects task id longer than 20 characters' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'badid' -Stage 'plan'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[0].id = 'abcdefghijklmnopqrstu'
+        $path = Join-Path $TestDrive 'bad-id.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'badid') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'plan does not match plan.schema.json'
+    }
+
+    It 'rejects duplicate task id' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'dup' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(
+                        @{ id = 'x'; title = 'a'; dependsOn = @(); files = @('a'); test = 't'; profile = 'code'; brief = 'b' },
+                        @{ id = 'x'; title = 'b'; dependsOn = @(); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }
+                    )
+                })
+        }
+        $path = Join-Path $TestDrive 'dup.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'dup') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'duplicate task id x'
+    }
+
+    It 'rejects unknown dependency' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'unk' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(@{ id = 'a'; title = 'a'; dependsOn = @('missing'); files = @('a'); test = 't'; profile = 'code'; brief = 'b' })
+                })
+        }
+        $path = Join-Path $TestDrive 'unk.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'unk') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'unknown dependency missing in a'
+    }
+
+    It 'rejects dependency in a later phase' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'late' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(
+                @{ n = 1; rationale = 'r'; test = 't'; tasks = @(@{ id = 'a'; title = 'a'; dependsOn = @('b'); files = @('a'); test = 't'; profile = 'code'; brief = 'b' }) },
+                @{ n = 2; rationale = 'r'; test = 't'; tasks = @(@{ id = 'b'; title = 'b'; dependsOn = @(); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }) }
+            )
+        }
+        $path = Join-Path $TestDrive 'late.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'late') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'a depends on b in a later phase'
+    }
+
+    It 'rejects a two-task dependency cycle' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'cyc' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(
+                        @{ id = 'a'; title = 'a'; dependsOn = @('b'); files = @('a'); test = 't'; profile = 'code'; brief = 'b' },
+                        @{ id = 'b'; title = 'b'; dependsOn = @('a'); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }
+                    )
+                })
+        }
+        $path = Join-Path $TestDrive 'cyc.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'cyc') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'dependency cycle involving'
+    }
+
+    It 'rejects phase numbers with a gap' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'gap' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(
+                @{ n = 1; rationale = 'r'; test = 't'; tasks = @(@{ id = 'a'; title = 'a'; dependsOn = @(); files = @('a'); test = 't'; profile = 'code'; brief = 'b' }) },
+                @{ n = 3; rationale = 'r'; test = 't'; tasks = @(@{ id = 'b'; title = 'b'; dependsOn = @(); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }) }
+            )
+        }
+        $path = Join-Path $TestDrive 'gap.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'gap') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'phases must be numbered 1..N'
+    }
+
+    It 'fails plan in design stage' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'ds' -Stage 'design'
+        $path = Join-Path $TestDrive 'p.json'
+        New-PlanFile -Path $path -Plan (Get-StandardTwoPhasePlan)
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'ds') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'only allowed in stage plan'
+    }
+
+    It 'keeps existing delegateTaskId on re-plan' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'reid' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $featPath = Join-Path $repo 'docs/features/reid/feature.json'
+        $feat = Get-Content -Raw $featPath | ConvertFrom-Json
+        $feat.phases[0].tasks[0].delegateTaskId = 'custom-id'
+        Write-FeatureJsonFileLocal $featPath $feat
+        Assert-FeatureOk (Invoke-Feature @('commit-records', '-Message', 'custom delegate id', '-Repo', $repo, '-Name', 'reid') -WorkingDirectory $repo)
+        $path = Join-Path $TestDrive 'replan.json'
+        New-PlanFile -Path $path -Plan (Get-StandardTwoPhasePlan)
+        Assert-FeatureOk (Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'reid') -WorkingDirectory $repo)
+        $feat2 = (& git -C $repo show 'HEAD:docs/features/reid/feature.json' | ConvertFrom-Json)
+        ($feat2.phases[0].tasks | Where-Object { $_.id -eq 't1' }).delegateTaskId | Should -Be 'custom-id'
+    }
+
+    It 'rejects re-plan that drops a merged task' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rm' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        & git -C $repo commit --allow-empty -m 'merge t1' -m 'Xagent-Task: t1' | Out-Null
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks = @($plan.phases[0].tasks | Where-Object { $_.id -ne 't1' })
+        $path = Join-Path $TestDrive 'rm.json'
+        New-PlanFile -Path $path -Plan $plan
+        $statePath = Join-Path $repo '.xagent/features/rm/state.json'
+        if (Test-Path $statePath) { Remove-Item $statePath -Force }
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'rm') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'task t1 is already merged'
+    }
+
+    It 'rejects re-plan that changes merged task brief' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rb' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        & git -C $repo commit --allow-empty -m 'merge t1' -m 'Xagent-Task: t1' | Out-Null
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[0].brief = 'changed brief'
+        $path = Join-Path $TestDrive 'rb.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'rb') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'task t1 is already merged'
+    }
+
+    It 'allows re-plan that keeps merged task and changes another' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rok' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        & git -C $repo commit --allow-empty -m 'merge t1' -m 'Xagent-Task: t1' | Out-Null
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[1].brief = 'updated t2 brief'
+        $path = Join-Path $TestDrive 'rok.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'rok') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+    }
+
+    It 'plan.md renders empty dependsOn as em dash' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'em' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $md = (& git -C $repo show 'HEAD:docs/features/em/plan.md') -join "`n"
+        $dep = (($md -split "`n" | Where-Object { $_ -match '^\| t1 \|' } | Select-Object -First 1) -split '\|')[3].Trim()
+        [int][char]$dep | Should -Be 0x2014
+    }
+
+    It 'plan.md joins files with br and escapes pipe in title' {
+        $repo = New-TestRepo
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[0].files = @('a', 'b')
+        $plan.phases[0].tasks[0].title = 'pi|pe'
+        Import-TestPlan -Repo $repo -Name 'mdr' -Plan $plan | Out-Null
+        $md = (& git -C $repo show 'HEAD:docs/features/mdr/plan.md') -join "`n"
+        $md | Should -Match 'a<br>b'
+        $md | Should -Match 'pi\\\|pe'
+    }
+
+    It 'plan.md has no CR or BOM' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'encp' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $repo 'docs/features/encp/plan.md'))
+        $bytes[0] | Should -Not -Be 0xEF
+        [Text.Encoding]::UTF8.GetString($bytes) | Should -Not -Match "`r"
+    }
+
+    It 'orders phases by n in feature.json and plan.md when input is reversed' {
+        $repo = New-TestRepo
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases = @($plan.phases[1], $plan.phases[0])
+        Import-TestPlan -Repo $repo -Name 'ord' -Plan $plan | Out-Null
+        $feat = (& git -C $repo show 'HEAD:docs/features/ord/feature.json' | ConvertFrom-Json)
+        $feat.phases[0].n | Should -Be 1
+        $feat.phases[1].n | Should -Be 2
+        $md = (& git -C $repo show 'HEAD:docs/features/ord/plan.md') -join "`n"
+        ($md.IndexOf('## Phase 1')) | Should -BeLessThan ($md.IndexOf('## Phase 2'))
+    }
+
+    It 'rejects duplicate phase numbers' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'dpn' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(
+                @{ n = 1; rationale = 'r'; test = 't'; tasks = @(@{ id = 'a'; title = 'a'; dependsOn = @(); files = @('a'); test = 't'; profile = 'code'; brief = 'b' }) },
+                @{ n = 1; rationale = 'r'; test = 't'; tasks = @(@{ id = 'b'; title = 'b'; dependsOn = @(); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }) }
+            )
+        }
+        $path = Join-Path $TestDrive 'dpn.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'dpn') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'phases must be numbered 1..N'
+    }
+
+    It 'rejects self-dependency' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'self' -Stage 'plan'
+        $plan = @{
+            summary = 'x'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(@{ id = 'a'; title = 'a'; dependsOn = @('a'); files = @('a'); test = 't'; profile = 'code'; brief = 'b' })
+                })
+        }
+        $path = Join-Path $TestDrive 'self.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'self') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'dependency cycle involving a'
+    }
+
+    It 'rejected plan leaves HEAD feature.json plan.md and input file unchanged' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'nu' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $head1 = & git -C $repo rev-parse HEAD
+        $md1 = & git -C $repo show 'HEAD:docs/features/nu/plan.md'
+        $path = Join-Path $TestDrive 'nu-bad.json'
+        New-PlanFile -Path $path -Plan @{
+            summary = 'x'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(
+                        @{ id = 'a'; title = 'a'; dependsOn = @('b'); files = @('a'); test = 't'; profile = 'code'; brief = 'b' },
+                        @{ id = 'b'; title = 'b'; dependsOn = @('a'); files = @('b'); test = 't'; profile = 'code'; brief = 'b' }
+                    )
+                })
+        }
+        $null = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'nu') -WorkingDirectory $repo
+        & git -C $repo rev-parse HEAD | Should -Be $head1
+        (& git -C $repo show 'HEAD:docs/features/nu/plan.md') | Should -Be $md1
+        Test-Path -LiteralPath $path | Should -BeTrue
+    }
+
+    It 'plan on main fails branch check' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'mainp' -Stage 'plan'
+        & git -C $repo switch main
+        $path = Join-Path $TestDrive 'mainp.json'
+        New-PlanFile -Path $path -Plan (Get-StandardTwoPhasePlan)
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'mainp') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'check out feature/mainp first'
+    }
+
+    It 'fails when PlanFile is missing' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'nop' -Stage 'plan'
+        $r = Invoke-Feature @('plan', '-Repo', $repo, '-Name', 'nop') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'PlanFile is required'
+    }
+
+    It 'fails when plan file does not exist' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'nof' -Stage 'plan'
+        $r = Invoke-Feature @('plan', '-PlanFile', 'nope.json', '-Repo', $repo, '-Name', 'nof') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'plan file not found'
+    }
+
+    It 'fails when plan file is not valid JSON' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'badj' -Stage 'plan'
+        $path = Join-Path $TestDrive 'badj.txt'
+        Set-Content -LiteralPath $path -Value 'not json' -NoNewline
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'badj') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'plan file is not valid JSON'
+    }
+}
+
+Describe 'feature.ps1 schedule' {
+    It 'returns empty tasks when feature has no plan' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'npl' -Stage 'plan'
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'npl') -WorkingDirectory $repo
+        $r.Json.liveRuns | Should -Be 0
+        $r.Json.cap | Should -Be 2
+        $r.Json.tasks | Should -Be @()
+        Test-Schema -Json ($r.Json | ConvertTo-Json -Depth 6) -SchemaName 'schedule' | Should -BeTrue
+    }
+
+    It 'dependency gating returns only ready task' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'dep' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $r1 = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'dep') -WorkingDirectory $repo
+        $r1.Json.tasks.id | Should -Be @('t1')
+        Set-TaskState -Repo $repo -Name 'dep' -States @{ t1 = 'merged' }
+        $r2 = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'dep') -WorkingDirectory $repo
+        $r2.Json.tasks.id | Should -Be @('t2')
+    }
+
+    It 'overlap: equal paths' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov1' -Plan (New-OverlapTestPlan -FileA 'src/x.ts' -FileB 'src/x.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov1' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov1') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'overlap: folder vs file under it' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov2' -Plan (New-OverlapTestPlan -FileA 'src/' -FileB 'src/x/y.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov2' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov2') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'overlap: ** overlaps anything' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov3' -Plan (New-OverlapTestPlan -FileA '**' -FileB 'anywhere/foo.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov3' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov3') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'overlap: *.md overlaps anything' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov4' -Plan (New-OverlapTestPlan -FileA '*.md' -FileB 'z.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov4' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov4') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'overlap: src/test*.ts vs src/testing.ts' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov5' -Plan (New-OverlapTestPlan -FileA 'src/test*.ts' -FileB 'src/testing.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov5' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov5') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'overlap: src/a/* vs src/b/x.ts does not overlap' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov6' -Plan (New-OverlapTestPlan -FileA 'src/a/*' -FileB 'src/b/x.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov6' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov6') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Be @('tb')
+    }
+
+    It 'overlap: src/a.ts vs src/a.tsx does not overlap' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ov7' -Plan (New-OverlapTestPlan -FileA 'src/a.ts' -FileB 'src/a.tsx') | Out-Null
+        Set-TaskState -Repo $repo -Name 'ov7' -States @{ ta = 'running' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov7') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Be @('tb')
+    }
+
+    It 'returns two non-overlapping ready tasks' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'two' -Plan (New-OverlapTestPlan -FileA 'src/a.ts' -FileB 'src/b.ts') | Out-Null
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'two') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Be @('ta', 'tb')
+    }
+
+    It 'returns only first when two pending tasks overlap each other' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'fov' -Plan (New-OverlapTestPlan -FileA 'src/' -FileB 'src/x.ts') | Out-Null
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'fov') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Be @('ta')
+    }
+
+    It 'cap blocks tasks when two live runs exist for feature' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'cap' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
+        $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
+        try {
+            Start-Sleep -Milliseconds 300
+            $holder.Refresh()
+            $start = $holder.StartTime.ToUniversalTime().ToString('o')
+            $runDir = Join-Path $repo '.xagent/runs/s1'
+            New-Item -ItemType Directory -Force $runDir | Out-Null
+            $body = (@{ pid = $holder.Id; startTime = $start; feature = 'cap' } | ConvertTo-Json -Compress)
+            Set-Content -LiteralPath (Join-Path $runDir 'a.pid') -Value $body -NoNewline
+            Set-Content -LiteralPath (Join-Path $runDir 'b.pid') -Value $body -NoNewline
+            $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'cap') -WorkingDirectory $repo
+            $r.Json.liveRuns | Should -Be 2
+            $r.Json.tasks | Should -Be @()
+        } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'live run count ignores pid files for another feature' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'cap2' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
+        $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
+        try {
+            Start-Sleep -Milliseconds 300
+            $holder.Refresh()
+            $start = $holder.StartTime.ToUniversalTime().ToString('o')
+            $runDir = Join-Path $repo '.xagent/runs/s2'
+            New-Item -ItemType Directory -Force $runDir | Out-Null
+            $body = (@{ pid = $holder.Id; startTime = $start; feature = 'other' } | ConvertTo-Json -Compress)
+            Set-Content -LiteralPath (Join-Path $runDir 'x.pid') -Value $body -NoNewline
+            Set-Content -LiteralPath (Join-Path $runDir 'y.pid') -Value $body -NoNewline
+            $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'cap2') -WorkingDirectory $repo
+            $r.Json.liveRuns | Should -Be 0
+        } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'mismatched start time is not live' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'cap3' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
+        $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
+        try {
+            Start-Sleep -Milliseconds 300
+            $runDir = Join-Path $repo '.xagent/runs/s3'
+            New-Item -ItemType Directory -Force $runDir | Out-Null
+            $body = (@{ pid = $holder.Id; startTime = '2019-01-01T00:00:00.0000000Z'; feature = 'cap3' } | ConvertTo-Json -Compress)
+            Set-Content -LiteralPath (Join-Path $runDir 'z.pid') -Value $body -NoNewline
+            $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'cap3') -WorkingDirectory $repo
+            $r.Json.liveRuns | Should -Be 0
+            $r.Json.tasks.id | Should -Be @('ta', 'tb')
+        } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'open stop returns empty tasks' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'stp' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('decision', '-Kind', 'stop', '-Text', 'wait', '-Repo', $repo, '-Name', 'stp') -WorkingDirectory $repo)
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'stp') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'returns delegateTaskId and model from models.json' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'mod' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'mod') -WorkingDirectory $repo
+        $t1 = $r.Json.tasks | Where-Object { $_.id -eq 't1' } | Select-Object -First 1
+        $t1.delegateTaskId | Should -Be 'mod-t1'
+        $t1.model | Should -Be 'composer-2.5'
+        Set-TaskState -Repo $repo -Name 'mod' -States @{ t1 = 'merged' }
+        $r2 = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'mod') -WorkingDirectory $repo
+        $t2 = $r2.Json.tasks | Where-Object { $_.id -eq 't2' } | Select-Object -First 1
+        $t2.model | Should -Be 'grok-4.7-high'
+    }
+
+    It 'advances to phase 2 when phase 1 is merged' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ph2' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'ph2' -States @{ t1 = 'merged'; t2 = 'merged' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ph2') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Be @('t3')
+    }
+
+    It 'does not return failed tasks' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'fail' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'fail' -States @{ t1 = 'failed' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'fail') -WorkingDirectory $repo
+        $r.Json.tasks.id | Should -Not -Contain 't1'
+    }
+
+    It 'returns one task when one live run and two ready tasks' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'one' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
+        $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
+        try {
+            Start-Sleep -Milliseconds 300
+            $holder.Refresh()
+            $start = $holder.StartTime.ToUniversalTime().ToString('o')
+            $runDir = Join-Path $repo '.xagent/runs/one'
+            New-Item -ItemType Directory -Force $runDir | Out-Null
+            $body = (@{ pid = $holder.Id; startTime = $start; feature = 'one' } | ConvertTo-Json -Compress)
+            Set-Content -LiteralPath (Join-Path $runDir 'r.pid') -Value $body -NoNewline
+            $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'one') -WorkingDirectory $repo
+            $r.Json.liveRuns | Should -Be 1
+            $r.Json.tasks.Count | Should -Be 1
+        } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'overlap against in-review task' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rev' -Plan (New-OverlapTestPlan -FileA 'src/x.ts' -FileB 'src/x.ts') | Out-Null
+        Set-TaskState -Repo $repo -Name 'rev' -States @{ ta = 'in-review' }
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'rev') -WorkingDirectory $repo
+        $r.Json.tasks | Should -Be @()
+    }
+
+    It 'is read-only and works from main' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'ro' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $stateBefore = Test-Path (Join-Path $repo '.xagent/features/ro/state.json')
+        & git -C $repo switch main
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ro') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        Test-Path (Join-Path $repo '.xagent/features/ro/.lock') | Should -BeFalse
+        if (-not $stateBefore) {
+            Test-Path (Join-Path $repo '.xagent/features/ro/state.json') | Should -BeFalse
+        }
+    }
+
+    It 'fails for missing feature branch' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ghost') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'no feature ghost'
+    }
+
+    It 'returns array-shaped tasks and files for a one-task plan' {
+        $repo = New-TestRepo
+        $plan = @{
+            summary = 'one task'
+            phases  = @(@{
+                    n = 1; rationale = 'r'; test = 't'
+                    tasks = @(@{
+                            id = 'solo'; title = 'solo'; dependsOn = @(); files = @('src/a.ts')
+                            test = 't'; profile = 'code'; brief = 'b'
+                        })
+                })
+        }
+        Import-TestPlan -Repo $repo -Name 'sched1' -Plan $plan | Out-Null
+        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'sched1') -WorkingDirectory $repo
+        Test-Schema -Json $r.Raw -SchemaName 'schedule' | Should -BeTrue
+        $r.Json.tasks -is [array] | Should -BeTrue
+        $r.Json.tasks.Count | Should -Be 1
+        $r.Json.tasks[0].files -is [array] | Should -BeTrue
+        $r.Json.tasks[0].files[0] | Should -Be 'src/a.ts'
     }
 }
