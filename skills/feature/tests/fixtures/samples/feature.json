@@ -1,0 +1,32 @@
+{
+  "name": "fb-schemas",
+  "stage": "build",
+  "checkin": "on-problems",
+  "designDoc": "docs/designs/feature-skill.md",
+  "gates": {
+    "design-locked": {
+      "at": "2026-01-01T00:00:00Z",
+      "quote": "Design is complete.",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "designBlob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "summary": "Add schemas and tests for the feature skill.",
+  "phases": [
+    {
+      "n": 1,
+      "rationale": "Define JSON schemas first.",
+      "test": "pwsh -NoProfile -c \"exit 0\"",
+      "tasks": [
+        {
+          "id": "schemas",
+          "delegateTaskId": "fb-schemas-schemas"
+        },
+        {
+          "id": "tests",
+          "delegateTaskId": "fb-schemas-tests"
+        }
+      ]
+    }
+  ]
+}

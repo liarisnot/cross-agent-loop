@@ -1,0 +1,37 @@
+{
+  "summary": "Add schemas and tests for the feature skill.",
+  "phases": [
+    {
+      "n": 1,
+      "rationale": "Define JSON schemas first.",
+      "test": "pwsh -NoProfile -c \"exit 0\"",
+      "tasks": [
+        {
+          "id": "Schemas",
+          "title": "JSON schemas",
+          "dependsOn": [],
+          "files": ["skills/feature/schemas/"],
+          "test": "pwsh -NoProfile -c \"exit 0\"",
+          "profile": "code",
+          "brief": "Create all six schema files."
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "rationale": "Harness and fixtures after schemas.",
+      "test": "pwsh -NoProfile -c \"exit 0\"",
+      "tasks": [
+        {
+          "id": "tests",
+          "title": "Pester harness",
+          "dependsOn": ["schemas"],
+          "files": ["skills/feature/tests/"],
+          "test": "pwsh -NoProfile -c \"exit 0\"",
+          "profile": "code",
+          "brief": "Create TestHelpers and feature.Tests.ps1."
+        }
+      ]
+    }
+  ]
+}

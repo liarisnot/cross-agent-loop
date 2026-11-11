@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feature status",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "selected": { "type": ["string", "null"] },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "stage": {
+            "type": "string",
+            "enum": ["design", "design-review", "plan", "build", "signoff", "abandoned", "done"]
+          }
+        },
+        "required": ["name", "stage"]
+      }
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["design", "design-review", "plan", "build", "signoff", "abandoned"]
+    },
+    "phase": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "current": { "type": "integer", "minimum": 1 },
+            "total": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["current", "total"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "checkin": { "type": "string", "enum": ["on-problems", "every-phase"] },
+    "branch": { "type": "string" },
+    "treeClean": { "type": "boolean" },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "delegateTaskId": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "preflight", "running", "in-review", "merged", "failed"]
+          },
+          "rounds": { "type": "integer", "minimum": 0 },
+          "councils": { "type": "integer", "minimum": 0 },
+          "failures": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["id", "delegateTaskId", "status", "rounds", "councils", "failures"]
+      }
+    },
+    "waitingOn": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": { "gate": { "type": "string" } },
+          "required": ["gate"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "stop": { "type": "string" } },
+          "required": ["stop"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "running": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["running"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reviewRuns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "phase": { "type": ["integer", "null"] },
+          "persona": { "type": "string" },
+          "model": { "type": "string" },
+          "standard": { "type": ["string", "null"] },
+          "done": { "type": "boolean" }
+        },
+        "required": ["id", "phase", "persona", "model", "standard", "done"]
+      }
+    },
+    "diffTouchesRuleFiles": { "type": "boolean" },
+    "tokens": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 },
+            "reasoning": { "type": "integer", "minimum": 0 },
+            "cacheRead": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["input", "output", "reasoning", "cacheRead", "total"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "lastDecisions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nextAction": { "type": "string" }
+  },
+  "required": ["ok"],
+  "if": {
+    "properties": { "selected": { "type": "null" } },
+    "required": ["selected"]
+  },
+  "then": {
+    "required": ["ok", "selected", "features"]
+  },
+  "else": {
+    "required": [
+      "ok",
+      "selected",
+      "stage",
+      "phase",
+      "checkin",
+      "branch",
+      "treeClean",
+      "tasks",
+      "waitingOn",
+      "reviewRuns",
+      "diffTouchesRuleFiles",
+      "tokens",
+      "lastDecisions",
+      "nextAction"
+    ]
+  }
+}

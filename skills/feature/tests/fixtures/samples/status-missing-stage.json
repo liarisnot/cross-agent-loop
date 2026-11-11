@@ -1,0 +1,60 @@
+{
+  "ok": true,
+  "selected": "fb-schemas",
+  "phase": { "current": 1, "total": 2 },
+  "checkin": "on-problems",
+  "branch": "feature/fb-schemas",
+  "treeClean": true,
+  "tasks": [
+    {
+      "id": "schemas",
+      "delegateTaskId": "fb-schemas-schemas",
+      "status": "merged",
+      "rounds": 0,
+      "councils": 0,
+      "failures": 0
+    },
+    {
+      "id": "tests",
+      "delegateTaskId": "fb-schemas-tests",
+      "status": "running",
+      "rounds": 1,
+      "councils": 0,
+      "failures": 0
+    }
+  ],
+  "waitingOn": { "running": ["fb-schemas-tests"] },
+  "reviewRuns": [
+    {
+      "id": "fb-schemas-d1-zo-p5",
+      "phase": 5,
+      "persona": "zoom_out",
+      "model": "grok-4.7-medium",
+      "standard": "zoom-out-standard.md",
+      "done": true
+    },
+    {
+      "id": "fb-schemas-d1-cm-p5",
+      "phase": 5,
+      "persona": "comprehension",
+      "model": "composer-2.5",
+      "standard": null,
+      "done": false
+    }
+  ],
+  "diffTouchesRuleFiles": false,
+  "tokens": {
+    "input": 3500,
+    "output": 600,
+    "reasoning": 75,
+    "cacheRead": 9000,
+    "total": 13175
+  },
+  "lastDecisions": [
+    "- 2026-01-01T00:00:00Z [stage] design -> design-review",
+    "- 2026-01-01T01:00:00Z [gate] design-locked",
+    "- 2026-01-01T02:00:00Z [stage] design-review -> plan"
+  ],
+  "nextAction": "Run the next ready tasks from schedule.",
+  "features": []
+}

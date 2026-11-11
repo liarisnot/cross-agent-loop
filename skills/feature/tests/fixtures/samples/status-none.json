@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "selected": null,
+  "features": [
+    { "name": "fb-schemas", "stage": "build" },
+    { "name": "old-export", "stage": "done" }
+  ]
+}

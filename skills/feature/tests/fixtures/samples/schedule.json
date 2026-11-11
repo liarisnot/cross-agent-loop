@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "liveRuns": 1,
+  "cap": 2,
+  "tasks": [
+    {
+      "id": "tests",
+      "delegateTaskId": "fb-schemas-tests",
+      "profile": "code",
+      "model": "composer-2.5",
+      "files": ["skills/feature/tests/"]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "fb-schemas",
+  "lastReconcile": "2026-01-01T12:00:00Z",
+  "tasks": {
+    "schemas": {
+      "status": "merged",
+      "failures": 0,
+      "sessionId": null,
+      "resultFile": null,
+      "worktree": null,
+      "baseSha": null,
+      "verify": null
+    },
+    "tests": {
+      "status": "running",
+      "failures": 0,
+      "sessionId": "sess-1",
+      "resultFile": null,
+      "worktree": "D:/repo.xagent/fb-schemas-tests",
+      "baseSha": "cccccccccccccccccccccccccccccccccccccccc",
+      "verify": null
+    }
+  }
+}
