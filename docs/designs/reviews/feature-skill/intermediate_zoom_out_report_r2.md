@@ -13,4 +13,4 @@
 | 3 | Nit | The usage-limit "looks like one" wording and a future matcher bring a detector back | **Fixed.** A reported usage limit is a stop, and everything else takes the normal failed-run path. The matcher is added after a real error |
 | 4 | Nit | The `scope` decision kind has no writer | **Fixed.** Removed |
 | 5 | Nit | The Deploying non-goal still lets the lead deploy with approval | **Kept.** This is the author's earlier choice; it only allows a user-approved one-off step and adds no stage |
-| 6 | Nit | `sandbox/calc.py` doesn't exist | **Dismissed.** It does exist (`sandbox/calc.py`, `sandbox/test_calc.py`) |
+| 6 | Nit | `sandbox/calc.py` doesn't exist | **Valid (corrected after stage 9).** It was first dismissed because the files are on disk, but `sandbox/` is gitignored and not in the tree, so a fresh clone has neither. Fixed in stage 9 (IR9/CD3) |
