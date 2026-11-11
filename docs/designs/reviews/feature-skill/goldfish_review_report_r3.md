@@ -50,3 +50,9 @@ Several new findings sit exactly at the scope of fixes applied in earlier rounds
 ## Outcome (2026-11-10)
 
 The author chose **accept and proceed**. The round 3 findings stay open and go to stage 8 (the intermediate zoom-out), whose job is to judge scope. They are resolved after stage 8 decides what to cut.
+
+## New evidence for DC3 (2026-11-10, the author's Cursor usage page)
+
+*   **The per-request usage list shows `glm-5.2-high` as Type "Included", Cost "Included"**, the same as `grok-4.7-*` and `composer-2.5`. Nothing on that page shows a separate third-party pool or API-priced billing for GLM. The "$20 third-party pool" claim comes from third-party guides and is **unverified**.
+*   **The dashboard's token counts include cache reads.** For example, GLM's round 2 `design_critic` shows about 338k, while `runs.jsonl` recorded a `total` of 44k, which leaves out 243k of `cacheRead`. Token reporting (for `status` and the cost estimates) must include cache reads to match Cursor's numbers.
+*   **Implication.** Don't design the fallback or the capacity estimate around a split pool until the summary or spending page confirms how GLM is billed.
