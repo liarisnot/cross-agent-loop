@@ -6,7 +6,14 @@ Environment as of 2026-11-08: Claude Code 2.1.319 installed. **`agent` (Cursor C
 
 ## T0: Policy check (Antigravity)
 
-- [ ] Read the current Antigravity FAQ and ToS for consumer and Pro plans: is wrapping or automating `agy` headless allowed? Record the URL and a quote here.
+- [x] Read the current Antigravity FAQ and ToS for consumer and Pro plans: is wrapping or automating `agy` headless allowed? Record the URL and a quote here.
+  - **Checked 2026-11-10. Answer: no, not under a consumer (Free, Plus, Pro or Ultra) login.**
+  - [FAQ](https://antigravity.google/docs/faq/), "Can I use Antigravity CLI headless mode in third-party coding agents…": "Antigravity CLI headless mode (`agy -p`) is intended for direct scripting and CI workflows. Wrapping `agy` inside third-party coding agents or applications … [is not supported] under consumer plans."
+  - FAQ, "Why can't I use third-party software (such as Claude Code, …) with my Antigravity login?": "Using third-party software, tools, or services to access Antigravity is a violation of our Terms of Service." "Such actions can result in suspension or termination of your account." "To use a third-party coding agent with Gemini, we recommend using a Gemini Enterprise or Google AI Studio API key."
+  - The Additional Terms §6 cover third-party access to the Service. On the Google forum, replies after the FAQ update (mid-October 2026) say the FAQ supersedes earlier forum answers. They say the rule applies even when the official binary runs as a local subprocess, and that a worker backend for a multi-agent framework is not supported and can trigger automated enforcement. See [forum thread](https://discuss.ai.google.dev/t/clarification-on-subscription-based-agy-p-integration-with-a-local-multi-agent-framework/196472) and [GitHub issue #1493](https://github.com/google-antigravity/antigravity-cli/issues/1493).
+  - **Our `delegate` use (Claude Code launches `agy -p` as a worker or reviewer) is exactly the unsupported case.**
+  - **Supported route:** `agy` reads a Google AI Studio key when `~/.gemini/antigravity-cli/settings.json` has `{"modelProvider":"gemini"}` and `GEMINI_API_KEY` is set (since 1.1.13, 2026-08-14). That bills per token, not against the Pro subscription.
+  - **Also found:** the Cursor CLI offers the same Gemini models (`gemini-4-argon-*`, `gemini-3.8-flash-*`), plus GPT, Kimi, GLM and DeepSeek, all on the Cursor subscription.
 - [ ] Do the same check for Cursor (automation of the CLI on a Pro plan).
 
 Result:
