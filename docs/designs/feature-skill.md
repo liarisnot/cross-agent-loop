@@ -196,7 +196,7 @@ delegate.ps1 (existing, modified by v1) --> Cursor CLI
 *   **Router (`skills/feature/SKILL.md`).** The only entry point, with one description. On every invocation it runs these steps in order:
     1.  If the session is in Claude Code's plan mode, it says so and allows only read-only actions, such as "where are we?", until the user leaves plan mode.
     2.  Run `feature.ps1 status -Cwd <current folder>`. This picks the active feature (see [Active feature selection](#active-feature-selection)).
-    3.  Run `feature.ps1 reconcile` for that feature. On contradictions, show them and stop.
+    3.  Run `feature.ps1 reconcile` for that feature. On contradictions, show them and stop. If either script call fails, show its error and stop, and never guess the stage.
     4.  State in one line the feature, the stage and the action about to be taken.
     5.  Read the matching stage file and follow it.
 *   **Stage files (`skills/feature/stages/*.md`).** Instructions for one stage each: `design.md`, `design-review.md`, `plan.md`, `build.md`, `signoff.md`, and `status.md` for "where are we?". The design and review stage files tell the lead to follow the vendored EGM workflow, and list where our flow differs from it (see [EGM integration](#egm-integration)).
@@ -434,7 +434,7 @@ This applies to the design review, the plan review and the sign-off check.
 | plan review | — | comprehension, implementation_readiness | Composer 2.5, DeepSeek |
 | sign-off | — | drift_report | Grok or GLM |
 
-A design review is about 10 lens runs. Each re-audit after "update the doc first" reruns that phase's lenses once.
+A design review is about 10 lens runs. The plan review has no judgement lens, because the locked design already settles the architecture. It checks only that workers will read the tasks the same way and can build them without guessing. Each re-audit after "update the doc first" reruns that phase's lenses once.
 
 *   **Lens ids.** Each lens run uses the fixed `delegate` task id `<name>-<review><n>-<lens>`, with `_` written as `-` (for example `export-design1-zoom-out`).
     *   `<n>` is the run number of that review for this feature: 1 for the first design review, 2 after going back to `design-review`, and so on.
@@ -543,7 +543,7 @@ The candidates, from [research §7](../research.md#7-landscape-survey-similar-pr
 *   **Reason for Rejection**: Rejected by author: the records that matter must survive.
 
 #### D2. Everything committed on the branch
-*   **Pros**: One source of truth that survives anything.
+*   **Pros**: One source of truth that survives a reclone, a second machine or `git clean -fdx`.
 *   **Cons**: Task status and session ids change constantly, which means many noise commits.
 *   **Reason for Rejection**: Rejected by author. Chosen instead: lasting records are committed and runtime state stays local ([State model](#state-model)).
 
