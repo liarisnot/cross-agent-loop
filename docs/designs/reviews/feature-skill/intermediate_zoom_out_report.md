@@ -83,3 +83,21 @@ These stay small. None of them justify a new subsystem.
 - DC12: the name grammar is already at lines 706 and 820. `new` keeps failing while `feature/<name>` exists, including after abandon. A name registry is extra.  
 - DC13: `*_API_KEY` already covers the Cursor and Gemini key names. Two more literals (`GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`) fit the existing denylist. A secret scanner does not.  
 - DC14: finding 2 closes the pool question. “Open Questions: none” (line 90) is then true.
+
+## Resolution (2026-11-10)
+
+The author chose to **accept all cuts**:
+*   Merged tasks stay merged. Keep/redo, generations and reverts are gone.
+*   There are no pool cooldowns, fallbacks or dollar estimates, and any limit is a problem stop.
+*   Orphaned workers are killed and marked `failed`, and a `failed` task waits for resume, with a second failure becoming a stop.
+*   G4 is a rule, not a commit-classification test.
+*   The goldfish diff review is optional.
+*   The outcomes log is deferred.
+*   The check-in setter is a single code path.
+
+Also applied:
+*   **Gates record the approved SHA** (and, for design-locked, the design blob), and `finish` refuses if either has moved.
+*   **Runs carry a `feature` field** for token totals.
+*   **Two more names** went on the environment denylist.
+*   **The judgement seat** is `grok-4.7-medium`, after this trial.
+*   **The two Cursor pools** are stated as facts, from the author's Spending page, with rough rates.

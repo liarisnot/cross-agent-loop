@@ -154,3 +154,15 @@ Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro t
   2. `-p -` (stdin) is **not** honored with `--mode plan`: agy builds `/plan -` and the model sees a literal "-". Fix: pass the embedded prompt as an escaped argv argument (proper MSVCRT/Go quoting; capped at 28k chars).
   3. Without `--json-schema`, plan-mode runs tend not to end with a reply. All read-only agy runs now use a schema (`review.schema.json` / `council.schema.json`).
 - Council plumbing re-verified after the change (flash-low override, 15s).
+
+
+## Cursor usage pools (legacy Pro, checked 2026-11-10)
+
+*   **Spending page.** It shows two pools as a percentage used, resetting monthly (next on Nov 13):
+    *   **Cursor Models** (Grok, Composer). Overflow consumes the Other Models quota, then on-demand spend.
+    *   **Other Models** (GLM, DeepSeek). Overflow goes to on-demand spend, which is disabled.
+*   **Usage page.** It lists each request as "Included", with tokens that **include cache reads**. `runs.jsonl`'s `total` leaves them out.
+*   **Rough rates, from 2026-11-10's design review.**
+    *   **GLM 5.2:** 4 review runs took Other Models from 0% to 3%, so about 0.75% per run, or roughly 130 runs a month.
+    *   **Grok 4.7:** about 7 review runs plus some Composer took Cursor Models to 4%, so about 0.5% per Grok run.
+    *   **To refine:** re-check after the next review.

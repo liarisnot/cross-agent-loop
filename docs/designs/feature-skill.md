@@ -47,7 +47,7 @@ Similar tools exist (see [research §7](../research.md#7-landscape-survey-simila
     *   **Workers code.** Coding tasks go to Cursor workers through `delegate`: Composer 2.5, or Grok 4.7 high for `code-hard`.
     *   **Claude reviews and merges.** It does not write feature code, and the plan cannot assign code to it.
     *   **One exception: fix-ups during review.** When fixing an issue directly costs less, in tokens and in time, than another worker round, the lead fixes it and records it.
-    *   **Pass:** at sign-off, every lead-authored commit in `main..feature/<name>` is a record commit, a merge, or a commit logged as `[fix-up]`. A Pester test checks this classification.
+    *   **Pass:** the plan schema has no profile that assigns code to the lead, and every fix-up appears as a `[fix-up]` line followed by a `verify` run.
 *   **G5. Safe parallelism.** Two tasks run at the same time only if their declared file sets do not overlap and neither depends on the other. Otherwise they run one after another. Pass: the `schedule` overlap tests pass, and `reconcile` never finds two overlapping tasks `running` together.
 *   **G6. Final check against the design.** Before sign-off, the whole feature diff is checked against the locked design for missing, extra or changed behaviour, and the user sees the result. Pass: the drift report's three lists are shown before every **signed-off** prompt.
 *   **G7. Council on hard problems.** The skill brings in the existing multi-model council (`delegate`'s `council` profile: Grok 4.7 high and GLM 5.2, both through Cursor, with Claude as lead) at three points. It is not a separate stage.
@@ -226,13 +226,9 @@ build (phase 1..n) --> signoff --[GATE signed-off]--> done
     *   The move is logged as a decision.
 *   **Abandoning** is allowed from any stage. The skill switches the checkout back to `main` if the tree is clean, and keeps the branch and records until the user deletes them.
 
-#### Merged work after going back (keep or redo)
-*   **Generations.** Each approved plan has a generation number, starting at 1. Every task merge records it in the trailer `Xagent-Gen: <n>`.
-*   **The next plan lists merged tasks.** If tasks were already merged when the feature went back, the next plan must list each of them:
-    *   **`keep`:** the work stays merged and counts as done in the new generation.
-    *   **`redo`:** at plan approval, `feature.ps1` undoes that merge with `git revert -m 1`, newest first. Each revert commit carries the trailer `Xagent-Revert: <task id>`, and the task goes back to pending. History is kept and nothing is force-pushed.
-*   **Approval.** The user sees and approves the keep/redo list at **plan-approved**, and the generation goes up by one.
-*   **Conflicts.** If a revert conflicts (for example, a kept task built on top of a redone one), the script aborts the revert, names the conflicting files and tasks, and the gate is not recorded. The user then changes the list or resolves it by hand. After clean reverts, the last merged phase's test runs before the gate is recorded, so a semantic break (a kept task using code a redone task removed) also leaves the gate unrecorded.
+#### Merged work after going back
+
+Merged tasks stay merged and keep their ids. Rework after going back is planned as new tasks with new ids. Removing merged code is itself a task (or a hand edit by the user). Abandoning stays available.
 
 ### Routing rules
 
@@ -283,14 +279,13 @@ The skill checks these in order:
 The feature's lasting records are committed on `feature/<name>`, in `docs/features/<name>/`:
 
 *   **`feature.json`.** The script is its only writer. It holds:
-    *   the name, the stage, the check-in mode, the plan generation and the path to the design doc;
-    *   the gates, each with a timestamp and the user's quote;
-    *   the plan: a summary, then phases (each with its number, rationale and test command), then tasks (id, title, depends-on, declared files, test command, profile, brief, and on a re-plan `carry: keep|redo`).
+    *   the name, the stage, the check-in mode and the path to the design doc;
+    *   the gates, each with a timestamp, the user's quote, and the commit it approved (the `feature/<name>` SHA; for **design-locked**, also the design file's blob id);
+    *   the plan: a summary, then phases (each with its number, rationale and test command), then tasks (id, title, depends-on, declared files, test command, profile and brief).
 *   **`plan.md`.** Generated entirely from `feature.json` for the user to read, and never edited by hand.
 *   **`decisions.md`.** An append-only log. Each line is `- <ISO time> [<kind>] <text>`. Kinds:
     *   `decision`, `gate`, `stage` and `scope`;
     *   `council`, with the task id and its outcome, and `round`, one per failed review round;
-    *   `cooldown`, with the pool and the end time;
     *   `fix-up` and `dismiss`;
     *   `stop` and `resume`.
 *   **`reviews/raw/<lens id>.md`.** Each goldfish's raw report, committed unchanged before the synthesis is written.
@@ -304,13 +299,13 @@ Fast-changing runtime state is local, in `<repo>/.xagent/features/<name>/state.j
 
 A task under council stays `in-review`. A stop that follows is the committed `[stop]` decision.
 
-**Session lock.** Every `feature.ps1` command that writes takes an advisory lock, `.xagent/features/<name>/.lock`, which holds a process id and a timestamp. If a live process holds the lock, the command fails with "another session is working on this feature". A lock left by a dead process is taken over.
+**Session lock.** Every `feature.ps1` command that writes takes an advisory lock, `.xagent/features/<name>/.lock`, which holds a process id and that process's start time. If a running process matches both, the command fails with "another session is working on this feature". Otherwise the lock is stale and is taken over. Matching the start time guards against Windows reusing process ids.
 
 Derived, not stored:
-*   **What the flow is waiting for.** A gate the stage needs, an open `[stop]`, an active pool cooldown, or a running worker.
-*   **Review rounds, council counts and cooldowns.** Counted from the committed `[round]`, `[council]` and `[cooldown]` lines, so the council trigger and cap survive a lost local file.
+*   **What the flow is waiting for.** A gate the stage needs, an open `[stop]`, or a running worker.
+*   **Review rounds and council counts.** Counted from the committed `[round]` and `[council]` lines, so the council trigger and cap survive a lost local file.
 *   **Review progress.** A lens is done when its raw report is committed under `reviews/raw/`.
-*   **Token use.** The sum of the `runs.jsonl` lines whose `taskId` starts with `<name>-`, with third-party dollars estimated from the prices in `models.json`.
+*   **Token use.** The sum of the `runs.jsonl` lines whose `feature` field equals `<name>`, including cache reads, so it matches Cursor's usage page.
 
 ### Reconcile rules
 
@@ -321,12 +316,12 @@ Derived, not stored:
 | Feature branch exists | git | Missing while the stage is not `done` or `abandoned` → **contradiction, ask** |
 | Feature branch checked out | `git branch --show-current` | Another branch checked out while the feature is active → **ask the user to switch back** (nothing changes) |
 | Merge in progress on `main` | git (`MERGE_HEAD` while on `main`) | **Ask** the user to finish or abort the merge |
-| Task merged | a merge commit on `feature/<name>` with `Xagent-Task: <id>` and `Xagent-Gen: <n>`, not undone by a later `Xagent-Revert: <id>` | Counts as `merged` if `<n>` is the current generation or the task is marked `keep`. Absorbs manual merges that carry the trailers. |
+| Task merged | a merge commit on `feature/<name>` with the trailer `Xagent-Task: <id>` | Counts as `merged`. This absorbs manual merges that carry the trailer. |
 | Task merged per local state, no trailer commit | — | **contradiction, ask** |
-| Task in `preflight`, `running` or `in-review` | the latest run under `.xagent/runs/<delegate task id>/`, and the process list | A finished run (`.stdout.json` plus `result.json` or `.review.md`) → `in-review`. No live `delegate.ps1` or worker process and no finished run → `failed`, and the slot is freed. A live process whose `delegate.ps1` parent still runs → left alone, never launched twice. A live worker whose parent is gone (the launching session ended) → **watched**. When its run output appears, the task moves to `in-review`, and the current session runs `verify` and the review. With no output by the run's timeout, it is killed and marked `failed`. `delegate.ps1` writes a pid file per run, so these checks are exact. |
+| Task in `preflight`, `running` or `in-review` | the latest run under `.xagent/runs/<delegate task id>/`, and the process list | A finished run (`.stdout.json` plus `result.json` or `.review.md`) → `in-review`. No live `delegate.ps1` or worker process and no finished run → `failed`, and the slot is freed. A live process whose `delegate.ps1` parent still runs → left alone, never launched twice. A live worker whose parent is gone → killed and marked `failed`. A `failed` task is not scheduled again until the user resumes it ("continue" asks first). A second failure of the same task is a problem stop. |
 | `signed-off` recorded, feature not yet in `main` | git | `finish` is pending |
 | Feature merged into `main` | `feature/<name>` is an ancestor of `main` | Mark `done` if `signed-off` is recorded. Without that gate → **contradiction, ask** |
-| Gates, stage, plan, stops, rounds, councils, cooldowns | committed `feature.json` and `decisions.md` | Always taken from the committed copy |
+| Gates, stage, plan, stops, rounds, councils | committed `feature.json` and `decisions.md` | Always taken from the committed copy |
 | Session ids | local only | Kept. If the local file is missing, the losses are reported and the affected tasks resume from their last committed state |
 
 All worker merges into the feature branch use `git merge --no-ff` with the trailers, so a task's completion can be proven from history after `delegate -Cleanup` deletes the task branch.
@@ -348,22 +343,11 @@ All worker merges into the feature branch use `git merge --no-ff` with the trail
 *   **Models.** Everything runs through the Cursor CLI. There is one worker model per profile, so no routing between vendors is needed.
     *   `code` tasks: Composer 2.5.
     *   `code-hard` tasks: Grok 4.7 high.
-*   **Usage pools.** The Cursor subscription has two monthly pools:
-    *   one for Cursor's own models (Composer, Grok);
-    *   one for third-party models at API price (GLM 5.2, DeepSeek V4.1 Flash), which holds $20 of usage on the legacy $20 Pro plan.
-*   **When a run, of any kind, reports a usage limit:**
-    1.  `feature.ps1 cooldown -Pool <cursor|thirdParty>` logs a `[cooldown]` decision ending in 60 minutes. Cursor reports no reset time, so 60 minutes is an arbitrary retry point, and the real window is unknown. The first time a limit is hit, the real recovery time is recorded in `docs/test-plan.md`.
-    2.  **The Cursor pool is exhausted:** workers and Grok seats cannot run. That's a problem stop, because there's no other subscription to fail over to.
-    3.  **The third-party pool is exhausted:** GLM and DeepSeek seats fall back to Grok 4.7 high for the rest of that review or council. The fallback is logged, and the report states that the check ran on a single model family instead of two.
-    4.  The user can clear a cooldown early ("Cursor is back").
+*   **Usage pools (confirmed 2026-11-10 on Cursor's Spending page, legacy Pro plan).** There are two monthly pools, shown as a percentage used, both resetting each billing month.
+    *   **Cursor Models** (Grok, Composer). Usage beyond its limit spills into the Other Models pool, then into on-demand spend.
+    *   **Other Models** (GLM, DeepSeek). Usage beyond its limit goes to on-demand spend, which is disabled on this account.
+*   **Usage limits.** When any run reports a usage limit, or fails in a way that looks like one, that's a problem stop. The user resumes when the allowance is back. v1 has no automatic retry timer, no model fallback and no dollar estimate.
 *   **Profile.** Each task starts on the profile the plan gives it.
-*   **Task outcomes recorded.** Every merged task appends one line to `%LOCALAPPDATA%\xagent\outcomes.jsonl`. The line holds:
-    *   the feature, the task and its profile;
-    *   the number of review rounds, whether its first `verify` passed, and how many councils it needed;
-    *   its `delegate` task id, which links it to the token counts in `runs.jsonl`.
-
-    This is the data for a later rule about which tasks should start on `code-hard`.
-
 #### Task preflight
 
 This applies to the build's task preflights only. The design and plan reviews follow [Goldfish review routing](#goldfish-review-routing).
@@ -396,7 +380,8 @@ This applies to the build's task preflights only. The design and plan reviews fo
     *   a test failure on `feature/<name>` that a fix-up cannot solve;
     *   a change outside the declared files;
     *   a needed change to the plan or the design;
-    *   an exhausted Cursor pool.
+    *   a usage limit;
+    *   a task that fails a second time (see Reconcile rules).
 *   **Committed stops.** A stop is logged as `[stop]` and clearing it as `[resume]`, so it survives the loss of the local state file.
 *   **Phase check-ins.** With phase check-ins turned on, the build also stops after each phase. Only the user turns them on, at plan approval or during the build, and the skill never does it by itself.
 
@@ -428,11 +413,11 @@ GoldfishContext (read-only):
 
 This applies to the design review, the plan review and the sign-off check.
 
-| Lens | Model | Cursor pool | Why |
-|---|---|---|---|
-| comprehension | Composer 2.5 | Cursor | The same model as the workers who will read the tasks. |
-| implementation_readiness | DeepSeek V4.1 Flash | third-party | A cheap reader from a different model family. |
-| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style, drift_report | Grok 4.7 high and GLM 5.2, alternating | Cursor / third-party | These lenses need judgement about architecture and hidden complexity. Two model families give two independent views. |
+| Lens | Model | Why |
+|---|---|---|
+| comprehension | Composer 2.5 | The same model as the workers who will read the tasks. |
+| implementation_readiness | DeepSeek V4.1 Flash | A cheap reader from a different model family. |
+| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style, drift_report | Grok 4.7 medium and GLM 5.2, alternating | These lenses need judgement about architecture and hidden complexity. Two model families give two independent views. Grok medium matched Grok high on time and quality in the stage 8 trial. |
 
 #### Lens runs per review
 
@@ -453,7 +438,7 @@ A design review is about 10 lens runs. Each re-audit after "update the doc first
     *   A re-audit within one review adds `-r2`.
     *   `feature.ps1 status` returns the next free number. Long feature names are shortened to fit 49 characters.
 *   **Failed reviewers.** A lens run that ends without a report is retried once. If it fails again, it is rerun on the other judgement model (Grok ↔ GLM) and logged. If that fails too, the lens is recorded as **not run** in the report, never as "no findings".
-*   **Diff reviews.** A worker's diff (written by Composer or Grok) is reviewed by GLM 5.2, a different family from the writer.
+*   **Diff reviews.** The lead reads every diff itself. When a goldfish also reviews a risky diff (optional, as in `delegate`), the model is GLM 5.2, a different family from the writer.
 *   **Report format and synthesis.**
     *   Reviewers return Markdown with Blocker, Major and Nit findings.
     *   Each raw report is committed under `reviews/raw/` before the lead writes the synthesis.
@@ -472,12 +457,13 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
     *   **Restoring.** They are restored in a `finally` block before the read-only check. `-Cleanup` also restores them, so an aborted run cannot block cleanup.
     *   **Exception.** The caller passes `-KeepRuleFiles` when rule files are part of the review target. For sign-off, `feature.ps1` reports whether the final diff touches a rule file.
 *   **Standards lookup.** The standard appended to a persona comes from `personas/standards.json` instead of being hard-coded.
-*   **Model seats.** `models.json` names the models for each seat: worker, `code-hard`, comprehension, readiness, judgement and council. It also holds the prices of the third-party models, for the token estimate.
+*   **Model seats.** `models.json` names the models for each seat: worker, `code-hard`, comprehension, readiness, judgement and council.
+*   **`-Feature <name>`.** The full feature name is written as a `feature` field on each `runs.jsonl` line, so token totals don't depend on shortened task ids.
 *   **`-Seat <label>`.** It names a run's worktree and logs (`<id>-grok`, `<id>-glm`), so two council members on the Cursor CLI don't collide on `<id>-cursor`.
 *   **agy disabled.** `-Agent agy` fails with the T0 reason unless `models.json` sets `agy.enabled: true`. That is kept for a possible API-key setup later.
 *   **Worker environment cleaned.** Known secret variables are removed from a worker's environment before launch (see [Risks & Mitigations](#risks--mitigations)).
-*   **Pid file per run.** Each run writes `<logBase>.pid`, so reconcile can tell live, orphaned and dead runs apart.
-*   **Logs moved.** `runs.jsonl` (and the new `outcomes.jsonl`) are written to `%LOCALAPPDATA%\xagent\`, outside every repo, so usage data from private projects can never be committed to this repo.
+*   **Pid file per run.** Each run writes `<logBase>.pid` with the process id and start time, so reconcile can tell live runs from dead or orphaned ones.
+*   **Logs moved.** `runs.jsonl` is written to `%LOCALAPPDATA%\xagent\`, outside every repo, so usage data from private projects can never be committed to this repo.
 
 ### EGM integration
 
@@ -496,8 +482,8 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
 1.  Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run the repo's full test command.
 2.  Run the final check: one judgement-tier goldfish with the `drift_report` persona, on a worktree detached at `feature/<name>`. It is given the locked design and a file holding `git diff main...feature/<name>`, both by path. It returns three lists: behaviour missing from the code, added beyond the design, and changed from it.
 3.  Show the results and ask for the **signed-off** gate.
-4.  On approval, record `signed-off`, then run `git switch main` and `git merge --no-ff feature/<name>`.
-    *   **On conflict:** run `git merge --abort` and `git switch feature/<name>`, and report the conflicting files.
+4.  On approval, record `signed-off` with the `feature/<name>` SHA that was checked. `finish` refuses if `HEAD` has moved since then, or if the design file's blob differs from the one recorded at **design-locked**. Then it runs `git switch main` and `git merge --no-ff feature/<name>`.
+    *   **On conflict:** run `git merge --abort` and `git switch feature/<name>`, clear `signed-off`, and report the conflicting files. A new final check is needed.
     *   **On success:** mark the feature `done` once the merge commit exists.
 
     Pushing happens only if the user asks.
@@ -632,7 +618,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 *   **Quota.** Claude runs only the lead. Workers, goldfish and councils run on the Cursor subscription.
     *   **Per feature.** One design review (about 10 lens runs), one plan review (2), one final check (1), the task preflights, the workers, and any councils.
     *   **Measured during this design's own review.** A judgement-lens run took 3–7 minutes and 80k–160k tokens.
-    *   **Estimated third-party spend.** About $2–4 per feature from the $20 third-party pool: GLM 5.2 at about $0.23 per review run, DeepSeek V4.1 Flash at about $0.05. Composer and Grok draw from the Cursor pool. To be checked against `runs.jsonl` after the first real feature. `status` shows the feature's token use. There is no budget stop.
+    *   **Usage.** All seats show as "Included" on Cursor's usage page. `status` shows the feature's token use, including cache reads. There is no budget stop and no dollar estimate.
     *   **Lead bookkeeping.** Mechanical steps (scope check, tests, state updates) are one `feature.ps1` call each, so the lead's context and Claude quota go to review and judgement.
 *   **Safety.**
     *   The skill never merges to `main` or pushes without the **signed-off** gate.
@@ -649,16 +635,16 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 | Risk | Mitigation | What remains |
 |---|---|---|
 | **Workers change files** with permission checks bypassed (`--force`) | `verify` checks the changed files against the declared scope. The lead reviews every diff, file by file. Merges go only into `feature/<name>`. | — |
-| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`). No secrets, credentials or deploys go to workers. | **Unmitigated in v1:** files on disk (`~/.ssh`, cloud credentials, other repos) and the network stay reachable. Worker sandboxing is the first item after v1. |
+| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`). No secrets, credentials or deploys go to workers. | **Unmitigated in v1:** files on disk (`~/.ssh`, cloud credentials, other repos) and the network stay reachable. Worker sandboxing is the first item after v1. |
 | **Reviewers load project instructions** from CLI rule files | Rule files are removed from read-only worktrees | — |
 | **The diff review is compressed by the Headroom proxy** | Per-file diffs, and a compression marker means "not reviewed" | — |
-| **Cursor usage pools run out** | A cooldown, with a problem stop for the Cursor pool and a Grok fallback for the third-party pool | The build waits. A review's check across model families is weaker during the fallback. |
+| **The Cursor allowance runs out** | Any usage limit is a problem stop. The user resumes when the allowance is back. | The build waits. |
 | **Antigravity terms** | No `agy` automation (T0) | — |
-| **Local state is lost or contradicts git** | Reconcile rules, plus committed stops, councils, cooldowns and raw reports | Review rounds and session ids are lost and reported |
+| **Local state is lost or contradicts git** | Reconcile rules, plus committed stops, rounds, councils and raw reports | Review rounds and session ids are lost and reported |
 | **A council agrees on a wrong fix, retried unattended** | At most 2 councils per task, the next review round, and the drift report at sign-off | Wasted runs before a stop |
 | **Damage to the user's only checkout** | Clean-tree and branch checks, and merge abort on conflict | — |
 | **Usage data from private repos ends up in this public repo** | Logs live in `%LOCALAPPDATA%\xagent\`, outside every repo | — |
-| **Capacity** | Limits: one active feature, 2 agents at a time, and about 5–10 features a month before the $20 third-party pool runs out. The Cursor pool's capacity per feature is unknown until measured on the first feature. Pool cooldowns, and token use shown in `status`. | Reviews fall back to Grok-only after the third-party pool runs out. Builds stop when the Cursor pool does. |
+| **Capacity** | Limits: one active feature and 2 agents at a time. A first rough rate: about 0.75% of the Other Models pool per GLM lens run (about 130 a month), and about 0.5% of the Cursor Models pool per Grok lens run. Token use per feature is shown in `status`. | The rates are rough (from one day's usage), and are refined on the first real feature. |
 | **The final check misses drift** (one lens at sign-off) | The full test suite, and the drift report's three lists shown before sign-off | Drift the `drift_report` lens misses is caught only if the user reads the diff. A second lens is in Future Improvements. |
 | **Two sessions on one machine** | The advisory session lock | — |
 
@@ -672,7 +658,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 *   **Deploy stage:** an optional stage after sign-off, run by the lead with its own approval gate, using secret references only.
 *   **Brainstorm stage:** put the vendored `egm-brainstorm` in front of `design`, with an optional council.
 *   **Benchmark mode per feature:** run `delegate`'s head-to-head benchmark on a feature's tasks.
-*   **Data-driven model choice:** decide which tasks start on `code-hard` from `outcomes.jsonl` and benchmark results.
+*   **Data-driven model choice:** log task outcomes (rounds, first-try `verify`, councils) and decide which tasks should start on `code-hard`.
 *   **A second subscription for overflow:** for example Antigravity with an API key, or another provider, if the Cursor pools turn out too small.
 *   **Anonymized peer review in the council** (the epicsagas idea).
 *   **EGM sync script** (`scripts/egm-sync.ps1`, per decision 001): written when the first upstream change arrives.
@@ -742,10 +728,10 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         2.  Run the plan goldfish: `comprehension` on Composer 2.5 and `implementation_readiness` on DeepSeek V4.1 Flash.
         3.  Triage the findings per `delegate`'s rule (fix what would make two workers build different things).
         4.  To change the plan, write a new complete input file and import it again.
-    *   **Re-plan after going back.** If tasks are already merged, the input lists each with `carry: keep` or `carry: redo`. At approval, show the keep/redo list, and the reverts that approval will cause, next to the plan.
+    *   **Re-plan after going back.** Already merged tasks stay in the plan, unchanged. Rework is added as new tasks.
     *   **Offer a council** if the plan contains a choice that is hard to reverse.
     *   **Approve.** Ask for **plan-approved**, stating that phase check-ins are off unless the user asks for them. On a clear yes:
-        1.  Run `feature.ps1 gate -Gate plan-approved -Quote ... -Checkin <mode>`. On a re-plan, this also runs the `redo` reverts and raises the generation.
+        1.  Run `feature.ps1 gate -Gate plan-approved -Quote ... -Checkin <mode>`.
         2.  Run `stage -To build`.
 
 #### 5. `skills/feature/stages/build.md` (Create)
@@ -760,9 +746,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   `comprehension` with `-Model <worker model>`;
         *   `implementation_readiness` with `-Model <DeepSeek V4.1 Flash>`.
     *   **After each worker run.** Call `feature.ps1 verify -Task <id>`. Files out of scope mean a problem stop. Then read each changed file's diff separately, and treat a compression marker as unread.
-    *   **Usage limit.** Call `feature.ps1 cooldown -Pool <cursor|thirdParty>`.
-        *   For the Cursor pool, make a problem stop.
-        *   For the third-party pool, continue, with GLM and DeepSeek seats replaced by Grok 4.7 high, and say so in the report.
+    *   **Usage limit.** Make a problem stop.
     *   **Review rounds.** Log each failed round with `decision -Kind round`.
     *   **Council escalation.** At the feature round limit (`code`: 2 failed rounds, `code-hard`: 1), convene the council per `delegate`'s procedure, with `-Seat grok` and `-Seat glm`.
         *   **Consensus, and the task has had fewer than 2 councils:**
@@ -827,20 +811,19 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     | Subcommand | Arguments | Behaviour |
     |---|---|---|
     | `doctor` | — | Check the prerequisites listed in Installation, and print what's missing plus the permission rules to add. |
-    | `new` | `-Name` | Fail if the working tree is dirty, the branch exists, or another feature is not `done`/`abandoned`. Run `git switch -c feature/<name> main`. Write `feature.json` (stage `design`, `generation: 1`, check-ins off) and `decisions.md`, and commit `feature(<name>): start`. |
+    | `new` | `-Name` | Fail if the working tree is dirty, the branch exists, or another feature is not `done`/`abandoned`. Run `git switch -c feature/<name> main`. Write `feature.json` (stage `design`, check-ins off) and `decisions.md`, and commit `feature(<name>): start`. |
     | `status` | `[-Name]`, `-Cwd` | Without `-Name`, apply the selection rules (rule 2 reads `git -C <Cwd> branch --show-current`, and skips `done`/`abandoned`). Print the merged view (committed plus local), with `waitingOn`, the lenses without a raw report, the next free review number, whether the final diff touches a rule file, the token use, and `nextAction`. With no feature, print `{selected:null, features:[...]}`. |
     | `reconcile` | `-Name` | Apply the reconcile table, including checking processes for in-flight tasks. Print `{changes:[], contradictions:[], lost:[]}`. Contradictions change nothing. |
     | `stage` | `-Name`, `-To`, `-Reason` | Forward moves one step at a time. Where the stage table lists a gate to leave the current stage, only with that gate recorded. Backward moves to any earlier stage clear that stage's exit gate and every later gate. `abandoned` is allowed from any stage, and switches to `main` if the tree is clean. Append a decision and commit. |
-    | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. `-Checkin` is allowed only with `plan-approved`. On a re-plan's `plan-approved`, revert each `redo` task's merge (`git revert -m 1 --no-edit`, newest first, adding `Xagent-Revert: <id>`). On conflict, run `git revert --abort` and fail, naming the files and tasks, and the gate is not recorded. On success, raise `generation` by 1. |
-    | `plan` | `-Name`, `-PlanFile` | Validate against `$defs/plan`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, task ids ≤ 49 characters. Every merged task must appear with `carry`, and `carry` is rejected elsewhere. Write the plan into `feature.json`, generate `plan.md`, delete the input file and commit. Allowed only in stage `plan`. |
-    | `schedule` | `-Name` | From the lowest phase with unmerged tasks, return tasks that are `pending`, have every dependency `merged`, and whose overlap keys don't overlap any `preflight`, `running` or `in-review` task. Keep all of the feature's `delegate` runs at 2 or fewer. If the Cursor pool is cooling down, return `{blocked:"quota", until}`. Each task includes the worker `model` for its profile, from `models.json`. |
+    | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. Also record the approved `feature/<name>` SHA (and, for `design-locked`, the design file's blob id). `-Checkin` is allowed only with `plan-approved`, and sets the mode through the same code as `checkin`. |
+    | `plan` | `-Name`, `-PlanFile` | Validate against `$defs/plan`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, task ids ≤ 49 characters. A re-plan must still contain every merged task, unchanged. Write the plan into `feature.json`, generate `plan.md`, delete the input file and commit. Allowed only in stage `plan`. |
+    | `schedule` | `-Name` | From the lowest phase with unmerged tasks, return tasks that are `pending`, have every dependency `merged`, and whose overlap keys don't overlap any `preflight`, `running` or `in-review` task. Keep all of the feature's `delegate` runs at 2 or fewer. Return nothing while a `[stop]` is open. Each task includes the worker `model` for its profile, from `models.json`. |
     | `task` | `-Name`, `-Task`, `[-Status] [-DelegateTaskId] [-SessionId] [-Round] [-ResultFile]` | Update local `state.json` only. |
     | `verify` | `-Name`, `-Task` | In the worker's worktree: list the changed files (`git diff --name-only <base>...HEAD`, plus uncommitted and untracked files), and match them against `files` (exact, parent folder, or glob). Run `test` with a 15-minute timeout. Store the result and print `{inScope, outOfScope:[], test:{command, passed, exitCode, tail}}`. Change nothing. |
-    | `cooldown` | `-Name`, `-Pool <cursor\|thirdParty>`, `[-Clear]` | Append a `[cooldown]` decision ending in 60 minutes, or a clearing one. |
-    | `merge` | `-Name`, `-Task`, `-Message` | Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run `git merge --no-ff xagent/<delegateTaskId>` with `<Message>`, a blank line, then `Xagent-Task: <id>` and `Xagent-Gen: <generation>`. On conflict, run `git merge --abort` and fail with the files. On success, set `merged` and append the outcome line. |
-    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `scope`, `round`, `council`, `cooldown`, `fix-up`, `dismiss`, `stop`, `resume`. `resume` fails without an open `stop`. |
+    | `merge` | `-Name`, `-Task`, `-Message` | Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run `git merge --no-ff xagent/<delegateTaskId>` with `<Message>`, a blank line, then `Xagent-Task: <id>`. On conflict, run `git merge --abort` and fail with the files. On success, set `merged`. |
+    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `scope`, `round`, `council`, `fix-up`, `dismiss`, `stop`, `resume`. `resume` fails without an open `stop`. |
     | `checkin` | `-Name`, `-Mode <on-problems\|every-phase>` | Set it in `feature.json`, append a decision and commit. |
-    | `finish` | `-Name` | Require `signed-off`, a clean tree and `HEAD` on `feature/<name>`. Run `git switch main` and `git merge --no-ff feature/<name>`. On conflict, run `git merge --abort` and `git switch feature/<name>`, and fail. On success, set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
+    | `finish` | `-Name` | Require `signed-off`, a clean tree and `HEAD` on `feature/<name>`. Run `git switch main` and `git merge --no-ff feature/<name>`. Refuse if `HEAD` differs from the SHA on `signed-off`, or the design blob differs from the one on `design-locked`. On conflict, run `git merge --abort` and `git switch feature/<name>`, clear `signed-off`, and fail. On success, set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
 
     *   **Path overlap.** Normalize both paths: forward slashes, lowercase on Windows, and a trailing `/` for folders. Two entries overlap if one is a prefix of the other. Glob entries use their overlap key, and an empty key overlaps everything.
 
@@ -849,11 +832,11 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 *   **Type / Scope**: One JSON Schema. The plan input is validated against its `$defs/plan`, so the task structure is defined once.
 *   **Proposed Changes**:
     *   **`feature.json`**:
-        *   `name`, `generation`, `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
+        *   `name`, `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
         *   `checkin` (`on-problems`|`every-phase`), `designDoc`
-        *   `gates` (keyed by gate name: `{at, quote}`)
+        *   `gates` (keyed by gate name: `{at, quote, sha, designBlob?}`)
         *   `summary`, and `phases` (`{n, rationale, test, tasks}`)
-    *   **`$defs/task`**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`), `brief`, and `carry` (`keep`|`redo`, only on a re-plan).
+    *   **`$defs/task`**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`) and `brief`.
 
 #### 10. `skills/feature/state.schema.json` (Create)
 
@@ -911,8 +894,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   **Named seats:**
         *   `comprehension`: the worker's model;
         *   `readiness: deepseek-v41-flash-1017-medium`;
-        *   `judgement: [grok-4.7-high, glm-5.2-high]`.
-    *   **Prices** (per 1M tokens: input, cache read, output) for `glm-5.2-high` and `deepseek-v41-flash-1017-medium`, from Cursor's models page.
+        *   `judgement: [grok-4.7-medium, glm-5.2-high]`.
     *   **agy.** Remove all `agy` model entries and add `agy: {enabled: false, reason: "T0: Antigravity FAQ forbids wrapping agy in third-party agents on consumer plans"}`.
     *   **Claude models** stay blocked.
 
@@ -922,7 +904,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 *   **Proposed Changes**:
     *   Replace the absolute `D:/cross-agent-loop/...` paths with paths from the skill's base directory.
     *   Replace the cursor-or-agy routing advice with the model seats, and document `-Seat`, `-KeepRuleFiles`, target by file, the new log location and the T0 reason.
-    *   Note that `feature` merges with the `Xagent-Task` and `Xagent-Gen` trailers.
+    *   Note that `feature` merges with the `Xagent-Task` trailer.
 
 #### 17. `benchmarks/bench.py`, `benchmarks/runs.jsonl` and `.gitignore` (Modify)
 
@@ -948,7 +930,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 *   **Proposed Changes**: These cases.
     *   **`new`**:
         *   refuses a dirty tree, a bad name, and a second active feature;
-        *   creates the branch, switches to it, and commits with `generation: 1`.
+        *   creates the branch, switches to it, and commits.
     *   **`stage` and `gate`**:
         *   `design` → `design-review` succeeds with no gate;
         *   `plan` → `build` without `plan-approved` fails;
@@ -959,18 +941,12 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   **`plan`**:
         *   rejects a cycle, an unknown dependency, a dependency in a later phase, a duplicate id and an over-long task id;
         *   generates `plan.md` and deletes the input file.
-    *   **Re-plan (keep and redo)**:
-        *   a re-plan missing a merged task is rejected;
-        *   `carry` on a never-merged task is rejected;
-        *   approval reverts `redo` merges newest first, with `Xagent-Revert`, and raises the generation;
-        *   `keep` tasks stay merged;
-        *   an old-generation merge without `keep` doesn't count;
-        *   a conflicting revert aborts cleanly, and the gate is not recorded.
+    *   **Re-plan**: a re-plan that drops or changes a merged task is rejected.
     *   **`schedule`**:
         *   dependency gating;
         *   overlap: exact path, parent folder, `**`, `*.md`, `src/test*.ts` against `src/testing.ts`, and `src/a/*` against `src/b/x.ts` (no overlap);
         *   the cap counts every `delegate` run of the feature;
-        *   a Cursor-pool cooldown returns `blocked: quota`;
+        *   an open `[stop]` returns no tasks;
         *   tasks carry the worker model;
         *   phase advance.
     *   **`verify`**:
@@ -981,8 +957,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   the worktree unchanged.
     *   **`merge`**:
         *   refuses a dirty tree and the wrong branch;
-        *   carries both trailers;
-        *   appends one outcome line with every field filled in.
+        *   carries the `Xagent-Task` trailer.
     *   **`reconcile`**:
         *   a trailer merge counts after the task branch is deleted;
         *   a manual merge with the trailers is absorbed;
@@ -992,23 +967,23 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   a merge in progress on `main` is reported;
         *   a task `running` with no process and no output becomes `failed` and frees its slot;
         *   a finished run becomes `in-review`;
-        *   a live worker whose `delegate.ps1` parent is gone is watched, then moves to `in-review` when its output appears, or is killed at its timeout;
+        *   a live worker whose `delegate.ps1` parent is gone is killed and marked `failed`;
+        *   a `failed` task is not scheduled until resumed, and a second failure opens a `[stop]`;
         *   a feature merged to `main` without `signed-off` is a contradiction;
         *   a missing local file is rebuilt and the losses are reported.
     *   **Committed state**:
         *   an open `[stop]` is reported as waiting with `state.json` deleted;
         *   `resume` without an open stop fails;
-        *   review rounds, council counts and cooldowns come from `decisions.md`;
+        *   review rounds and council counts come from `decisions.md`;
         *   a second process holding the lock makes a write fail, and a stale lock is taken over;
-        *   the G4 commit classification flags a lead commit that isn't a record, a merge or a logged fix-up;
-        *   a cooldown expires, and `-Clear` clears it;
         *   lens progress comes from the committed raw reports.
     *   **`status`**:
         *   each of the 4 selection rules, with rule 2 skipping `done` and `abandoned`;
-        *   the token sum from a fixture `runs.jsonl`.
+        *   the token sum (including cache reads) from a fixture `runs.jsonl`, matched on the `feature` field.
     *   **`finish`**:
         *   fails without signed-off, on a dirty tree, or on the wrong branch;
-        *   a conflict aborts and leaves `main` unchanged;
+        *   a conflict aborts, leaves `main` unchanged, and clears `signed-off`;
+        *   a commit after `signed-off`, or an edited design file, makes `finish` refuse;
         *   it merges and sets `done`;
         *   it never pushes (the test repo has no remote).
     *   **The drift persona** (a fixture: a small design plus a diff with one planted deviation): a manual check, run once, that `drift_report` reports it.
