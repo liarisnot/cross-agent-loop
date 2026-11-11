@@ -46,3 +46,7 @@ Several new findings sit exactly at the scope of fixes applied in earlier rounds
 ## Settled (not reopened)
 
 *   **DC11:** "Rejected by author" without a link. Settled as C1 in round 1. This is the third time a reviewer has raised it.
+
+## Outcome (2026-11-10)
+
+The author chose **accept and proceed**. The round 3 findings stay open and go to stage 8 (the intermediate zoom-out), whose job is to judge scope. They are resolved after stage 8 decides what to cut.
