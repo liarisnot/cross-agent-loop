@@ -47,7 +47,7 @@ Similar tools exist (see [research §7](../research.md#7-landscape-survey-simila
     *   **Workers code.** Coding tasks go to Cursor workers through `delegate`: Composer 2.5, or Grok 4.7 high for `code-hard`.
     *   **Claude reviews and merges.** It does not write feature code, and the plan cannot assign code to it.
     *   **One exception: fix-ups during review.** When fixing an issue directly costs less, in tokens and in time, than another worker round, the lead fixes it and records it.
-    *   **Pass:** the plan schema has no profile that assigns code to the lead, and every fix-up appears as a `[fix-up]` line followed by a `verify` run.
+    *   **Pass:** the plan schema has no profile that assigns code to the lead, and every fix-up appears as a `[fix-up]` line, with its file and line counts, followed by a `verify` run.
 *   **G5. Safe parallelism.** Two tasks run at the same time only if their declared file sets do not overlap and neither depends on the other. Otherwise they run one after another. Pass: the `schedule` overlap tests pass, and `reconcile` never finds two overlapping tasks `running` together.
 *   **G6. Final check against the design.** Before sign-off, the whole feature diff is checked against the locked design for missing, extra or changed behaviour, and the user sees the result. Pass: the drift report's three lists are shown before every **signed-off** prompt.
 *   **G7. Council on hard problems.** The skill brings in the existing multi-model council (`delegate`'s `council` profile: Grok 4.7 high and GLM 5.2, both through Cursor, with Claude as lead) at three points. It is not a separate stage.
@@ -273,6 +273,7 @@ The skill checks these in order:
 *   **Local state** lives in `<repo>/.xagent/features/<name>/`.
 *   **Workers** are launched with `-Repo <repo> -Base feature/<name>`. The lead merges worker branches in `<repo>`, which has `feature/<name>` checked out.
 *   **Side work.** While a feature is active, side work happens outside the skill, for example by hand on another branch after committing or stashing. The checkout must be back on `feature/<name>` before the skill continues. Reconcile checks this, and asks the user to switch back if it isn't.
+*   **Keeping current with `main`.** `main` can move during a long feature. When the user asks, the lead merges `main` into `feature/<name>` at a phase boundary (`git merge --no-ff main`, never a rebase, so the task trailers stay in history). It logs the merge as a `[decision]` and runs the current phase's test again. A conflict stops for the user. Otherwise the branch diverges until sign-off, where a conflict aborts the merge (see [Sign-off](#sign-off-and-final-check-g6)).
 
 ### State model
 
@@ -286,7 +287,7 @@ The feature's lasting records are committed on `feature/<name>`, in `docs/featur
 *   **`decisions.md`.** An append-only log. Each line is `- <ISO time> [<kind>] <text>`. Kinds:
     *   `decision`, `gate`, `stage` and `scope`;
     *   `council`, with the task id and its outcome, and `round`, one per failed review round;
-    *   `fix-up` and `dismiss`;
+    *   `fix-up` (with the files and lines changed) and `dismiss`;
     *   `stop` and `resume`.
 *   **`reviews/raw/<lens id>.md`.** Each goldfish's raw report, committed unchanged before the synthesis is written.
 *   **`reviews/<stage>-<n>.md`.** The synthesized review reports.
@@ -336,7 +337,7 @@ All worker merges into the feature branch use `git merge --no-ff` with the trail
     *   Two paths overlap when they are equal or one is a parent folder of the other. Paths are compared with a trailing `/`, so a folder never matches a name prefix.
     *   An entry in `files` can be a glob (`*`, `**`). For the overlap check, a glob's key is its folder part, up to the last `/` before the first wildcard (`src/test*.ts` → `src/`). An empty key (`**`, `*.md`) means the whole repo.
     *   For the scope check, a glob matches files the normal way. So two tasks that add files to the same folder run in parallel only if each lists its exact file names. A task with a glob entry blocks every other task whose files sit under that glob's folder, even if the other task lists exact files.
-*   **At most 2 agents at a time.** The cap counts every `delegate` run of the feature: preflights, workers, review lenses and council members. This keeps load on the Cursor subscription bounded.
+*   **At most 2 agents at a time, in every stage.** The cap counts every `delegate` run of the feature: preflights, workers, review lenses and council members. So a three-lens review phase runs two lenses, then the third. This keeps load on the Cursor subscription bounded.
 
 #### Models and usage pools
 
@@ -347,7 +348,9 @@ All worker merges into the feature branch use `git merge --no-ff` with the trail
     *   **Cursor Models** (Grok, Composer). Usage beyond its limit spills into the Other Models pool, then into on-demand spend.
     *   **Other Models** (GLM, DeepSeek). Usage beyond its limit goes to on-demand spend, which is disabled on this account.
 *   **Usage limits.** When any run reports a usage limit, or fails in a way that looks like one, that's a problem stop. The user resumes when the allowance is back. v1 has no automatic retry timer, no model fallback and no dollar estimate.
+    *   **Detection.** No Cursor usage-limit error has been seen yet, so `delegate.ps1` can't classify one. The matcher is written from the first real error. Until then, an unrecognized failure follows the normal failed-run path, where a task's second failure is a problem stop.
 *   **Profile.** Each task starts on the profile the plan gives it.
+
 #### Task preflight
 
 This applies to the build's task preflights only. The design and plan reviews follow [Goldfish review routing](#goldfish-review-routing).
@@ -363,7 +366,7 @@ This applies to the build's task preflights only. The design and plan reviews fo
     4.  records the result.
 
     A change outside `files` is a problem stop. The script does not revert it automatically, because silently undoing a worker's change could hide a real problem. Task test commands must be non-interactive.
-*   **Reading the diff.** The lead reads each changed file's diff separately (`git -C <worktree> diff <base>...HEAD -- <file>`). The lead's traffic passes through the Headroom proxy, which can compress large outputs. If an output carries a compression marker, that file's review is not done: expand it with `headroom_retrieve` or read smaller ranges.
+*   **Reading the diff.** The lead reads each changed file's diff separately (`git -C <worktree> diff <base>...HEAD -- <file>`). The lead's traffic passes through the Headroom proxy, which can compress large outputs. If an output carries a compression marker, that file's review is not done: expand it with `headroom_retrieve` or read smaller ranges. Expanding a compressed diff hasn't been tested yet (T6 in `docs/test-plan.md`), so reading smaller ranges is the fallback.
 *   **Merging.** Each task is reviewed and merged per `delegate`'s loop, with the differences in the [build stage file](#5-skillsfeaturestagesbuildmd-create).
     *   `merge` refuses unless the tree is clean and `HEAD` is `feature/<name>`.
     *   A phase ends when all its tasks are merged and the phase test command passes on `feature/<name>`.
@@ -371,7 +374,7 @@ This applies to the build's task preflights only. The design and plan reviews fo
     *   **The choice.** During review, the lead either fixes an issue itself or sends it back as a review round.
     *   **How it decides.** It weighs the token and time cost of each path.
     *   **Guideline, not a cap.** "About 3 files and 30 lines" helps it gauge its own effort.
-    *   **Afterwards.** Every fix-up is logged as `[fix-up]`, and `verify` runs again.
+    *   **Afterwards.** Every fix-up is logged as `[fix-up]` with the number of files and lines it changed, so a large one is visible at sign-off, and `verify` runs again.
 
 #### Problem stops and check-ins
 
@@ -391,7 +394,7 @@ This applies to the build's task preflights only. The design and plan reviews fo
 *   **Build.** A `code` task that fails review twice, or a `code-hard` task that fails review once, triggers a council automatically.
     *   **The round limit.** This is the one place it is set for feature tasks, and it replaces `delegate`'s "about 3 rounds" for them.
     *   **Procedure and record.** The council uses `delegate`'s council procedure, with seats Grok 4.7 high and GLM 5.2. Its outcome is logged as `[council]`.
-    *   **Consensus.** The lead retries the task on `code-hard` with the council's guidance as a delta brief, without stopping. The round count starts again from 0.
+    *   **Consensus.** The lead retries the task on `code-hard` with the council's guidance as a delta brief, without stopping. The round count starts again from 0. The council count never resets.
     *   **Disagreement.** The seats disagree on the fix, and the lead cannot settle it from verified facts. That's a problem stop, with `delegate`'s escalation brief.
     *   **Cap.** A task gets at most 2 councils. If the retry after the second council fails review, that's a problem stop.
 *   **On request.** At any stage, the user can ask for a council.
@@ -417,7 +420,7 @@ This applies to the design review, the plan review and the sign-off check.
 |---|---|---|
 | comprehension | Composer 2.5 | The same model as the workers who will read the tasks. |
 | implementation_readiness | DeepSeek V4.1 Flash | A cheap reader from a different model family. |
-| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style, drift_report | Grok 4.7 medium and GLM 5.2, alternating | These lenses need judgement about architecture and hidden complexity. Two model families give two independent views. Grok medium matched Grok high on time and quality in the stage 8 trial. |
+| zoom_out, design_critic, inventive_catalyst, codebase_details, structural, style, drift_report | Grok 4.7 medium or GLM 5.2, fixed per lens run in the next table | These lenses need judgement about architecture and hidden complexity. Two model families give two independent views. Grok medium matched Grok high on time and quality in the stage 8 trial. |
 
 #### Lens runs per review
 
@@ -437,7 +440,7 @@ A design review is about 10 lens runs. Each re-audit after "update the doc first
     *   `<n>` is the run number of that review for this feature: 1 for the first design review, 2 after going back to `design-review`, and so on.
     *   A re-audit within one review adds `-r2`.
     *   `feature.ps1 status` returns the next free number. Long feature names are shortened to fit 49 characters.
-*   **Failed reviewers.** A lens run that ends without a report is retried once. If it fails again, it is rerun on the other judgement model (Grok ↔ GLM) and logged. If that fails too, the lens is recorded as **not run** in the report, never as "no findings".
+*   **Failed reviewers.** A lens run that ends without a report is retried once. If it fails again, it is rerun on the other judgement model (Grok ↔ GLM) and logged. If that fails too, the lens is recorded as **not run** in the report, never as "no findings". A lens that was not run blocks the next gate until it is rerun or the user waives it, which is logged as `[dismiss] <lens>: not run — <reason>`.
 *   **Diff reviews.** The lead reads every diff itself. When a goldfish also reviews a risky diff (optional, as in `delegate`), the model is GLM 5.2, a different family from the writer.
 *   **Report format and synthesis.**
     *   Reviewers return Markdown with Blocker, Major and Nit findings.
@@ -494,7 +497,7 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
 *   **Logs** live in `%LOCALAPPDATA%\xagent\`, wherever the skills are installed.
 *   **Install for v1.**
     1.  Copy or clone the repo anywhere.
-    2.  Link or copy `skills/delegate` and `skills/feature` into `~\.claude\skills\`. The author's machine uses junctions to the repo.
+    2.  Link or copy `skills/delegate` and `skills/feature` into `~\.claude\skills\`. The author's machine uses junctions to the repo. With junctions, the skill that runs is whatever is checked out, so a feature of this repo that edits `skills/` changes the running skill mid-build. Use a copy for such features.
     3.  Add the permission rule that `doctor` prints.
 *   **`feature.ps1 doctor`** checks the prerequisites and prints what is missing:
     *   PowerShell 7 and git;
@@ -510,7 +513,7 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
 
 ### Alternative A: Adopt an existing tool instead of building `feature`
 
-The candidates, from [research §7](../research.md): kodo, Spec Kit, Superpowers, BMAD and amElnagdy/delegate-skills.
+The candidates, from [research §7](../research.md#7-landscape-survey-similar-projects-2026-11-09): kodo, Spec Kit, Superpowers, BMAD and amElnagdy/delegate-skills.
 
 *   **Pros**: These tools exist now, and some are mature, with more users and testing than ours will have.
 *   **Cons**:
@@ -617,7 +620,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 
 *   **Quota.** Claude runs only the lead. Workers, goldfish and councils run on the Cursor subscription.
     *   **Per feature.** One design review (about 10 lens runs), one plan review (2), one final check (1), the task preflights, the workers, and any councils.
-    *   **Measured during this design's own review.** A judgement-lens run took 3–7 minutes and 80k–160k tokens.
+    *   **Measured during this design's own review.** A judgement-lens run on GLM 5.2 took 1–2 minutes and 32k–89k tokens. On Grok 4.7 it took 6–11 minutes and 86k–176k tokens. Both ranges exclude cache reads, which Cursor's usage page includes.
     *   **Usage.** All seats show as "Included" on Cursor's usage page. `status` shows the feature's token use, including cache reads. There is no budget stop and no dollar estimate.
     *   **Lead bookkeeping.** Mechanical steps (scope check, tests, state updates) are one `feature.ps1` call each, so the lead's context and Claude quota go to review and judgement.
 *   **Safety.**
@@ -635,7 +638,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 | Risk | Mitigation | What remains |
 |---|---|---|
 | **Workers change files** with permission checks bypassed (`--force`) | `verify` checks the changed files against the declared scope. The lead reviews every diff, file by file. Merges go only into `feature/<name>`. | — |
-| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`). No secrets, credentials or deploys go to workers. | **Unmitigated in v1:** files on disk (`~/.ssh`, cloud credentials, other repos) and the network stay reachable. Worker sandboxing is the first item after v1. |
+| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`). No secrets, credentials or deploys go to workers. | **Unmitigated in v1:** the denylist is best effort. Files on disk (`~/.ssh`, `~/.aws/credentials`, `~/.npmrc`, other repos) and the network stay reachable. Don't use v1 on a machine whose files hold secrets you can't risk. Worker sandboxing is the first item after v1. |
 | **Reviewers load project instructions** from CLI rule files | Rule files are removed from read-only worktrees | — |
 | **The diff review is compressed by the Headroom proxy** | Per-file diffs, and a compression marker means "not reviewed" | — |
 | **The Cursor allowance runs out** | Any usage limit is a problem stop. The user resumes when the allowance is back. | The build waits. |
@@ -645,7 +648,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 | **Damage to the user's only checkout** | Clean-tree and branch checks, and merge abort on conflict | — |
 | **Usage data from private repos ends up in this public repo** | Logs live in `%LOCALAPPDATA%\xagent\`, outside every repo | — |
 | **Capacity** | Limits: one active feature and 2 agents at a time. A first rough rate: about 0.75% of the Other Models pool per GLM lens run (about 130 a month), and about 0.5% of the Cursor Models pool per Grok lens run. Token use per feature is shown in `status`. | The rates are rough (from one day's usage), and are refined on the first real feature. |
-| **The final check misses drift** (one lens at sign-off) | The full test suite, and the drift report's three lists shown before sign-off | Drift the `drift_report` lens misses is caught only if the user reads the diff. A second lens is in Future Improvements. |
+| **The final check misses drift** (one lens at sign-off) | The full test suite, and the drift report's three lists shown before sign-off | Drift the `drift_report` lens misses is caught only if the user reads the diff. A very large diff may not fit one reviewer's context. A second lens, or a per-phase check, is in Future Improvements. |
 | **Two sessions on one machine** | The advisory session lock | — |
 
 --------------------------------------------------------------------------------
@@ -754,7 +757,8 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
             2.  Retry on `code-hard` with the council's guidance as a delta brief.
             3.  Keep going.
         *   **Disagreement, or a failure after the second council:** log the outcome, then make a problem stop with `delegate`'s escalation brief.
-    *   **Fix-ups.** Use judgement against the guideline in the Technical Plan. Log each with `decision -Kind fix-up`, then run `verify` again.
+    *   **Fix-ups.** Use judgement against the guideline in the Technical Plan. Log each with `decision -Kind fix-up`, with its file and line counts in the text, then run `verify` again.
+    *   **Merging `main` in.** At a phase boundary, when the user asks: `git merge --no-ff main` in `<repo>`, log a `decision`, and run the phase test again. On a conflict, show the files and stop for the user.
     *   **Merge.** On accept:
         1.  Commit in the worker worktree.
         2.  Run `feature.ps1 merge -Task <id> -Message "<msg>"`.
@@ -789,7 +793,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   the stage and phase;
     *   tasks by status;
     *   what the flow is waiting on;
-    *   the token use so far, with the estimated third-party dollars;
+    *   the token use so far, including cache reads;
     *   the last 3 decisions;
     *   the action "continue" would take.
 
