@@ -226,6 +226,9 @@ if ($created -or -not (Test-Path $baseFile)) {
 }
 $baseSha = (Get-Content -LiteralPath $baseFile | Select-Object -First 1).Trim()
 
+$contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
+            'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary (describe what you did in THIS run), files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
+            'Also reply with that same JSON object as your final message.'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # Unique file name per run: a resumed worker must not assume it already read it.
 $taskName = "task-$stamp.md"
@@ -234,6 +237,8 @@ if ($isReview) {
     if ($stdFile) {
         $parts += "Target Standard (follow it; this is the standard the persona refers to, including any resources/document_standards/ path):`n`n" + (Get-Content -Raw -LiteralPath $stdFile)
     }
+    # Preflight reviewers see the task file but not what the harness adds when a worker runs it (dogfood D4).
+    $parts += "Harness context: if the target is a worker task file, the worker that runs it also receives this fixed instruction from the harness, so do not report its contents as missing from the task: `"$contract`" The worker runs in an isolated git worktree of this repository, in PowerShell on Windows."
     $parts += "`n---`n# Target document (review this; the repository is available read-only for context)`n`n" + (Get-Content -Raw -LiteralPath $TaskFile)
     Set-Content -LiteralPath (Join-Path $xDir $taskName) -Value ($parts -join "`n")
 } else {
@@ -249,9 +254,6 @@ $targetNote = if ($targetNames.Count -gt 0) { " The caller also copied these fil
 $resultFile = Join-Path $xDir 'result.json'
 Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
 
-$contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
-            'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary (describe what you did in THIS run), files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
-            'Also reply with that same JSON object as your final message.'
 $councilContract = 'This is a READ-ONLY consultation: do NOT create, modify or delete any files, and do not run commands that change state. ' +
             'You may read any file in this repository for context. Think independently and be candid; disagreement is valuable, agreement for its own sake is not. ' +
             'Critique first: find the weakest points, edge cases and blind spots before affirming anything; earn your agreement. No flattery or validating adjectives. ' +

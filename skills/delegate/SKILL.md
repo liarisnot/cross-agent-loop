@@ -65,7 +65,8 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
    - **Goal**: one or two sentences.
    - **Scope**: files and dirs it may touch, and what it must not touch.
    - **Constraints**: no new dependencies, follow existing style, etc.
-   - **Acceptance criteria** and the **exact test command**.
+   - **Acceptance criteria** and the **exact test command**. You'll run it from Bash, so quote PowerShell one-liners with single quotes (`pwsh -NoProfile -c '…$r…'`); in double quotes Bash expands `$` first. For a longer check, write a `.ps1` and hand it over with `-TargetFile` (the worker runs `pwsh -NoProfile -File .xagent/<name>.ps1`).
+   - If the task adds a helper nothing can call yet, have it tested against a stub, or its bugs wait for the next task.
    - Relevant context: interfaces, gotchas, links to code.
    - **Goldfish preflight** (see below) for anything beyond a trivial task.
 3. **Delegate** with the script. Start with `-Profile code`; escalate to `code-hard` only when needed. If a worker reports a usage limit, stop and tell the user (there is no second provider).
@@ -86,11 +87,13 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile re
 pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Repo <repo> -TaskId <id>-pr -TaskFile <task.md>
 ```
 
-- **When:** tasks touching more than two files, `code-hard` tasks, and interface or validation changes. Skip it for trivial edits; each preflight costs about 15–50 seconds and 15–80k cheap tokens.
+- **When:** tasks touching more than two files, `code-hard` tasks, and interface or validation changes. Skip it for trivial edits. Measured on real build tasks (2026-11-11): comprehension on Composer takes about 15–30 seconds and 15–30k tokens; readiness on DeepSeek about 100–135 seconds and 100–125k tokens (other-models pool). Readiness is the one that finds real gaps; for a small, mechanical task, comprehension alone is enough.
 - **comprehension** paraphrases the task. If its paraphrase doesn't match what you meant, that's the most important finding. **implementation_readiness** applies the "zero-decision rule": does the task leave design choices to the worker?
 - The report goes to `reviewFile` (Markdown, findings with Blocker/Major/Nit severity). Read it from the file.
 - **Pass a document by path.** Point the task file at a committed file and its line range; the reviewer reads it with its file tools. For anything not committed, use `-TargetFile`.
-- **Triage, don't obey blindly.** EGM's standard was written for design docs and over-asks on small tasks (exact helper names, error strings, phase plans). Fix findings where two reasonable workers could build *different behaviour or interfaces*. Ignore pure over-specification.
+- **Triage, don't obey blindly.** EGM's standard was written for design docs and over-asks on small tasks (exact helper names, error strings, phase plans, file-level allowlists). Fix findings where two reasonable workers could build *different behaviour or interfaces*. Ignore pure over-specification.
+- **When the task points at a document by path,** `comprehension` still judges the task file as if it had to stand alone, and reports "not reproduced here" findings. Those are noise; its paraphrase is the signal. If the paraphrase matches what you meant, the task reads right.
+- The script tells reviewers what the harness adds to a worker's prompt (the `result.json` contract), so they shouldn't flag it as missing. If one does, ignore it.
 - **Optional goldfish code review:** for risky diffs, write the diff to a file and run `-Profile review -Persona design_critic -Model glm-5.2-high -TargetFile <diff>` (a different model family from the writer). Your own review still comes first.
 - Clean up with `-Cleanup -Profile review -Repo <repo> -TaskId <that id>`.
 
