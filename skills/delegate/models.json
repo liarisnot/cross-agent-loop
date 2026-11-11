@@ -1,30 +1,15 @@
 {
-  "_comment": "Model profiles for delegate.ps1. Always pinned: Cursor's default is 'auto' and both CLIs offer Claude models, so an unpinned worker could silently use Claude. Check model IDs with: agent --list-models / agy models",
+  "_comment": "Model profiles and seats for delegate.ps1. Every run goes through the Cursor CLI. Models are always pinned: Cursor's default is 'auto' and it offers Claude models, so an unpinned worker could silently use Claude (both are blocked below). profiles.<p>.model is the worker or reviewer model; council runs pick profiles.council.seats.<seat> with -Seat; -Model overrides either. seats.readiness and seats.judgement are read by feature.ps1 for review lenses (judgement[0] is Grok, [1] is GLM). Check model ids with: agent --list-models",
   "profiles": {
-    "code": {
-      "purpose": "Well-specified implementation tasks that follow the lead's instructions. Cheap and fast.",
-      "readOnly": false,
-      "cursor": "composer-2.5",
-      "agy": "gemini-3.8-flash-medium"
-    },
-    "code-hard": {
-      "purpose": "Implementation tasks needing more reasoning (tricky bugs, larger refactors), or a retry after a 'code' worker failed review twice.",
-      "readOnly": false,
-      "cursor": "grok-4.7-medium",
-      "agy": "gemini-4-argon-medium"
-    },
-    "review": {
-      "purpose": "Read-only goldfish review with an EGM persona (-Persona): task-file preflight, or a fresh-context review of a diff/design. Cheap models; free-form report.",
-      "readOnly": true,
-      "cursor": "composer-2.5",
-      "agy": "gemini-3.8-flash-medium"
-    },
-    "council": {
-      "purpose": "Read-only deliberation: independent positions on a design or decision question. No file edits.",
-      "readOnly": true,
-      "cursor": "grok-4.7-high",
-      "agy": "gemini-4-argon-high"
-    }
+    "code":      { "readOnly": false, "model": "composer-2.5" },
+    "code-hard": { "readOnly": false, "model": "grok-4.7-high" },
+    "review":    { "readOnly": true,  "model": "composer-2.5" },
+    "council":   { "readOnly": true,  "seats": { "grok": "grok-4.7-high", "glm": "glm-5.2-high" } }
   },
+  "seats": {
+    "readiness": "deepseek-v41-flash-1017-medium",
+    "judgement": ["grok-4.7-medium", "glm-5.2-high"]
+  },
+  "agy": { "enabled": false, "reason": "T0: Antigravity FAQ forbids wrapping agy in third-party agents on consumer plans" },
   "blockedModelPatterns": ["claude", "^auto$"]
 }

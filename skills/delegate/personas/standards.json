@@ -1,0 +1,8 @@
+{
+  "implementation_readiness": "implementation-readiness-standard.md",
+  "codebase_details": "implementation-readiness-standard.md",
+  "zoom_out": "zoom-out-standard.md",
+  "design_critic": "feature-spec-standard.md",
+  "structural": "feature-spec-standard.md",
+  "inventive_catalyst": "feature-spec-standard.md"
+}

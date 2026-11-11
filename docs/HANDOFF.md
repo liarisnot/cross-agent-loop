@@ -26,10 +26,14 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **Design locked** (Status: Approved, 2026-11-11). Last addition before the lock: a Future Improvements line saying the Claude Code advisor tool is an optional lead-session setting, never a review lens (same model family, full context).
   - **Settled list**, for any later triage: "Rejected by author", the heading names, the sync stub, the single-lens sign-off, the invented "trickiest step" citation, `agy.enabled` (kept), and IR r3 M7/M10. It stays in the lead's triage and is never given to reviewers.
 
+- **Build step 1 done (2026-11-11): the `delegate` changes** (design items 13–17). `-Seat`, `-Feature`, `-Standard` (+ `personas/standards.json`), `-TargetFile`, `-KeepRuleFiles` (rule files removed at any depth in read-only runs, restored in `finally` and in `-Cleanup`), `baseSha` in the summary (`.xagent/base.sha` in the worktree), pid file, secret-env denylist, `agy` refused with the T0 reason, new `models.json` shape, `drift_report.md` persona, `feature-spec-standard.md`, SKILL.md rewritten. `runs.jsonl` moved to `%LOCALAPPDATA%\xagent\` (untracked, gitignored; `bench.py` reads it there).
+  - **Regression (Verification Plan):** passed. Live: Grok and GLM judgement lenses with `-Standard`, DeepSeek readiness with `-TargetFile` (quoted the marker line), council seats grok+glm on one id with one cleanup, a Composer worker run. Offline with a fake Cursor CLI: rule-file removal/restore, `-KeepRuleFiles`, secret vars stripped, pid file live then gone, kill mid-run then `-Cleanup`, scoped cleanup never touches `<id>-pc-*`, `agy`/`auto` refused.
+  - **Bug the regression caught (fixed):** strict mode broke on `.Count` when a repo has 0 or 1 rule files (PowerShell unrolls one-item arrays), in the `finally` block.
+
 ## Next
-1. **Build it**, in the order the design gives:
-   - **Step 1: the `delegate` changes.** The vendored EGM personas are already committed, and listed in `THIRD_PARTY_NOTICES.md`.
-   - **Step 2 onward:** delegate parts of the build where it makes sense.
+1. **Build step 2: `feature.ps1`, schemas, templates, fixtures, Pester tests** (items 8–11, 18, 19), test-first, in the sub-steps the design lists. Steps 2 and 3 can be delegated in parallel.
+   - **Pid-file times:** PowerShell 7's `ConvertFrom-Json` turns ISO strings into `DateTime`, so reconcile must compare start times as `DateTime`, never as strings (a string compare always fails).
+   - **Permission rule:** the allow rule in `~/.claude/settings.json` matches `D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1`. SKILL.md now says `<skill dir>`, which Claude Code may report as the junction path (`~/.claude/skills/delegate`); build step 5 adds that rule. Until then, call the `D:/` path.
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
@@ -38,7 +42,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **Standards:** the `implementation_readiness` persona appends its standard automatically. For `zoom_out`, paste `personas/zoom-out-standard.md` into the task file (see `fr-s8r3.md`).
 
 ## Open items
-- **`benchmarks/runs.jsonl` is still tracked.** It has uncommitted lines now. The design moves it to `%LOCALAPPDATA%\xagent\` in build step 1. Until then, don't commit runs from private repos.
+- **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
 - **Worker sandboxing** (a restricted account or a VM) is the **high-priority first item after v1**. Workers run with `--force` and can read the machine's files.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`.

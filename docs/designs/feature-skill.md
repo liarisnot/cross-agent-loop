@@ -486,9 +486,9 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
 1.  Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run the repo's full test command.
 2.  Run the final check: one judgement-tier goldfish with the `drift_report` persona, on a worktree detached at `feature/<name>`. It is given the locked design and a file holding `git diff main...feature/<name>`, both by path. It returns three lists: behaviour missing from the code, added beyond the design, and changed from it.
 3.  Show the results and ask for the **signed-off** gate.
-4.  On approval, record `signed-off` with the `feature/<name>` SHA that was checked. `finish` refuses if `HEAD` has moved since then, or if the design file's blob differs from the one recorded at **design-locked**. Then it runs `git switch main` and `git merge --no-ff feature/<name>`.
+4.  On approval, record `signed-off` with the `feature/<name>` SHA that was checked. `finish` refuses if anything outside `docs/features/<name>/` has changed since then (the gate's own commit changes only that folder), or if the design file's blob differs from the one recorded at **design-locked**. Then it runs `git switch main` and `git merge --no-ff feature/<name>`.
     *   **On conflict:** run `git merge --abort` and `git switch feature/<name>`, clear `signed-off`, and report the conflicting files. A new final check is needed.
-    *   **On success:** mark the feature `done` once the merge commit exists.
+    *   **On success:** the feature counts as `done` once the merge commit exists (derived, not stored).
 
     Pushing happens only if the user asks.
 

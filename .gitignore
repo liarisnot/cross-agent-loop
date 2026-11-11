@@ -9,3 +9,6 @@ sandbox.xagent/
 # Local tool state
 .headroom/
 .serena/
+
+# usage log moved to %LOCALAPPDATA%/xagent (never commit it)
+benchmarks/runs.jsonl

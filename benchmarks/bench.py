@@ -7,7 +7,7 @@
   python bench.py report                      -> rebuild REPORT.md from records.jsonl + runs.jsonl
 
 Token usage / seconds are NOT typed in by the lead: they are summed from runs.jsonl
-(written automatically by delegate.ps1 for every run) by matching repo + taskId.
+(written automatically by delegate.ps1 for every run, in $XAGENT_LOG_DIR or %LOCALAPPDATA%/xagent) by matching repo + taskId.
 
 judgment.json (written by the lead after reviewing both):
 {
@@ -22,13 +22,17 @@ judgment.json (written by the lead after reviewing both):
 }
 """
 import json
+import os
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONFIG, RUNS, RECORDS, REPORT = (HERE / n for n in ("config.json", "runs.jsonl", "records.jsonl", "REPORT.md"))
+CONFIG, RECORDS, REPORT = (HERE / n for n in ("config.json", "records.jsonl", "REPORT.md"))
+# runs.jsonl lives outside every repo (delegate.ps1 writes it there), so private usage data is never committed
+LOG_DIR = Path(os.environ.get("XAGENT_LOG_DIR") or Path(os.environ["LOCALAPPDATA"]) / "xagent")
+RUNS = LOG_DIR / "runs.jsonl"
 
 
 def load_jsonl(p):

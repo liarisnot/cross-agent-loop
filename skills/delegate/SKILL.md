@@ -1,58 +1,62 @@
 ---
 name: delegate
-description: Delegate coding subtasks from Claude Code (as lead programmer) to Cursor CLI or Google Antigravity CLI worker agents running locally in isolated git worktrees, then review, iterate and merge their work; or convene a read-only multi-model council (Grok + Gemini + Claude) on a design decision and escalate unresolved disagreements to the user. Use when the user asks to delegate, farm out, or parallelize work to Cursor / Antigravity / agy / "other agents", run the cross-agent dev loop, or get a second/third opinion from other models.
+description: Delegate coding subtasks from Claude Code (as lead programmer) to Cursor CLI worker agents running locally in isolated git worktrees, then review, iterate and merge their work; run read-only goldfish reviews with other model families (Grok, GLM, DeepSeek); or convene a read-only multi-model council (Grok + GLM + Claude) on a design decision and escalate unresolved disagreements to the user. Use when the user asks to delegate, farm out, or parallelize work to Cursor or "other agents", run the cross-agent dev loop, or get a second/third opinion from other models.
 ---
 
 # delegate: cross-agent dev loop
 
-> **⚠️ Antigravity (`-Agent agy`) must not be used (2026-11-10).**
->
-> *   **Why.** Google's FAQ forbids wrapping `agy` inside third-party agents, Claude Code included, on consumer plans (`docs/test-plan.md` T0 in the cross-agent-loop repo).
-> *   **What to do instead.** Use `-Agent cursor` for every role. Pass `-Model` for the non-Cursor seats: `glm-5.2-high` for the judgement and council seat, and `deepseek-v41-flash-1017-medium` for readiness.
-> *   **Two Cursor runs at once need different `-TaskId`s.** The worktree is named `<TaskId>-<agent>`, so the same id would collide.
-> *   **The routing and council text below still describes agy.** It gets rewritten in the `feature` build (see `docs/designs/feature-skill.md`).
+You are the **lead**. You plan, split the work, delegate, review and merge. Workers are Cursor CLI agents. They run headless, with full tool permissions, but **only** inside a dedicated git worktree created by `scripts/delegate.ps1`.
 
-You are the **lead**. You plan, split the work, delegate, review and merge. Workers are the Cursor CLI (`cursor`) and the Antigravity CLI (`agy`). They run headless, with full tool permissions, but **only** inside a dedicated git worktree created by `scripts/delegate.ps1`.
+**Never call `agent` directly with `--force`. Always go through the script.** Only the script is allow-listed.
 
-**Never call `agent` / `agy` directly with `--force` / `--dangerously-skip-permissions`. Always go through the script.** Only the script is allow-listed.
+**Antigravity (`-Agent agy`) is disabled.** Google's FAQ forbids wrapping `agy` inside third-party agents, Claude Code included, on consumer plans (T0 in `docs/test-plan.md` of the cross-agent-loop repo). The script refuses it unless `models.json` sets `agy.enabled: true`, which is kept only for a possible API-key setup later. Every role runs on `-Agent cursor`.
 
-## Invocation (exact form, matches the permission rule)
+## Invocation
 
-Use the **Bash** tool:
+`<skill dir>` below is the base directory Claude Code reports when this skill loads, with forward slashes. Use the **Bash** tool:
 
 ```bash
-pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -Agent agy -Repo D:/path/to/repo -TaskId short-kebab-id -TaskFile D:/path/to/repo/.xagent/tasks/short-kebab-id.md
+pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Repo D:/path/to/repo -TaskId short-kebab-id -TaskFile D:/path/to/repo/.xagent/tasks/short-kebab-id.md
 ```
 
 | Param | Notes |
 |---|---|
-| `-Agent` | `cursor` or `agy` |
+| `-Agent` | `cursor` |
 | `-Repo` | top level of the target git repo |
-| `-TaskId` | `^[a-z0-9][a-z0-9-]{0,48}$`; becomes the branch `xagent/<id>` and the worktree `<repoParent>/<repoName>.xagent/<id>` |
+| `-TaskId` | `^[a-z0-9][a-z0-9-]{0,48}$`; becomes the branch `xagent/<id>` and the worktree `<repoParent>/<repoName>.xagent/<id>`. Read-only runs use a detached worktree `<id>-<Seat or agent>` |
 | `-TaskFile` | markdown task description (see below) |
 | `-Base` | starting ref for a new worktree (default `HEAD`) |
 | `-Resume` | `sessionId` from a previous run, to continue the same conversation |
-| `-Profile` | `code` (default), `code-hard` or `council`; picks the model from `models.json` (see below) |
-| `-Persona` | with `-Profile review`: `implementation_readiness`, `comprehension` or `design_critic` (EGM goldfish personas in `personas/`) |
+| `-Profile` | `code` (default), `code-hard`, `review` or `council`; picks the model from `models.json` (see below) |
+| `-Persona` | with `-Profile review`: `implementation_readiness`, `comprehension`, `design_critic`, `zoom_out`, `inventive_catalyst`, `codebase_details`, `structural`, `style` or `drift_report` (goldfish personas in `personas/`) |
+| `-Standard` | with `-Profile review`: a standard file in `personas/` to append. Without it, the persona's default from `personas/standards.json`; with neither, none |
 | `-Model` | overrides the profile's model. Claude models and Cursor `auto` are **blocked** |
+| `-Seat` | `^[a-z0-9]+$`. Names a read-only run's worktree and logs (`<id>-grok`, `<id>-glm`), so two runs with one id don't collide. With `-Profile council`, it also picks the seat's model |
+| `-TargetFile` | `<path>[,<path>]`: files not in the commit (a diff, a draft) copied into the worktree's `.xagent/`; the prompt names them |
+| `-KeepRuleFiles` | read-only runs remove `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.cursor/` and `.agents/` (at any depth) so the reviewer doesn't load project instructions. Pass this when rule files are part of what's reviewed |
+| `-Feature` | the `feature` skill's feature name, written to `runs.jsonl` and the pid file |
 | `-TimeoutSec` | default 900; the process tree is killed on timeout |
-| `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes council worktrees for that TaskId |
-| `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a benchmark loser or a failed attempt), saving its diff as a patch in the run logs first |
+| `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes every read-only worktree `<TaskId>-<label>`, restoring rule files first. Pass `-Repo` |
+| `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a failed attempt), saving its diff as a patch in the run logs first |
 
-To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId`. Set the Bash tool `timeout` above `-TimeoutSec`. Use `run_in_background` for long tasks.
+To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId` (or the same id with different `-Seat`s for read-only runs). Set the Bash tool `timeout` above `-TimeoutSec`. Use `run_in_background` for long tasks.
 
-The script prints **one compact JSON line**: `ok, profile, model, violation, agent, taskId, worktree, branch, exitCode, timedOut, seconds, cliStatus, sessionId, result, changes, diffStat, stderrTail, logs`. Full logs are in `<repo>/.xagent/runs/<taskId>/`.
+The script prints **one compact JSON line**: `ok, violation, profile, model, usage, agent, seat, feature, taskId, worktree, branch, baseSha, exitCode, timedOut, seconds, cliStatus, sessionId, result, reviewFile, changes, diffStat, stderrTail, logs`. `baseSha` is the commit the worktree was created from (diff against it). Full logs are in `<repo>/.xagent/runs/<taskId>/`. While a run is live, `<logs>.pid` holds `{pid, startTime, childPid, childStartTime, feature}`.
 
-## Model profiles (`models.json`)
+**Worker environment.** Known secret variables (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `ANTHROPIC_*`, `OPENAI_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`) are removed before launch. This is best effort: files on disk and the network stay reachable, so never give workers anything secret.
 
-| Profile | Cursor | Antigravity | Use for |
-|---|---|---|---|
-| `code` | `composer-2.5` | `gemini-3.8-flash-medium` | well-specified tasks that follow your task file (the default) |
-| `code-hard` | `grok-4.7-medium` | `gemini-4-argon-medium` | tricky bugs, bigger refactors, or a task that failed review twice on `code` |
-| `review` | `composer-2.5` | `gemini-3.8-flash-medium` | **read-only** goldfish review with `-Persona` (see Goldfish preflight below) |
-| `council` | `grok-4.7-high` | `gemini-4-argon-high` | **read-only** deliberation (see Council below) |
+## Models (`models.json`)
 
-The user doesn't want Claude models used through Cursor or Antigravity: Claude is already the lead, and those are expensive there. Never pass `-Model claude-*` or `auto`; the script refuses them. Edit `models.json` to change the mapping.
+| Profile or seat | Model | Use for |
+|---|---|---|
+| `code` | `composer-2.5` | well-specified tasks that follow your task file (the default) |
+| `code-hard` | `grok-4.7-high` | tricky bugs, bigger refactors, or a task that failed review twice on `code` |
+| `review` | `composer-2.5` | **read-only** goldfish review with `-Persona`; comprehension preflight |
+| `council` seats | `grok` → `grok-4.7-high`, `glm` → `glm-5.2-high` | **read-only** deliberation (see Council below) |
+| `seats.readiness` | `deepseek-v41-flash-1017-medium` | `implementation_readiness` reviews (pass it with `-Model`) |
+| `seats.judgement` | `grok-4.7-medium`, `glm-5.2-high` | judgement lenses (`design_critic`, `zoom_out`, `style` …; pass with `-Model`) |
+
+Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other models (GLM, DeepSeek). The user doesn't want Claude models used through Cursor: Claude is already the lead, and it's expensive there. Never pass `-Model claude-*` or `auto`; the script refuses them. Edit `models.json` to change the mapping.
 
 ## The loop
 
@@ -64,65 +68,49 @@ The user doesn't want Claude models used through Cursor or Antigravity: Claude i
    - **Acceptance criteria** and the **exact test command**.
    - Relevant context: interfaces, gotchas, links to code.
    - **Goldfish preflight** (see below) for anything beyond a trivial task.
-3. **Delegate** with the script. Route work like this:
-   - `cursor`: well-scoped implementation inside an existing codebase; UI work.
-   - `agy`: exploration, tests, migrations, structured or mechanical changes.
-   - Start with `-Profile code`; escalate to `code-hard` only when needed.
-   - If a worker reports a quota or rate limit, switch to the other one.
+3. **Delegate** with the script. Start with `-Profile code`; escalate to `code-hard` only when needed. If a worker reports a usage limit, stop and tell the user (there is no second provider).
 4. **Review. Never trust the worker's `result` summary on its own.**
-   - Read the actual diff in the worktree, **one file at a time** (`git -C <worktree> diff -- <file>`, plus untracked files from `changes`). Headroom compresses large tool outputs, so a whole diff at once may arrive cut short. If you see a `[... compressed ...]` marker, use `headroom_retrieve` or read smaller chunks.
+   - Read the actual diff in the worktree, **one file at a time** (`git -C <worktree> diff <baseSha> -- <file>`, plus untracked files from `changes`). Headroom compresses large tool outputs, so a whole diff at once may arrive cut short. If you see a compression marker (`[... compressed ...]`, `[↑NL same as …]`, `<<ccr:…>>`), read smaller chunks.
    - Rerun the test command yourself inside the worktree.
    - Check that the change stays within scope.
 5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split.
-6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself.
-7. **Cleanup** with `-Cleanup`. Tell the user what each worker did, what you changed during review, and anything left open.
+6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself. (The `feature` skill merges with `--no-ff` and an `Xagent-Task: <id>` trailer, which its records read.)
+7. **Cleanup** with `-Cleanup -Repo <repo>`. Tell the user what each worker did, what you changed during review, and anything left open.
 
 ## Goldfish preflight & review (from Google's Elephant-Goldfish Model)
 
 You're the *elephant*: you hold the whole conversation's context, so you can't see what your task file leaves unsaid. The workers are *goldfish*: they see only the task file. Before delegating, have a goldfish with no context check the task file:
 
 ```bash
-pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Repo <repo> -TaskId pre-<id> -TaskFile <task.md>
-pwsh -NoProfile -File D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1 -Agent agy -Profile review -Persona implementation_readiness -Repo <repo> -TaskId pre-<id> -TaskFile <task.md>
+pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Repo <repo> -TaskId <id>-pc -TaskFile <task.md>
+pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Repo <repo> -TaskId <id>-pr -TaskFile <task.md>
 ```
 
-- **When:** tasks touching more than two files, `code-hard` tasks, interface or validation changes, and **always in benchmark mode** (so neither worker is penalized for an ambiguity in the task). Skip it for trivial edits; each preflight costs about 15–50 seconds and 15–80k cheap tokens.
+- **When:** tasks touching more than two files, `code-hard` tasks, and interface or validation changes. Skip it for trivial edits; each preflight costs about 15–50 seconds and 15–80k cheap tokens.
 - **comprehension** paraphrases the task. If its paraphrase doesn't match what you meant, that's the most important finding. **implementation_readiness** applies the "zero-decision rule": does the task leave design choices to the worker?
 - The report goes to `reviewFile` (Markdown, findings with Blocker/Major/Nit severity). Read it from the file.
+- **Pass a document by path.** Point the task file at a committed file and its line range; the reviewer reads it with its file tools. For anything not committed, use `-TargetFile`.
 - **Triage, don't obey blindly.** EGM's standard was written for design docs and over-asks on small tasks (exact helper names, error strings, phase plans). Fix findings where two reasonable workers could build *different behaviour or interfaces*. Ignore pure over-specification.
-- **Optional goldfish code review:** for risky diffs, put the task file plus `git diff` into one file and run `-Profile review -Persona design_critic` on the **other vendor** from the one that wrote the code. Your own review still comes first.
-- Clean up with `-Cleanup -Profile review -TaskId pre-<id>`.
+- **Optional goldfish code review:** for risky diffs, write the diff to a file and run `-Profile review -Persona design_critic -Model glm-5.2-high -TargetFile <diff>` (a different model family from the writer). Your own review still comes first.
+- Clean up with `-Cleanup -Profile review -Repo <repo> -TaskId <that id>`.
 
-## Benchmark mode (head-to-head; off by default)
+## Benchmark mode: unavailable in v1
 
-Check it at the start of every delegation session: `python D:/cross-agent-loop/benchmarks/bench.py status`. The user turns it on with "benchmark the next N tasks", which you run as `bench.py on N [--profile code]`, and off with `bench.py off`. It turns itself off when the countdown hits 0.
-
-When `enabled` is true, for each **implementation** subtask (not council runs or trivial edits):
-1. Write the task file as usual. **Also write held-out acceptance tests** the workers never see. Keep them outside the task file, e.g. `.xagent/tasks/<id>.heldout_test.py` (or the repo's test-framework equivalent). They should check the behaviour the task asks for, without being stricter than the task.
-2. Run **both** agents on the identical task file and base, with TaskIds `<id>--cursor` and `<id>--agy`, using the profile from `bench.py status`. Send both calls in the same message.
-3. **First-try check, before any feedback:** in each worktree, run the worker-visible test command plus the held-out tests (copy them in temporarily, then delete them). Record pass or fail.
-4. Review both the usual way. Give each one the review rounds it needs, judged by the same standard, and count the rounds.
-   - **Token fairness:** Cursor reports cache reads separately and agy (so far) doesn't, so compare the *incl. cache* totals.
-5. Score each 1–5 on **correctness**, **instructions** (followed the task and stayed in scope) and **quality** (readable, idiomatic, fits the codebase). Pick a winner: better final result, with fewer tokens and rounds as the tie-breaker.
-6. **Merge only the winner's branch.** Then run `-Cleanup` for the winner and `-Cleanup -Discard` for the loser. Discard saves the loser's diff to `.xagent/runs/<taskId>/discarded-*.patch`, then deletes the worktree and branch.
-7. Write a judgment JSON in the format shown in `bench.py`'s docstring and run `bench.py add <file>`. It pulls the tokens and wall time from `runs.jsonl` automatically, counts down, and rebuilds `benchmarks/REPORT.md`.
-8. Include the printed comparison table in your report to the user.
-
-Every delegate run, benchmarked or not, appends its token usage to `D:/cross-agent-loop/benchmarks/runs.jsonl`, which helps track quota use.
+The head-to-head benchmark needs a second worker provider, and `agy` is disabled. `benchmarks/bench.py` and its records stay for when one exists. Every delegate run still appends its token usage to `runs.jsonl` in `$env:XAGENT_LOG_DIR`, or `%LOCALAPPDATA%\xagent\` when unset, outside every repo, so usage from private projects is never committed.
 
 ## Council: multi-model deliberation (read-only)
 
-Three model families (Claude as lead, Grok via Cursor, Gemini via Antigravity) argue a decision. The goal is to surface blind spots and real disagreements, **not** to vote.
+Three model families (Claude as lead, Grok and GLM via Cursor) argue a decision. The goal is to surface blind spots and real disagreements, **not** to vote.
 
-**Convene a council when:** an architecture or interface decision is hard to reverse; there are data or security trade-offs; requirements are ambiguous with several reasonable readings; a bug fix has failed twice for reasons you can't pin down; or the user asks for it. **Not** for routine implementation (it costs about 1–3 minutes and frontier tokens on both subscriptions).
+**Convene a council when:** an architecture or interface decision is hard to reverse; there are data or security trade-offs; requirements are ambiguous with several reasonable readings; a bug fix has failed twice for reasons you can't pin down; or the user asks for it. **Not** for routine implementation (each seat costs about one judgement-lens run).
 
 1. **Question file:** `<repo>/.xagent/tasks/council-<id>.md` with the context, the decision(s) needed as numbered questions, the options you see, and the constraints. Keep it neutral; don't reveal your preference.
 2. **Write your own position first:** `council-<id>.lead.md`, written before reading theirs, so you aren't anchored.
-3. **Round 1:** run both with `-Profile council -TaskId <id>` (they run on detached worktrees, in plan mode, read-only).
+3. **Round 1:** run both seats in one message: `-Profile council -Seat grok -TaskId <id>` and `-Profile council -Seat glm -TaskId <id>` (detached worktrees, plan mode, read-only).
 4. **Fact-check:** where members disagree on a *fact*, verify it yourself (run the code, read the docs). Facts are settled by evidence, not by debate.
-5. **Round 2:** write `council-<id>.r2.md` containing the verified facts plus all three positions, labelled A/B/C (include your own and note what you concede), and the remaining open questions. Run both again with `-Resume <sessionId>`. Usually 2 rounds is enough; never more than 3.
+5. **Round 2:** write `council-<id>.r2.md` containing the verified facts plus all three positions, labelled A/B/C (include your own and note what you concede), and the remaining open questions. Run both again with their own `-Seat` and `-Resume <sessionId>`. Usually 2 rounds is enough; never more than 3.
 6. **Synthesize:**
-   - **Consensus** (all three agree, or one concedes with a stated reason): adopt it and mention it briefly to the user.
+   - **Consensus** (all three agree, or one concedes with a stated reason, `changed_position: true`): adopt it and mention it briefly to the user.
    - **Unresolved disagreement** on a judgment call (values, priorities, risk appetite): **stop and escalate to the user.** Don't break the tie yourself, even if you're 2-to-1.
 7. **Escalation brief** (in chat, and saved to `<repo>/.xagent/decisions/<id>.md`):
    - the decision in one line
@@ -131,13 +119,12 @@ Three model families (Claude as lead, Grok via Cursor, Gemini via Antigravity) a
    - what would settle it (a fact about the user's callers, product intent, etc.)
    - your recommendation, clearly labelled as one vote
    - Use AskUserQuestion when the options are crisp.
-8. `-Cleanup -Profile council -TaskId <id>`.
+8. `-Cleanup -Profile council -Repo <repo> -TaskId <id>` removes both seats' worktrees.
 
-Council notes: Cursor/Grok tends to put a preamble before its JSON (the script extracts it anyway). Headroom may compress long fields in tool output (`<<ccr:…>>`); read the specific fields from the `.stdout.json` log when you need the full text.
+Council notes: Grok tends to put a preamble before its JSON (the script extracts it anyway). Headroom may compress long fields in tool output (`<<ccr:…>>`); read the specific fields from the `.stdout.json` log when you need the full text.
 
 ## Rules
 
 - Never delegate secrets, credentials, deploy or publish steps, or anything outside the repo.
-- Workers must not commit or push. If one did, review its commits as part of the diff (`git -C <wt> log <base>..`).
-- If `ok` is false: read `stderrTail` and the log files, then retry once or reroute to the other worker.
-- Antigravity on a consumer or Pro Google plan: whether automated use is allowed by the terms is unresolved (see the cross-agent-loop repo, `docs/research.md`). Mention this if the user hasn't acknowledged it.
+- Workers must not commit or push. If one did, review its commits as part of the diff (`git -C <wt> log <baseSha>..`).
+- If `ok` is false: read `stderrTail` and the log files, then retry once.
