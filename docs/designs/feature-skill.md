@@ -2,7 +2,7 @@
 
 *   **Author:** Eugene Chin
 *   **Status:** In Review
-*   **Date:** 2026-11-09 (revised 2026-11-10 after review stages 5–7)
+*   **Date:** 2026-11-09 (revised 2026-11-11 after review stages 5–9)
 
 --------------------------------------------------------------------------------
 
@@ -320,7 +320,7 @@ Derived, not stored:
 | Merge in progress on `main` | git (`MERGE_HEAD` while on `main`) | **Ask** the user to finish or abort the merge |
 | Task merged | a merge commit on `feature/<name>` with the trailer `Xagent-Task: <id>` | Counts as `merged`. This absorbs manual merges that carry the trailer. |
 | Task merged per local state, no trailer commit | — | **contradiction, ask** |
-| Task in `preflight`, `running` or `in-review` | the latest run under `.xagent/runs/<delegate task id>/`, and the process list | A finished run (`.stdout.json` plus `result.json` or `.review.md`) → `in-review`. No live `delegate.ps1` or worker process and no finished run → `failed`, and the slot is freed. A live process whose `delegate.ps1` parent still runs → left alone, never launched twice. A live worker whose parent is gone → killed and marked `failed`. A `failed` task is not scheduled again until the user resumes it ("continue" asks first). A second failure of the same task is a problem stop. |
+| Task in `preflight`, `running` or `in-review` | the newest run under `.xagent/runs/` for the task's own ids (`<delegate task id>`, `-pc`, `-pr`, `-c<k>`), and the process list | A finished run (`.stdout.json` plus `result.json` or `.review.md`) → `in-review`. No live `delegate.ps1` or worker process and no finished run → `failed`, and the slot is freed. A live process whose `delegate.ps1` parent still runs → left alone, never launched twice. A live worker whose parent is gone → killed and marked `failed`. A `failed` task is not scheduled again until the user resumes it ("continue" asks first). A second failure of the same task is a problem stop. |
 | `signed-off` recorded, feature not yet in `main` | git | `finish` is pending |
 | Feature merged into `main` | `feature/<name>` is an ancestor of `main` | Counts as `done` if `signed-off` is recorded (derived, not stored). Without that gate → **contradiction, ask** |
 | Gates, stage, plan, stops, rounds, councils | committed `feature.json` and `decisions.md` | Always taken from the committed copy |
@@ -332,7 +332,7 @@ All worker merges into the feature branch use `git merge --no-ff` with the trail
 
 #### Ready tasks and overlap
 
-*   **Task ids** are `<feature>-<task>`. To fit `delegate`'s 49-character limit, the feature part is cut to 16 characters and the task part to the rest. On a collision, `-2`, `-3` and so on are added.
+*   **Task ids** are `<feature>-<task>`, built to fit `delegate`'s 49-character limit by the id budget in [item 8](#8-skillsfeaturescriptsfeatureps1-create) (the feature part cut to 12 characters, task ids of at most 20).
 *   **Ready.** A task is ready when all of its `depends-on` tasks are merged. `feature.ps1 schedule` returns the ready tasks of the current phase that can start now.
 *   **Overlap.** A task can start only if its declared files overlap no running task's declared files.
     *   Two paths overlap when they are equal or one is a parent folder of the other. Paths are compared with a trailing `/`, so a folder never matches a name prefix.
@@ -440,7 +440,7 @@ A design review is about 10 lens runs. The plan review has no judgement lens, be
     *   The review number is 1 for the first design review, 2 after going back to `design-review`, and so on.
     *   A re-audit within one review adds `-r<k>`.
     *   `feature.ps1 status` lists the current review's runs and which are done. Every id fits `delegate`'s 49-character limit (see [item 8](#8-skillsfeaturescriptsfeatureps1-create)).
-*   **Failed reviewers.** A lens run that ends without a report is retried once. If it fails again, it is rerun on the other judgement model (Grok ↔ GLM) and logged. If that fails too, the lens is recorded as **not run** in the report, never as "no findings". A lens that was not run blocks the next gate until it is rerun or the user waives it, which is logged as `[dismiss] <lens>: not run — <reason>`.
+*   **Failed reviewers.** A lens run that ends without a report is retried once. If it fails again, it is rerun on the other judgement model (Grok ↔ GLM) and logged. If that fails too, the lens is recorded as **not run** in the report, never as "no findings". A lens that was not run blocks the next gate until it is rerun or the user waives it, which is logged as `[dismiss] <run id>: not run — <reason>`.
 *   **Diff reviews.** The lead reads every diff itself. When a goldfish also reviews a risky diff (optional, as in `delegate`), the model is GLM 5.2, a different family from the writer.
 *   **Report format and synthesis.**
     *   Reviewers return Markdown with Blocker, Major and Nit findings.
@@ -506,7 +506,7 @@ These are changes to the existing skill. Until they are built, `delegate.ps1` be
     *   Python, reported as optional (only the manual sandbox uses it);
     *   the Cursor CLI, installed and logged in, at the path `delegate.ps1` launches (`%LOCALAPPDATA%\cursor-agent\cursor-agent.ps1`);
     *   the models in `models.json`, available to this account (from `--list-models`);
-    *   Pester 5 (for the tests only);
+    *   Pester 5.5 or later (for the tests only);
     *   `%LOCALAPPDATA%\xagent\` writable;
     *   the exact `Bash(pwsh -NoProfile -File <path>/feature.ps1 *)` and `delegate.ps1` permission rules to add.
 
@@ -715,7 +715,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   **Raw reports.** Copy each `reviewFile` to `docs/features/<name>/reviews/raw/<id>.md` and run `feature.ps1 commit-records -Message "review: <id>"` before synthesizing. Then run `delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <id>`. On resume, the runs with `done: false` in `status.reviewRuns` are still to do, and the review continues from the first of them.
         *   **Re-audit.** After "update the doc first", run `feature.ps1 reaudit -Phase <egm phase>`, which adds that phase's runs again with an `-r<k>` suffix.
         *   **Synthesis.** The lead does the synthesizer's job, following `skills/feature/egm/agents/synthesizer.md`, writes `docs/features/<name>/reviews/design-<n>.md` and commits it with `commit-records`. Every finding left out is logged with `feature.ps1 decision -Kind dismiss -Text "<lens>: <finding> — <reason>"`.
-        *   **Failed reviewers** are handled per Goldfish review routing. A lens recorded as not run blocks the gate until it is rerun or waived (`decision -Kind dismiss -Text "<lens>: not run — <reason>"`).
+        *   **Failed reviewers** are handled per Goldfish review routing. A lens recorded as not run blocks the gate until it is rerun or waived (`decision -Kind dismiss -Text "<run id>: not run — <reason>"`). The retry ladder isn't recorded: after a resume it starts again from the first attempt.
         *   **Checkpoints.** EGM's stage checkpoints become chat questions. They are not recorded gates.
     *   After resolution, ask for **design-locked**. On a clear yes, in this order, so the recorded blob is the final one:
         1.  Set the design doc's `Status:` to `Approved`, and run `feature.ps1 commit-design -Section Status`.
@@ -758,10 +758,10 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   Call `feature.ps1 task -Task <id> -Status preflight` before the preflight, and `task -Task <id> -Status running` before the worker.
         *   Write the task file `.xagent/features/<name>/<id>.task.md` from `templates/task.md` (item 11), copying the task's `files` and `test` from `feature.json` exactly.
         *   Run `delegate.ps1 -Agent cursor -Model <model> -Profile <profile> -Feature <name> -Base feature/<name> -Repo <repo> -TaskId <delegateTaskId> -TaskFile <task file>`.
-        *   After it returns, run `feature.ps1 task -Task <id> -Status in-review -SessionId <sessionId> -ResultFile <resultFile> -Worktree <worktree> -BaseSha <baseSha>`, with the values from `delegate.ps1`'s summary.
+        *   After it returns, run `feature.ps1 task -Task <id> -Status in-review -SessionId <sessionId> -ResultFile <worktree>/.xagent/result.json -Worktree <worktree> -BaseSha <baseSha>`, with the other values from `delegate.ps1`'s summary.
     *   **Preflight.** Run it when `delegate`'s preflight rules call for it, on the task file, following the cap rule:
-        *   `comprehension` with `-Model <worker model>` and `-TaskId <delegateTaskId>-pc`;
-        *   `implementation_readiness` with `-Model deepseek-v41-flash-1017-medium`, `-Standard implementation-readiness-standard.md` and `-TaskId <delegateTaskId>-pr`.
+        *   `delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Model <worker model> -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pc -TaskFile <task file>`;
+        *   `delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Standard implementation-readiness-standard.md -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pr -TaskFile <task file>`.
         *   Clean up each with `delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <that id>`.
     *   **After each worker run.**
         *   Call `feature.ps1 verify -Task <id>`. A non-empty `outOfScope` is a problem stop.
@@ -769,31 +769,17 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   A compression marker means that file is unread. The forms seen so far (`docs/test-plan.md`, the delegate and council trial notes) are `[... compressed ...]`, `[↑NL same as …]` and `<<ccr:…>>`. Read the file in smaller ranges (`git -C <worktree> diff <baseSha> -U3 -- <file>`, or `Read` with an offset) until no marker remains. `headroom_retrieve` may also work, but it is untested (T6).
     *   **Usage limit.** A run that reports a usage limit is a problem stop. Every other failed run takes the normal failed-run path.
     *   **Review rounds.** Log each failed round with `decision -Kind round -Text "<id>: <reason>"`. `status.tasks[].rounds` counts only the rounds since the task's latest council.
-    *   **Council escalation.** When `rounds` reaches 2 on `code`, or 1 on `code-hard`, convene a build council. It is `delegate`'s council procedure, cut down for a failed task. `<k>` is `councils + 1`.
-        1.  **Question file**, `.xagent/features/<name>/<id>.council-<k>.q.md`, kept neutral:
-            *   the task file;
-            *   each failed round's review feedback;
-            *   the last attempt's diff (`git -C <worktree> diff <baseSha>`);
-            *   the question "What change to the approach would make this task pass review? Name the concrete fix."
-        2.  **Lead's position first,** in `<id>.council-<k>.lead.md`, written before reading the seats' answers.
-        3.  **Round 1.** Run both seats in parallel, following the cap rule: `delegate.ps1 -Agent cursor -Profile council -Seat grok -Model grok-4.7-high` and `-Seat glm -Model glm-5.2-high`, each with `-Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k> -TaskFile <question file>`.
-        4.  **Round 2,** only if the seats' `position`s name different fixes. Fact-check what can be checked, write `<id>.council-<k>.r2.md` with the verified facts and the three positions (labelled A/B/C), and rerun both seats with `-Resume <sessionId>`. There is no round 3.
-        5.  **Outcome.**
-            *   **Consensus:** both seats and the lead name the same fix, or one concedes with a stated reason (`changed_position: true`).
-            *   **Disagreement:** anything else.
-        6.  **Cleanup:** `delegate.ps1 -Cleanup -Profile council -Repo <repo> -TaskId <delegateTaskId>-c<k>`, which removes both seat worktrees.
-        *   **Consensus, and `status.tasks[].councils` is under 2:**
-            1.  Log it with `decision -Kind council -Text "<id>: consensus — <one-line guidance>"`.
-            2.  Write a delta brief, `.xagent/features/<name>/<id>.council-<k>.md`: the original task file, then a `## Council guidance` section with the agreed fix, then a `## Previous attempt` section with the failed review feedback.
-            3.  Discard the failed attempt with `delegate.ps1 -Cleanup -Discard -Repo <repo> -TaskId <delegateTaskId>`.
-            4.  Rerun with the same `delegateTaskId`, `-Profile code-hard`, the delta brief as `-TaskFile` and no `-Resume`, so the retry starts clean from the current `feature/<name>`.
-            5.  Keep going. The round count is 0 again, because only rounds after the latest council count.
-        *   **Disagreement, or a failure after the second council:** log `decision -Kind council -Text "<id>: disagreement — <summary>"`, save `delegate`'s escalation brief to `.xagent/features/<name>/<id>.council-<k>.brief.md`, show it, and make a problem stop.
+    *   **Cap check first.** A failed review when `status.tasks[].councils` is already 2 is a problem stop: log `decision -Kind stop -Text "<id>: failed review after the second council — <reason>"`, with no `[council]` line, and convene nothing.
+    *   **Council escalation.** Otherwise, when `rounds` reaches 2 on `code`, or 1 on `code-hard`, convene a build council. Follow `delegate`'s council procedure (SKILL.md, "Council"), with only these differences. `<k>` is `councils + 1`.
+        *   **Question:** in `.xagent/features/<name>/<id>.council-<k>.q.md`, the task file, each failed round's review feedback, the last attempt's diff (`git -C <worktree> diff <baseSha>`), and "What change would make this task pass review? Name the concrete fix."
+        *   **Runs:** both seats with `-Seat grok` and `-Seat glm`, each with `-Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k>`, following the cap rule. At most two rounds, and round 2 only when the seats name different fixes. Clean up with `-Cleanup -Profile council -Repo <repo> -TaskId <delegateTaskId>-c<k>`.
+        *   **Consensus** (`delegate`'s rule): log `decision -Kind council -Text "<id>: consensus — <one-line guidance>"`. Write the delta brief `.xagent/features/<name>/<id>.council-<k>.md` (the task file, then `## Council guidance`, then `## Previous attempt` with the failed feedback). Discard the attempt (`delegate.ps1 -Cleanup -Discard -Repo <repo> -TaskId <delegateTaskId>`), and rerun the same `delegateTaskId` on `-Profile code-hard` with the delta brief and no `-Resume`. The round count is 0 again.
+        *   **Disagreement:** log `decision -Kind council -Text "<id>: disagreement — <summary>"`, save `delegate`'s escalation brief to `.xagent/features/<name>/<id>.council-<k>.brief.md`, show it, and make a problem stop.
     *   **Fix-ups.**
         *   **Before the merge.** First stage the worker's work (`git -C <worktree> add -A`). Then make the edit in the worktree, and take the counts from `git -C <worktree> diff --shortstat`, which now shows only the lead's unstaged edit. The merge step's commit includes both. Log `decision -Kind fix-up -Text "<id>: <files> files, <lines> lines — <what>"`, then run `verify` again.
         *   **After the merge** (a phase test failing on `feature/<name>`). Edit in `<repo>`, commit with the message `fix-up: <what>`, and log the same way, with `phase <n>` in place of the task id. The phase test is the check.
     *   **Merge.** On accept:
-        1.  Commit in the worker worktree.
+        1.  Commit everything in the worker worktree (`git -C <worktree> add -A`, then `commit`), so a fix-up is included. If cleanup later reports tracked changes, stop rather than discard them.
         2.  Run `feature.ps1 merge -Task <id> -Message "<msg>"`.
         3.  Run `delegate.ps1 -Cleanup -Repo <repo> -TaskId <delegateTaskId>`.
     *   **Phase end.** When all tasks of a phase are merged:
@@ -820,7 +806,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     5.  Take the one run from `status.reviewRuns` (persona `drift_report`, model `grok-4.7-medium`, no standard), and run `delegate.ps1 -Agent cursor -Profile review -Persona drift_report -Model <model> -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <id> -TaskFile <task file> -TargetFile <repo>/.xagent/features/<name>/final.diff`.
         *   **If it ends without a report:** retry once with the same model. If that fails, run it once on `glm-5.2-high` and log a `decision`. If that fails too, the lens is recorded as not run, which blocks the gate.
         *   Pass `-KeepRuleFiles` if `status.diffTouchesRuleFiles` is true.
-        *   Commit the raw report with `commit-records`, then run `delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <id>`.
+        *   Copy `reviewFile` to `docs/features/<name>/reviews/raw/<id>.md`, commit it with `commit-records`, then run `delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <id>`.
     6.  Show the test results and the findings, grouped as missing, added or changed behaviour.
     7.  Ask for **signed-off**. On a clear yes:
         1.  Run `feature.ps1 gate -Gate signed-off -Quote "<user words>"`.
@@ -859,13 +845,13 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   **Shared logs** are read from `$env:XAGENT_LOG_DIR`, or `%LOCALAPPDATA%\xagent\` when that is unset. The only file is `runs.jsonl`, written by `delegate.ps1`. If the folder can't be read, `status` reports token use as `null` with a warning.
     *   **`delegate`'s files** are found at `$PSScriptRoot/../../delegate/` (`models.json`, `scripts/delegate.ps1`), since both skills are installed side by side. If they're missing, every command fails with that path, and `doctor` checks it. The worker model for a profile is `profiles.<profile>.model`.
     *   **Run ids.** Every `delegate` task id is built by this script and must fit `delegate`'s `^[a-z0-9][a-z0-9-]{0,48}$`. `<name12>` is the name cut to 12 characters, without a trailing `-`.
-        *   **Task:** `<name12>-<task>`, at most 33 characters. `plan` rejects a task id longer than 20. On a collision, `-2`, `-3` and so on are added (at most 36). `plan` stores it as `delegateTaskId`.
+        *   **Task:** `<name12>-<task>`, at most 33 characters. `plan` rejects a task id longer than 20, and task ids are unique, so these ids can't collide. `plan` stores it as `delegateTaskId`.
         *   **Preflight:** `<delegateTaskId>-pc` (comprehension) and `-pr` (readiness).
         *   **Council:** `<delegateTaskId>-c<k>`. The seats are kept apart by `-Seat`, not by the id.
         *   **Lens runs:** `<name12>-<r><n>-<lens>-p<phase>`, where `<r>` is `d` (design review), `p` (plan review) or `s` (sign-off), and `<n>` is the review number. A re-audit adds `-r<k>`. `<lens>` is a two-letter code: `zo` (zoom_out), `ic` (inventive_catalyst), `cm` (comprehension), `dc` (design_critic), `st` (structural), `sy` (style), `ir` (implementation_readiness), `cd` (codebase_details), `dr` (drift_report). For example, `export-d1-zo-p5` and `export-d1-zo-p8` are the two zoom-out runs. The phase is omitted for the plan review and sign-off. The longest id is under 40 characters.
     *   **Review runs.** The script holds the [lens-runs table](#lens-runs-per-review) as data. Each row is a review, an EGM phase, a persona, a model (from `models.json`: `seats.judgement[0]` for Grok, `[1]` for GLM, `seats.readiness`, or the review profile's model for comprehension) and a standard (from `standards.json`). For the current review stage, `status.reviewRuns` lists every run of review `<n>`, plus re-audit runs from `[reaudit]` lines, each with `{id, phase, persona, model, standard, done}`. A run is `done` when `reviews/raw/<id>.md` is committed.
-    *   **Review number.** `<n>` for a review is 1 plus the number of committed `reviews/<review>-<m>.md` syntheses. So it stays the same until that review's synthesis is written.
-    *   **Decision lines** are `- <ISO time> [<kind>] <text>`. For `round`, `council`, `fix-up` and `stop`, the text starts with `<task id>:` (or `phase <n>:`). For `dismiss`, it starts with `<lens>:`, and for `reaudit` with `<review><n>: phase <p>`. Counts parse that prefix.
+    *   **Review number.** `<n>` for a review is 1 plus the number of committed syntheses for that review (`reviews/design-*.md` or `reviews/plan-*.md`; sign-off has no synthesis, so it is always 1). So it stays the same until that review's synthesis is written.
+    *   **Decision lines** are `- <ISO time> [<kind>] <text>`. For `round`, `council`, `fix-up` and `stop`, the text starts with `<task id>:` (or `phase <n>:`). For `dismiss`, it starts with `<lens>:` (a finding) or `<run id>:` (a lens not run), and for `reaudit` with `<review><n>: phase <p>`. Counts parse that prefix.
     *   **Path rules.** Paths are normalized to forward slashes, lowercase, with no leading `./`. An entry that ends in `/` is a folder. Anything else is a file or a glob.
         *   **Overlap key** (used by `schedule`): a file or folder is its own key. A glob's key is its folder part, up to the last `/` before the first wildcard (`src/test*.ts` → `src/`). An empty key (`**`, `*.md`) overlaps everything. Two keys overlap when one is a prefix of the other.
         *   **Scope match** (used by `verify`): a changed file is in scope if it equals a file entry, sits under a folder entry, or matches a glob entry (`*` within one folder, `**` across folders). `src/test*.ts` accepts `src/testing.ts` and rejects `src/other.ts`.
@@ -876,19 +862,19 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     | `new` | `-Name` | Fail if the tree isn't clean, the branch exists, or the feature list has a feature in progress. Run `git switch -c feature/<name> main`. Write `feature.json` (`{name, stage: "design", checkin: "on-problems", designDoc: "docs/designs/<name>.md", gates: {}}`) and `decisions.md` from the template, and commit `feature(<name>): start`. |
     | `status` | `[-Name]`, `[-Cwd]` | Selection rules, then print an object matching `status.schema.json`. With no feature, print `{selected:null, features:[…]}`. Read-only, and takes no lock. |
     | `reconcile` | `-Name` | Apply the reconcile table, including checking pid files for in-flight tasks. When a task becomes `failed`, add 1 to its local `failures`. A second failure appends a `[stop]`. Print `{changes:[], contradictions:[], lost:[]}`. Contradictions change nothing. |
-    | `stage` | `-Name`, `-To`, `-Reason` | Forward moves one step at a time. Where the stage table lists a gate to leave the current stage, only with that gate recorded. Backward moves to any earlier stage clear that stage's exit gate and every later gate. `abandoned` is allowed from any stage, and switches to `main` if the tree is clean. Append a decision and commit. |
+    | `stage` | `-Name`, `-To`, `[-Reason]` (default `<from> -> <to>`, the decision text) | Forward moves one step at a time. Where the stage table lists a gate to leave the current stage, only with that gate recorded. Backward moves to any earlier stage clear that stage's exit gate and every later gate. `abandoned` is allowed from any stage, and switches to `main` if the tree is clean. Append a decision and commit. |
     | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote, sha}`, where `sha` is `git rev-parse feature/<name>`. For `design-locked`, also record `designBlob`, the blob of `designDoc` at that SHA. Append a decision and commit. `-Checkin` is allowed only with `plan-approved`, and sets the mode through the same code as `checkin`. |
     | `plan` | `-Name`, `-PlanFile` | Allowed only in stage `plan`. Validate against `plan.schema.json`, then check: unique ids of at most 20 characters, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, and non-empty `files`. Compute the `delegateTaskId`s, keeping the earlier one for any task already in `feature.json`. A re-plan must still contain every task that has an `Xagent-Task` trailer on `feature/<name>`, with every field equal (judged from git, not from `state.json`). Write the plan into `feature.json`, generate `plan.md`, delete the input file and commit. |
-    | `schedule` | `-Name` | Return nothing while a `[stop]` is open. Otherwise, from the lowest phase with unmerged tasks, take the `pending` tasks whose dependencies are all `merged` and whose overlap keys overlap no `preflight`, `running` or `in-review` task. The live runs are the pid files in `.xagent/runs/*/` whose process is running and whose `feature` is `<name>`. Return at most `2 − liveRuns` tasks. Print an object matching `schedule.schema.json`. |
+    | `schedule` | `-Name` | Count `liveRuns` first. Return no tasks while a `[stop]` is open or before a plan exists (`liveRuns` and `cap` are still returned, for the cap rule). Otherwise, from the lowest phase with unmerged tasks, take the `pending` tasks whose dependencies are all `merged` and whose overlap keys overlap no `preflight`, `running` or `in-review` task. The live runs are the pid files in `.xagent/runs/*/` whose process is running and whose `feature` is `<name>`. Return at most `2 − liveRuns` tasks. Print an object matching `schedule.schema.json`. |
     | `task` | `-Name`, `-Task`, `[-Status] [-SessionId] [-ResultFile] [-Worktree] [-BaseSha]` | Update local `state.json` only. |
-    | `verify` | `-Name`, `-Task` | In the task's `worktree`: list the changed files (`git diff --name-only <baseSha>`, which includes uncommitted changes, plus `git ls-files --others --exclude-standard`, so ignored build output like `__pycache__` doesn't count), and apply the scope match. Run `test` with a timeout of `$env:XAGENT_VERIFY_TIMEOUT_SEC` seconds (default 900). On a timeout, kill the process tree and set `exitCode: -1` and `passed: false`. Store the result and print an object matching `verify.schema.json`. Change nothing. Fail if the worktree is gone. |
+    | `verify` | `-Name`, `-Task`, `[-TimeoutSec]` (default 900) | In the task's `worktree`: list the changed files (`git diff --name-only <baseSha>`, which includes uncommitted changes, plus `git ls-files --others --exclude-standard`, so ignored build output like `__pycache__` doesn't count), and apply the scope match. Run `test` with a timeout of `-TimeoutSec` seconds, as `delegate.ps1` does. On a timeout, kill the process tree and set `exitCode: -1` and `passed: false`. Store the result and print an object matching `verify.schema.json`. Change nothing. Fail if the worktree is gone. |
     | `merge` | `-Name`, `-Task`, `-Message` | Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run `git merge --no-ff xagent/<delegateTaskId>` with `<Message>`, a blank line, then `Xagent-Task: <id>`. On conflict, run `git merge --abort` and fail with the files. On success, set `merged`. |
-    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `round`, `council`, `fix-up`, `dismiss`, `reaudit`, `stop`, `resume`. `resume` fails without an open `stop`. |
+    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `round`, `council`, `fix-up`, `dismiss`, `stop`, `resume`. (`[reaudit]` lines are written only by `reaudit`.) `resume` fails without an open `stop`. |
     | `reaudit` | `-Name`, `-Phase` | Append `[reaudit] <review><n>: phase <p>` for the current review, so `status.reviewRuns` adds that phase's runs with the next `-r<k>`. Commit. |
     | `commit-design` | `-Name`, `-Section` | Commit only `designDoc`, with the message `feature(<name>): design – <Section>`. |
     | `commit-records` | `-Name`, `-Message` | Commit only files under `docs/features/<name>/` (raw reports, syntheses), with the message `feature(<name>): <Message>`. |
     | `checkin` | `-Name`, `-Mode <on-problems\|every-phase>` | Set it in `feature.json`, append a decision and commit. |
-    | `finish` | `-Name` | Require `signed-off`, a clean tree and `HEAD` on `feature/<name>`. Refuse if `HEAD` differs from the SHA on `signed-off`, or the blob of `designDoc` at `HEAD` differs from `designBlob` on `design-locked`. Run `git switch main` and `git merge --no-ff feature/<name>`. On conflict, run `git merge --abort` and `git switch feature/<name>`, clear `signed-off` (committed on `feature/<name>`), and fail. On success, the feature is `done` by the listing rule, so nothing more is written. Never push. |
+    | `finish` | `-Name` | Require `signed-off`, a clean tree and `HEAD` on `feature/<name>`. Refuse if `git diff --name-only <signed-off sha> HEAD` lists any file outside `docs/features/<name>/` (the gate's own commit changes only those), or the blob of `designDoc` at `HEAD` differs from `designBlob` on `design-locked`. Run `git switch main` and `git merge --no-ff feature/<name>`. On conflict, run `git merge --abort` and `git switch feature/<name>`, clear `signed-off` (committed on `feature/<name>`), and fail. On success, the feature is `done` by the listing rule, so nothing more is written. Never push. |
 
     *   **`plan.md`**, generated by `plan`:
         *   a title `# Plan: <name>`, the summary, and the check-in mode;
@@ -899,7 +885,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 #### 9. `skills/feature/schemas/` (Create)
 
 *   **Type / Scope**: JSON Schemas, draft 2020-12 (`"$schema": "https://json-schema.org/draft/2020-12/schema"`), one file per validated object, with no cross-file `$ref`s. `feature.ps1` and the Pester tests validate with `Test-Json -Json <text> -SchemaFile <file>`, which in PowerShell 7.4 and later uses JsonSchema.Net. `doctor` checks for PowerShell 7.4 or later.
-*   **Files**: `feature.schema.json`, `plan.schema.json` (it defines the task in its own `$defs/task`), `state.schema.json` (item 10), `status.schema.json`, `schedule.schema.json` and `verify.schema.json`. `feature.schema.json` checks `phases` only as an array of objects, because each plan is validated by `plan.schema.json` when it is imported.
+*   **Files**: `feature.schema.json`, `plan.schema.json` (it defines the task in its own `$defs/task`), `status.schema.json`, `schedule.schema.json` and `verify.schema.json`. `feature.schema.json` checks `phases` only as an array of objects, because each plan is validated by `plan.schema.json` when it is imported.
 *   **Proposed Changes**:
     *   **`feature.json`**:
         *   required: `name`, `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`abandoned`; `done` is derived, never stored), `checkin` (`on-problems`|`every-phase`), `designDoc`, and `gates` (keyed by gate name: `{at, quote, sha, designBlob?}`);
@@ -1067,7 +1053,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 
 *   **Type / Scope**: Test helper and its committed fixture. `sandbox/` at the repo root is gitignored scratch space, so the fixture lives under the tests.
 *   **Proposed Changes**:
-    *   Add `skills/feature/tests/fixtures/sandbox/calc.py` and `test_calc.py`, copied from the author's local `sandbox/`: a small calculator module, and its `unittest` tests. The sandbox's test command is `python -m unittest -q`. Python is needed only for this manual sandbox, so `doctor` reports it as optional.
+    *   Add `skills/feature/tests/fixtures/sandbox/calc.py` and `test_calc.py`, written fresh (`sandbox/` is not in the repo): `add(a, b)` and `multiply(a, b)`, and one `unittest` case for each. The sandbox's test command is `python -m unittest -q`. Python is needed only for this manual sandbox, so `doctor` reports it as optional.
     *   The script:
         1.  Copies that folder to a new temporary folder.
         2.  Runs `git init -b main` there and makes the first commit.
@@ -1097,7 +1083,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   **`checkin`** switches the mode both ways.
     *   **`plan`**:
         *   rejects a cycle, an unknown dependency, a dependency in a later phase, a duplicate id, and running outside stage `plan`;
-        *   builds `delegateTaskId`s from a 12-character cut name, rejects a task id over 20 characters, adds a collision suffix, and keeps an existing task's `delegateTaskId` across a re-plan;
+        *   builds `delegateTaskId`s from a 12-character cut name, rejects a task id over 20 characters, and keeps an existing task's `delegateTaskId` across a re-plan;
         *   generates `plan.md` in the layout from item 8, and deletes the input file.
     *   **Re-plan**: a re-plan that drops or changes a task with a trailer merge is rejected, even with `state.json` deleted.
     *   **`schedule`**:
@@ -1105,6 +1091,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   overlap keys: exact path, parent folder, `**`, `*.md`, `src/test*.ts` against `src/testing.ts` (overlap: same key `src/`), and `src/a/*` against `src/b/x.ts` (no overlap);
         *   the cap: two live fixture pid files for the feature mean no tasks, and pid files of another feature don't count;
         *   an open `[stop]` returns no tasks;
+        *   with no plan, it returns no tasks but still reports `liveRuns` and `cap`;
         *   tasks carry the worker model and the `delegateTaskId`;
         *   phase advance.
     *   **`task`** updates only `state.json`.
@@ -1127,6 +1114,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   a merge in progress on `main` is reported;
         *   a task `running` with no live pid file and no output becomes `failed` and frees its slot;
         *   a finished run becomes `in-review`;
+        *   a task in `preflight` whose live run is `<delegateTaskId>-pr` stays in `preflight`;
         *   a pid file whose `pid` is gone and whose `childPid` is live (a sleeping test process) has that process killed and the task marked `failed`. A `childPid` whose start time differs is left alone;
         *   a `failed` task is not scheduled until set back to `pending`, and a second failure opens a `[stop]`;
         *   a feature merged to `main` without `signed-off` is a contradiction;
@@ -1139,7 +1127,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   a second process holding the lock (same pid and start time) makes a write fail, and a lock whose pid is gone, or whose start time differs, is taken over;
         *   lens progress comes from the committed raw reports: `status.reviewRuns` lists the 10 design-review runs with distinct ids (two `zo`, two `sy`), marks the committed ones `done`, and adds `-r1` runs after a `reaudit`;
         *   the review number stays the same until the synthesis is committed, then goes up by 1;
-        *   every run id built for a 12-character name, a 20-character task and a collision suffix fits `^[a-z0-9][a-z0-9-]{0,48}$`.
+        *   every run id built for a 12-character name and a 20-character task fits `^[a-z0-9][a-z0-9-]{0,48}$`.
     *   **`status`**:
         *   each of the 4 selection rules, with rule 2 skipping `done` and `abandoned`;
         *   no feature gives `{selected:null, features:[]}`;
@@ -1153,11 +1141,12 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   **`finish`**:
         *   fails without signed-off, on a dirty tree, or on the wrong branch;
         *   a conflict aborts, leaves `main` unchanged, and clears `signed-off`;
-        *   a commit after `signed-off`, or a design file that differs from `designBlob`, makes `finish` refuse;
+        *   it succeeds right after `gate -Gate signed-off` (whose own commit touches only `docs/features/<name>/`);
+        *   a code commit after `signed-off`, or a design file that differs from `designBlob`, makes `finish` refuse;
         *   it merges and sets `done`;
         *   it never pushes (the test repo has no remote).
     *   **The drift persona** (fixtures `fixtures/drift/design.md` and `fixtures/drift/change.diff`: a small design plus a diff with one planted deviation): a manual check, run once, that `drift_report` reports it.
-    *   **Other fixtures:** `fixtures/runs.jsonl` (two features' runs, with cache reads), and `fixtures/pid/` (pid-file samples). The repo files for the scope and overlap cases (`src/testing.ts`, `src/other.ts` and so on) are created by each test in `$TestDrive`. The `test` commands in test plans are PowerShell one-liners (`pwsh -NoProfile -c "exit 0"`, `exit 3`, and `Start-Sleep 5` with `XAGENT_VERIFY_TIMEOUT_SEC=2`), so the suite doesn't need Python.
+    *   **Other fixtures:** `fixtures/runs.jsonl` (two features' runs, with cache reads), and `fixtures/pid/` (pid-file samples). The repo files for the scope and overlap cases (`src/testing.ts`, `src/other.ts` and so on) are created by each test in `$TestDrive`. The `test` commands in test plans are PowerShell one-liners (`pwsh -NoProfile -c "exit 0"`, `exit 3`, and `Start-Sleep 5` with `verify -TimeoutSec 2`), so the suite doesn't need Python.
     *   **Out of scope for automated tests:** `doctor` (checked by hand on this machine), and the stage files (the manual CUJ checklist).
 
 #### 20. `docs/test-plan.md` (Modify)
