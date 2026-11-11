@@ -43,7 +43,7 @@ Similar tools exist (see [research §7](../research.md)). The spec-driven framew
 *   **G6. Final check against the design.** Before sign-off, the whole feature diff is checked against the locked design for missing, extra or changed behaviour, and the user sees the result.
 *   **G7. Council on hard problems.** The skill brings in the existing multi-model council (`delegate`'s `council` profile: Grok via Cursor and Gemini Argon via agy, with Claude as lead) at three points. It is not a separate stage.
     *   **Design or plan:** the skill offers it for a decision that is hard to reverse or contested.
-    *   **Build:** it convenes one automatically when a `code` task fails review twice, or a `code-hard` task fails review once.
+    *   **Build:** it convenes one automatically when a `code` task fails review twice, or a `code-hard` task fails review once. If the council agrees, the build retries the task with its advice without stopping. If it disagrees, or a task has already had 2 councils, the build stops for the user.
     *   **Any stage:** it convenes one when the user asks.
 
     It does not convene one for routine work, because a council costs about 1–3 minutes plus frontier-model tokens on both subscriptions. Each council's outcome is recorded in the feature's decisions.
@@ -111,7 +111,9 @@ None open. Q1 (active feature), Q2 (state versus git), Q3 (goldfish vendor) and 
 *   **When**: The user says "build it".
 *   **Then**:
     *   The skill delegates A and B in parallel with `-Base feature/export`. It reviews each diff, merges the accepted work into `feature/export`, then delegates C.
-    *   Suppose C fails review twice. The skill convenes a council on C's problem and records the outcome as a decision. Because an escalation is a problem, it then stops and shows the user the outcome and its proposed retry.
+    *   Suppose C fails review twice. The skill convenes a council on C's problem and records the outcome as a decision.
+        *   **The council agrees.** The skill retries C on `code-hard` with the council's advice and keeps going.
+        *   **The council disagrees, or C fails after a second council.** It stops and shows the user the positions and its proposed next step.
     *   With the default check-in mode (`on-problems`), phase 2 starts as soon as phase 1 is merged and its tests pass. With `every-phase`, it reports and waits for "continue".
 
 ### CUJ 6: Test and sign off
@@ -171,11 +173,9 @@ delegate.ps1  -->  Cursor / agy workers  (code, code-hard, review,
     *   `schedule`: list the tasks that are ready to run now.
     *   `task`: update one task's runtime fields.
     *   `verify`: check a finished worker run's scope and run its test.
-    *   `lens`: record the progress of one goldfish lens run in a review.
     *   `cooldown`: mark a vendor as out of quota for a while.
     *   `merge`: merge a task's branch, adding its `Xagent-Task` trailer.
     *   `decision`: append to the decision log.
-    *   `wait`: record what the flow is waiting on.
     *   `checkin`: set the check-in mode.
     *   `finish`: merge the feature into `main` after sign-off.
 
@@ -200,6 +200,12 @@ build (phase 1..n) --> signoff --[GATE signed-off]--> done
 | `signoff` | full tests pass and the final check is shown | **signed-off**, which merges into `main` |
 
 Going back is allowed. For example, a design flaw found during the build moves the feature to `design-review`. Going back clears the gates after the target stage, and the change is logged as a decision.
+
+**Merged work after going back (keep or redo).** Each approved plan has a generation number, starting at 1, and every task merge records it in its trailer (`Xagent-Gen: <n>`). If tasks were already merged when the feature went back, the next plan must list each of them:
+*   **`keep`:** the work stays merged and counts as done in the new generation.
+*   **`redo`:** `feature.ps1` undoes that merge with `git revert -m 1 <merge commit>`, newest first, and the task goes back to pending. History is kept and nothing is force-pushed.
+
+The user sees and approves the keep/redo list at **plan-approved**, and the generation goes up by one. If a revert conflicts (for example, a kept task built on top of a redone one), the script stops the revert, names the conflicting files and the tasks involved, and asks the user to choose: change the list, or resolve by hand.
 
 ### Routing rules
 
@@ -226,24 +232,28 @@ The skill checks these in order:
 *   **Location.** Local state lives in `<repo>/.xagent/features/<name>/`.
 *   **Workers.** They are launched with `-Repo <repo> -Base feature/<name>`. The lead merges worker branches in `<repo>`, which has `feature/<name>` checked out.
 *   **Side work.** While a feature is active, side work happens outside the skill, for example by hand on another branch after committing or stashing. The checkout must be back on `feature/<name>` before the skill continues. Reconcile checks this and asks the user to switch back if it isn't.
-*   **Side mode** (a second feature in its own worktree) was designed and then deferred (see Alternative F and Future Improvements). The `mode` field is kept in `feature.json`, always `main` in v1, so side mode can be added without migrating records.
+*   **Side mode** (a second feature in its own worktree) was designed and then deferred (see Alternative F and Future Improvements). v1 records no mode. A later version can treat a feature with no `mode` as main mode.
 
 ### State model (split: committed records plus local runtime state)
 
 Committed on `feature/<name>`, in `docs/features/<name>/`:
 
-*   `feature.json`: name, mode, base, stage, check-in mode, path to the design doc, gates (each with a timestamp and the user's quote), and the plan's phases and tasks (id, title, depends-on, declared files, test command, profile, vendor, brief). The script is the only writer.
+*   `feature.json`: name, base, stage, check-in mode, plan generation, path to the design doc, gates (each with a timestamp and the user's quote), and the plan's phases and tasks (id, title, depends-on, declared files, test command, profile, kind, vendor, brief, and on a re-plan `carry: keep|redo`). The script is the only writer.
 *   `plan.md`: the plan as the user reviews it, in prose plus a task table generated from `feature.json`.
-*   `decisions.md`: an append-only log of decisions, gate approvals, council outcomes, scope changes and moves back to an earlier stage.
+*   `decisions.md`: an append-only log of decisions, gate approvals, council outcomes, scope changes, moves back to an earlier stage, dismissed review findings, and problem stops and resumes.
+    *   **Problem stops are committed.** A stop is logged as `[stop]` and clearing it as `[resume]`, so a stop survives the loss of the local state file. An unmatched `[stop]` means the flow is waiting on the user.
 
 The design doc itself is `docs/designs/<name>.md` on the branch. It is drafted in place with `Status: Draft` and committed after each approved section.
 
 Local, in `<main repo>/.xagent/features/<name>/state.json` (git-excluded):
 
 *   For each task: status (`pending`, `running`, `in-review`, `merged`, `failed`, `escalated`), worker vendor, delegate task id, session id, review round, worktree path, and last result file.
-*   For each goldfish review in progress (design, plan or sign-off): each lens's status (`pending`, `running`, `done`, `failed`), vendor, model and report file. A review interrupted by compaction resumes at the first lens not `done`.
 *   For each vendor: `cooldownUntil`, set when that vendor hits a quota limit.
-*   For the feature: the time of the last reconcile, and what the flow is waiting for (`user:<gate>`, `user:problem`, `worker:<task>`, or nothing).
+*   For the feature: the time of the last reconcile.
+
+These are not stored, because they can be derived:
+*   **What the flow is waiting for.** `status` computes it: a gate the stage needs, an open problem stop in `decisions.md`, a cooldown, or a running worker.
+*   **Goldfish review progress.** Each lens run uses a fixed `delegate` task id, `<name>-<review>-<lens>` (for example `export-design1-zoom-out`). A lens is done when `.xagent/runs/<that id>/` holds a `.review.md` file. A review interrupted by compaction resumes at the first lens with no report.
 
 ### Reconcile rules (resolves Q2)
 
@@ -253,11 +263,12 @@ Local, in `<main repo>/.xagent/features/<name>/state.json` (git-excluded):
 |---|---|---|
 | Feature branch exists | git | Missing branch while the stage is not `done`/`abandoned` → **contradiction, ask** |
 | Feature branch checked out | git: `git -C <repo> branch --show-current` | Another branch checked out while the feature is active → **ask the user to switch back** (no change is made) |
-| Task merged | git: a merge commit on `feature/<name>` with trailer `Xagent-Task: <id>` | Found → mark `merged`, even if local said otherwise (absorbs manual merges that keep the trailer) |
+| Task merged | git: a merge commit on `feature/<name>` with trailers `Xagent-Task: <id>` and `Xagent-Gen: <n>`, not undone by a later `Xagent-Revert: <id>` commit | Counts as `merged` if `<n>` is the current generation, or the task is marked `keep` in the current plan. Absorbs manual merges that carry the trailers. |
 | Task merged per local state, no trailer commit found | — | **contradiction, ask** |
 | Feature merged into `main` | git: `feature/<name>` is an ancestor of `main` | Mark `done` if `signed-off` is recorded. Without that gate → **contradiction, ask** |
 | Gates, stage, plan | committed `feature.json` | Always taken from the committed copy |
-| Review rounds, session ids, waiting-on, lens progress, cooldowns | local only | Kept. If the local file is missing, reset to defaults and report what was lost |
+| Open problem stop | committed `decisions.md`: a `[stop]` line with no later `[resume]` | Always waiting on the user, even if the local file was lost |
+| Review rounds, session ids, cooldowns, council counts | local only | Kept. If the local file is missing, reset to defaults and report what was lost |
 
 All worker merges into a feature branch use `git merge --no-ff` with the trailer, so task completion can be proven from history after `delegate -Cleanup` deletes the task branch.
 
@@ -265,18 +276,20 @@ All worker merges into a feature branch use `git merge --no-ff` with the trailer
 
 *   **Task ids** are `<feature>-<task>`, shortened to fit `delegate`'s 49-character limit.
 *   **Ready tasks.** A task is ready when all of its `depends-on` tasks are merged. `feature.ps1 schedule` returns the ready tasks of the current phase that can start now. A task can start only if its declared files overlap no running task's declared files. Two paths overlap when they are equal or one is a parent folder of the other. An entry in `files` can be a glob (`*`, `**`). For the overlap check, a glob counts as its literal folder prefix, the part before the first wildcard, which is conservative. For the scope check, a glob matches files the normal way. So two tasks that add files to the same folder run in parallel only if each lists its exact file names.
-*   **At most 2 workers at a time.** This keeps load on the two $20 subscriptions predictable.
+*   **At most 2 agents at a time.** The cap counts tasks in preflight, running or in review, so goldfish preflights count too. This keeps load on the two $20 subscriptions predictable.
 *   **Vendor choice (by kind, then balance).**
     *   **Kind.** Each task in the plan has a `kind`: `ui`, `impl`, `test`, `migration`, `mechanical` or `explore`.
     *   **Kind table.** `skills/feature/routing.json` maps `ui` and `impl` to Cursor and the other kinds to agy.
     *   **Provisional by design.** No benchmark data exists yet, so every routing rule is a guess. The kind table is the chosen heuristic. It is kept in config so it can be replaced without code changes once routing outcomes (below) and benchmark results show a better rule.
     *   **Balance.** `feature.ps1 plan` assigns vendors from the table. If one vendor then has more than 60% of a phase's worker tasks, it moves `impl` tasks to the other vendor, in plan order, until the share is at or below 60% or no `impl` tasks are left.
     *   **Visible in the plan.** The vendor is written into the plan, so the user sees and can change it before **plan-approved**.
-    *   **Quota cooldown.** When a worker reports a quota limit:
-        1.  `feature.ps1` sets that vendor's `cooldownUntil` to now plus 60 minutes.
-        2.  While the cooldown lasts, `schedule` routes every task assigned to that vendor to the other one, including the task that failed. The first reroute of each cooldown is logged as one decision.
-        3.  If both vendors are cooling down, that's a problem stop.
-        4.  The user can clear a cooldown early ("Cursor is back").
+    *   **Quota cooldown (throttled failover).** When a worker reports a quota limit:
+        1.  `feature.ps1 cooldown` sets that vendor's `cooldownUntil` to now plus 60 minutes, and logs one decision.
+        2.  Only the task that hit the limit is rerouted to the other vendor. The cooled vendor's other tasks wait until the cooldown ends.
+        3.  While any vendor is cooling down, the cap drops from 2 agents to 1, so the healthy subscription is not drained right after the first one ran out.
+        4.  If the only ready tasks belong to a cooled vendor, `schedule` returns a wait with the end time. The lead reports it and ends the turn. This is not a problem stop: "continue" after that time picks the build up again.
+        5.  If both vendors are cooling down, that's a problem stop.
+        6.  The user can clear a cooldown early ("Cursor is back").
 *   **Profile.** Each task starts on the profile the plan gives it.
 *   **Routing outcomes recorded.** Every merged task, benchmark mode or not, appends one line to `benchmarks/routing.jsonl` in this project. The line holds:
     *   the feature, task, kind and profile
@@ -288,7 +301,7 @@ All worker merges into a feature branch use `git merge --no-ff` with the trailer
 *   **Task preflight models (build only).** This rule is for the per-task preflight in the build. The design and plan reviews follow the routing table in "Goldfish review routing".
     *   **Comprehension** runs on the same vendor and the same model as the worker the task is routed to (for example Composer 2.5 for a Cursor `code` task, Grok 4.7 medium for a Cursor `code-hard` task). If the worker misreads the task, this reviewer should too.
     *   **Implementation readiness** runs on the other vendor.
-    *   **Order.** The preflight runs after `schedule` has applied any cooldown reroute, so it uses the model that will actually do the work.
+    *   **Order.** The preflight runs after `schedule` has decided the vendor, so it uses the model that will actually do the work. A task rerouted after a quota limit is preflighted again on its new vendor.
 *   **Scope check and test (`feature.ps1 verify`).**
     *   **What it does.** After each worker run, one script call:
         1.  lists the worker's changed and untracked files;
@@ -311,7 +324,10 @@ All worker merges into a feature branch use `git merge --no-ff` with the trailer
 ### Council (G7)
 
 *   **Design and plan.** When the lead faces a choice that is hard to reverse or contested, it offers a council and runs one only if the user agrees.
-*   **Build.** A `code` task that fails review twice, or a `code-hard` task that fails review once, triggers a council automatically. This is the one place the round limit is set for feature tasks, and it replaces `delegate`'s "about 3 rounds" rule for them. The council uses `delegate`'s council procedure. The outcome is appended to `decisions.md`, and the build makes a problem stop showing the outcome and the proposed retry (with the `code-hard` profile and the council's guidance).
+*   **Build.** A `code` task that fails review twice, or a `code-hard` task that fails review once, triggers a council automatically. This is the one place the round limit is set for feature tasks, and it replaces `delegate`'s "about 3 rounds" rule for them. The council uses `delegate`'s council procedure, and its outcome is appended to `decisions.md`.
+    *   **Consensus.** The lead retries the task on `code-hard` with the council's guidance, without stopping. The task's round count starts again from 0.
+    *   **Disagreement.** The council's members disagree on the fix, and the lead cannot settle it from verified facts. That's a problem stop, with `delegate`'s escalation brief.
+    *   **Cap.** A task gets at most 2 councils. If the retry after the second council fails review, that's a problem stop.
 *   **On request.** At any stage, the user can ask for a council.
 
 ### Goldfish review routing (resolves Q3)
@@ -329,10 +345,13 @@ This table applies to the design review, the plan review and the sign-off check.
 *   **Diff reviews.** Reviews of a diff keep `delegate`'s rule: the reviewer is the other vendor from the worker that wrote the code.
 *   **Target passed by file.** The review target (design doc, plan, or diff) is never embedded in the command line. `delegate.ps1` writes it to the read-only worktree's `.xagent/` and gives the reviewer the path. A trial run of this review showed that agy fails on a design-sized target otherwise (66,915 characters against the 28,000 limit).
 *   **Rule files removed.** Before a read-only run, `delegate.ps1` removes the CLIs' project rule files from the throwaway worktree, so the reviewer does not load project instructions as system context.
+    *   **Exception.** It skips rule files that are part of the review target: changed in the diff under review, or listed in `GoldfishContext`.
+    *   **Restoring.** It restores the files in a `finally` block. `-Cleanup` also restores them, so an aborted run cannot block cleanup.
 *   **Report format.**
     *   Cursor reviewers return free-form Markdown. agy reviewers return `review.schema.json` JSON. Both use Blocker/Major/Nit.
     *   The lead does the synthesis EGM's synthesizer would do: it deduplicates and ranks findings into one report at `docs/features/<name>/reviews/<stage>-<n>.md`.
-    *   Lens progress is tracked with `feature.ps1 lens`, so a review survives compaction.
+    *   Lens progress is derived from the fixed lens task ids, so a review survives compaction.
+    *   **Nothing dropped silently.** Every finding from every lens either appears in the synthesized report or is logged in `decisions.md` as `[dismiss] <lens>: <finding> — <reason>`. Synthesis by the Claude lead can then not quietly drop a cross-vendor reviewer's point.
 
 ### EGM integration
 
@@ -429,7 +448,7 @@ Candidates from [research §7](../research.md):
     *   **Cost per feature.** One goldfish review of the design (about 9 lens runs over 5 stages), one of the plan (2 runs), one final check, plus any councils.
     *   **Measured during this design's own review.** A strong-tier lens run took 3–7 minutes and 80k–160k tokens.
     *   **Workers.** At most 2 run at once.
-    *   **Lead bookkeeping.** Mechanical steps (scope check, tests, state updates, lens tracking) are done by `feature.ps1` in one call each, so the lead's context and Claude quota go to review and judgement.
+    *   **Lead bookkeeping.** Mechanical steps (scope check, tests, state updates) are done by `feature.ps1` in one call each, so the lead's context and Claude quota go to review and judgement.
 *   **Safety.**
     *   The skill never merges to `main` or pushes without the **signed-off** gate.
     *   `feature.ps1` refuses to start a feature on a dirty working tree, and never runs `git reset --hard`, `git clean`, or a force push.
@@ -501,7 +520,8 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     *   Read and follow the vendored `egm-review` SKILL.md, then the vendored `egm-resolve` SKILL.md. Where `egm-review` invokes `egm-review-loop`, read the vendored copy of that too. Apply these differences:
         *   **Reviewer runs.** Instead of spawning `egm:*` agents, run `delegate.ps1 -Profile review -Persona <lens> -Agent <cursor|agy>`, adding `-Model <review.strong model>` for strong-tier lenses. Use the lens-to-tier table and alternate vendors within each tier.
         *   **Task file.** It names the design doc's path and the `GoldfishContext` reading list, which the reviewer reads with its file tools. It does not embed the document.
-        *   **Lens tracking.** Before and after each lens run, call `feature.ps1 lens`. On resume, continue from the first lens not `done`.
+        *   **Lens ids.** Each lens run uses the fixed task id `<name>-design<n>-<lens with _ as ->`. On resume, `feature.ps1 status` lists the lenses without a report. Continue from the first of them.
+        *   **Dismissals.** Log every finding not carried into the report with `feature.ps1 decision -Kind dismiss`.
         *   **Synthesis.** The lead does the synthesizer's job, following `egm/agents/synthesizer.md`. It writes `docs/features/<name>/reviews/design-<n>.md`.
         *   **Checkpoints.** The stage checkpoints in EGM become chat questions. They are not recorded gates.
     *   After resolution, ask for **design-locked**. On a clear yes:
@@ -513,7 +533,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 
 *   **Type / Scope**: Stage instructions.
 *   **Proposed Changes**:
-    *   **Write the plan.** Produce a plan as JSON, matching `plan.schema.json`, in a temporary input file at `<repo>/.xagent/features/<name>/plan-input.json`. `feature.ps1 plan` imports it into `feature.json`, which is the only source of the plan, and then deletes the input file. The plan has a `summary` paragraph and is split into phases. Each phase has a `rationale` and a test command, and each task has:
+    *   **Write the plan.** Produce a plan as JSON, matching `$defs/plan` in `feature.schema.json`, in a temporary input file at `<repo>/.xagent/features/<name>/plan-input.json`. `feature.ps1 plan` imports it into `feature.json`, which is the only source of the plan, and then deletes the input file. The plan has a `summary` paragraph and is split into phases. Each phase has a `rationale` and a test command, and each task has:
         *   an id
         *   a title
         *   `dependsOn`
@@ -528,10 +548,11 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         2.  Run the plan goldfish: `comprehension` and `implementation_readiness` on `plan.md`, with the worker tier on both vendors.
         3.  Triage the findings per `delegate`'s rule (fix what would make two workers build different things).
         4.  To change the plan, write a new complete input file and import it again. `plan.md` is never edited by hand.
+    *   **Re-plan after going back.** If tasks are already merged, the input must list each of them with `carry: keep` or `carry: redo`. At approval, show the keep/redo list, and the reverts that approval will cause, next to the plan.
     *   **Offer a council** if the plan contains a choice that is hard to reverse.
     *   **Approve.**
         *   Ask for **plan-approved**, stating that the check-in mode is `on-problems` unless the user says "check in every phase".
-        *   On a clear yes, run `feature.ps1 gate -Gate plan-approved -Quote ... -Checkin <mode>`, then `stage -To build`.
+        *   On a clear yes, run `feature.ps1 gate -Gate plan-approved -Quote ... -Checkin <mode>`. On a re-plan, this also runs the `redo` reverts and raises the generation. Then run `stage -To build`.
 
 #### 5. `skills/feature/stages/build.md` (Create)
 
@@ -539,16 +560,22 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 *   **Proposed Changes**: The file says first: "Follow `delegate`'s loop (task file, preflight, run, review, iterate, merge, cleanup). This file lists only what differs for feature tasks." The differences:
     *   **Picking tasks.** Take tasks only from `feature.ps1 schedule`, which returns each ready task with its vendor (after any cooldown reroute) and its worker model. Run both ready tasks in the same message when two are ready.
     *   **Running a task.**
-        *   Before the run, call `feature.ps1 task -Status running`.
+        *   Before the preflight, call `feature.ps1 task -Status preflight`. Before the worker run, call `task -Status running`.
         *   Pass `-Agent <vendor from schedule> -Base feature/<name> -Repo <repo>` to `delegate.ps1`.
     *   **Preflight.**
         *   `comprehension` runs with `-Agent <task vendor> -Model <worker model from schedule>`.
         *   `implementation_readiness` runs on the other vendor.
         *   It runs when `delegate`'s preflight rules call for it.
     *   **After each worker run.** Call `feature.ps1 verify -Task <id>` before reading the diff. If it reports files out of scope, make a problem stop.
-    *   **Quota limit.** Call `feature.ps1 cooldown -Vendor <v>`, then take the task again from `schedule`. It now comes back on the other vendor, so the preflight reruns on that vendor's model.
+    *   **Quota limit.** Call `feature.ps1 cooldown -Vendor <v> -Task <id>`, then take the task again from `schedule`. It comes back on the other vendor, so the preflight reruns on that vendor's model. If `schedule` returns a cooldown wait, report the end time and end the turn.
     *   **Review rounds.** Update `task -Round <n>` each round.
-    *   **Council escalation.** The round limit is the feature rule in the Technical Plan (`code`: 2 failed rounds, `code-hard`: 1), which replaces `delegate`'s "about 3 rounds" for feature tasks. When it is reached, convene the council per `delegate`'s procedure, then:
+    *   **Council escalation.** The round limit is the feature rule in the Technical Plan (`code`: 2 failed rounds, `code-hard`: 1), which replaces `delegate`'s "about 3 rounds" for feature tasks. When it is reached, convene the council per `delegate`'s procedure, then do one of the following.
+    *   **Consensus, and the task's council count was 0 or 1.**
+        1.  Append the outcome with `feature.ps1 decision -Kind council`.
+        2.  Raise the count with `task -Councils <n>`.
+        3.  Retry on `code-hard`, with the council's guidance added to the task file as a delta brief.
+        4.  Keep going.
+    *   **Disagreement, or a failure after the second council.**
         1.  Append the outcome to `decisions.md` (`feature.ps1 decision`).
         2.  Run `task -Status escalated`.
         3.  Make a problem stop.
@@ -561,7 +588,9 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         2.  If the check-in mode is `every-phase`, report and stop.
         3.  Otherwise, continue to the next phase.
     *   **End of build.** When the last phase is done, run `stage -To signoff` and report.
-    *   **Problem stop.** Defined as: run `feature.ps1 wait -On user:problem -Note "<why>"`, report to the user, and end the turn.
+    *   **Problem stop.**
+        *   **Stopping.** Run `feature.ps1 decision -Kind stop -Text "<why>"`, which commits it, then report to the user and end the turn.
+        *   **Resuming.** When the user says to go on, first run `decision -Kind resume -Text "<what was decided>"`.
 
 #### 6. `skills/feature/stages/signoff.md` (Create)
 
@@ -570,7 +599,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     1.  Run the full test command in `<repo>`.
     2.  Write `git diff main...feature/<name>` to `<repo>/.xagent/features/<name>/final.diff`.
     3.  Write a task file naming the locked design's path and the diff file's path.
-    4.  Run `delegate.ps1 -Profile review -Persona drift_report -Model <review.strong model> -Base feature/<name>` on one vendor, tracked with `feature.ps1 lens`.
+    4.  Run `delegate.ps1 -Profile review -Persona drift_report -Model <review.strong model> -Base feature/<name>` on one vendor, with the fixed task id `<name>-signoff<n>-drift-report`. Pass `-KeepRuleFiles` if the diff changes any CLI rule file.
     5.  Show the test results and the findings, grouped as missing, added or changed behaviour.
     6.  Ask for **signed-off**. On a clear yes:
         1.  Run `feature.ps1 gate -Gate signed-off -Quote ...`.
@@ -604,43 +633,39 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     | Subcommand | Arguments | Behaviour |
     |---|---|---|
     | `new` | `-Name` | Fail if the working tree is dirty, the branch exists, or another feature is not `done`/`abandoned`. Run `git switch -c feature/<name> main`. Write `feature.json` (stage `design`, `mode: main`, `checkin: on-problems`) and `decisions.md`, and commit `feature(<name>): start`. Write the local `state.json`. |
-    | `status` | `[-Name]`, `-Cwd` | Without `-Name`, apply the selection rules. Rule 2 reads `git -C <Cwd> branch --show-current`. Rule 3 scans `.xagent/features/*/state.json` plus branches `feature/*` whose stage is not `done`/`abandoned`. Output the selected feature's merged view (committed plus local) with `nextAction`, or `{selected:null, features:[...]}`. |
+    | `status` | `[-Name]`, `-Cwd` | Compute `waitingOn` (a gate, an open stop, a cooldown, or a running worker) and, during a goldfish review, the lenses with no report yet. Without `-Name`, apply the selection rules. Rule 2 reads `git -C <Cwd> branch --show-current`. Rule 3 scans `.xagent/features/*/state.json` plus branches `feature/*` whose stage is not `done`/`abandoned`. Output the selected feature's merged view (committed plus local) with `nextAction`, or `{selected:null, features:[...]}`. |
     | `reconcile` | `-Name` | Apply the reconcile table. Output `{changes:[], contradictions:[], lost:[]}`. Contradictions don't change anything. |
     | `stage` | `-Name`, `-To`, `-Reason` | Forward moves are allowed only one step at a time, and only when the gate is recorded. Backward moves are allowed to any earlier stage: they clear later gates and append a decision. `abandoned` is allowed from any stage. Commit. |
-    | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the current stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. `-Checkin` is allowed only with `plan-approved`. |
-    | `plan` | `-Name`, `-PlanFile` | Validate against `plan.schema.json`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, `taskId` ≤ 49 characters. Assign `vendor` to each worker task from `routing.json` (unless the plan sets `vendor` explicitly, which the user can ask for), then apply the 60% balance rule for each phase, moving `impl` tasks in plan order. Write the summary and phases into `feature.json`, generate the whole `plan.md` from it (summary, then each phase's rationale and test, then a task table), and delete the input file. Commit. Allowed only in stage `plan`. |
-    | `schedule` | `-Name` | From the current phase (the lowest phase with tasks not yet merged), return tasks that are `pending`, have every dependency `merged`, and whose files overlap no `running`/`in-review` task. Cap the total of running plus in-review tasks at 2. Tasks with `profile: lead` are returned with `assignee: lead`. If a task's vendor is cooling down and the other is not, return it on the other vendor and say so (`rerouted: true`). If both are cooling down, return `{blocked: "quota"}`. Each worker task includes its effective `vendor` and the worker `model` for its profile, read from `delegate`'s `models.json`. |
-    | `task` | `-Name`, `-Task`, `[-Status] [-Vendor] [-DelegateTaskId] [-SessionId] [-Round] [-ResultFile]` | Update local `state.json` only. |
+    | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the current stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. `-Checkin` is allowed only with `plan-approved`. On `plan-approved` with `redo` tasks: revert each one's current merge with `git revert -m 1 --no-edit`, newest first, then amend each revert message to add `Xagent-Revert: <id>`. On conflict, run `git revert --abort` and fail, naming the files and tasks; the gate is not recorded. On success, raise `generation` by 1. |
+    | `plan` | `-Name`, `-PlanFile` | Validate against the plan part of `feature.schema.json`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, `taskId` ≤ 49 characters. Every task currently merged must appear with `carry: keep` or `carry: redo`, and `carry` is rejected on other tasks. Assign `vendor` to each worker task from `routing.json` (unless the plan sets `vendor` explicitly, which the user can ask for), then apply the 60% balance rule for each phase, moving `impl` tasks in plan order. Write the summary and phases into `feature.json`, generate the whole `plan.md` from it (summary, then each phase's rationale and test, then a task table), and delete the input file. Commit. Allowed only in stage `plan`. |
+    | `schedule` | `-Name` | From the current phase (the lowest phase with tasks not yet merged), return tasks that are `pending`, have every dependency `merged`, and whose files overlap no `preflight`/`running`/`in-review` task. Cap the total of preflight, running and in-review tasks at 2, or at 1 while any vendor is cooling down. Tasks with `profile: lead` are returned with `assignee: lead`. A task whose planned vendor is cooling down is held back, unless it is the task that hit the limit (marked by `cooldown -Task`), which is returned on the other vendor with `rerouted: true`. If only held-back tasks are ready, return `{wait: "cooldown", until}`. If both vendors are cooling down, return `{blocked: "quota"}`. Each worker task includes its effective `vendor` and the worker `model` for its profile, read from `delegate`'s `models.json`. |
+    | `task` | `-Name`, `-Task`, `[-Status] [-Vendor] [-DelegateTaskId] [-SessionId] [-Round] [-Councils] [-ResultFile]` | Update local `state.json` only. Status is one of `pending`, `preflight`, `running`, `in-review`, `merged`, `failed`. |
     | `verify` | `-Name`, `-Task` | In the task's worker worktree: list the changed files (`git diff --name-only <base>...HEAD` plus uncommitted and untracked files), and match them against the task's `files` (exact, parent folder, or glob). Run the task's `test` command there with a 15-minute timeout. Store the result and print `{inScope, outOfScope:[], test:{command, passed, exitCode, tail}}`. Change nothing in the worktree. |
-| `lens` | `-Name`, `-Review <design\|plan\|signoff>-<n>`, `-Lens`, `[-Status] [-Vendor] [-Model] [-ReportFile]` | Update that lens in local `state.json`. Without `-Status`, print the review's lens list and the next lens not `done`. |
-| `cooldown` | `-Name`, `-Vendor`, `[-Clear]` | Set the vendor's `cooldownUntil` to now plus 60 minutes, or clear it. On the first set of each cooldown, append a decision. |
-| `merge` | `-Name`, `-Task`, `-Message` | In `<repo>`: `git merge --no-ff xagent/<delegateTaskId>` with the message `<Message>` plus a blank line plus `Xagent-Task: <task id>`. On conflict, run `git merge --abort` and fail with the conflicting files. On success, set the task to `merged` and append the routing outcome line to `benchmarks/routing.jsonl` (in the cross-agent-loop repo, next to `runs.jsonl`). |
-    | `decision` | `-Name`, `-Kind`, `-Text` | Append `- <ISO time> [<kind>] <text>` to `decisions.md` and commit. Kinds: `decision`, `council`, `fix-up`, `scope`, `gate`, `stage`. |
-    | `wait` | `-Name`, `-On`, `[-Note]` | Set the local `waitingOn`. `-On none` clears it. |
+    | `cooldown` | `-Name`, `-Vendor`, `[-Task]`, `[-Clear]` | Set the vendor's `cooldownUntil` to now plus 60 minutes and append a decision, or clear it. `-Task` marks the task that hit the limit for rerouting. |
+    | `merge` | `-Name`, `-Task`, `-Message` | In `<repo>`: `git merge --no-ff xagent/<delegateTaskId>` with the message `<Message>` plus a blank line plus `Xagent-Task: <task id>`. On conflict, run `git merge --abort` and fail with the conflicting files. The message also gets the trailer `Xagent-Gen: <generation>`. On success, set the task to `merged` and append the routing outcome line to `benchmarks/routing.jsonl` (in the cross-agent-loop repo, next to `runs.jsonl`). |
+    | `decision` | `-Name`, `-Kind`, `-Text` | Append `- <ISO time> [<kind>] <text>` to `decisions.md` and commit. Kinds: `decision`, `council`, `fix-up`, `scope`, `gate`, `stage`, `dismiss`, `stop`, `resume`. `resume` fails if there is no open `stop`. |
     | `checkin` | `-Name`, `-Mode` | Set `on-problems` or `every-phase` in `feature.json`, append a decision and commit. |
         | `finish` | `-Name` | Require `signed-off`. In `<repo>`: `git switch main` and `git merge --no-ff feature/<name> -m "Merge feature/<name>"`. Set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
 
     *   **Path overlap.** Normalize both paths (forward slashes, no trailing slash, lowercase on Windows). They overlap if they are equal or one starts with the other plus `/`.
 
-#### 9. `skills/feature/feature.schema.json` and `skills/feature/plan.schema.json` (Create)
+#### 9. `skills/feature/feature.schema.json` (Create)
 
-*   **Type / Scope**: JSON Schemas.
+*   **Type / Scope**: One JSON Schema. The plan input is validated against its `$defs/plan`, so the task structure is defined once.
 *   **Proposed Changes**:
     *   **`feature.json` fields**:
-        *   `name`, `mode` (always `main` in v1; `side` is reserved), `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
+        *   `name`, `generation`, `stage` (`design`|`design-review`|`plan`|`build`|`signoff`|`done`|`abandoned`)
         *   `checkin` (`on-problems`|`every-phase`), `designDoc`
         *   `gates`: an object keyed by the gate name, each holding `{at, quote}`
         *   `summary`, and `phases`: an array of `{n, rationale, test, tasks:[task]}`
-    *   **`plan.json` task fields**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`|`lead`), `kind` (`ui`|`impl`|`test`|`migration`|`mechanical`|`explore`), `brief`, and an optional `vendor` (`cursor`|`agy`) that overrides the table.
-    *   **`feature.json` task fields**: every task field, with `vendor` always filled in for worker tasks.
+    *   **Task fields (`$defs/task`)**: `id`, `title`, `dependsOn`, `files`, `test`, `profile` (`code`|`code-hard`|`lead`), `kind` (`ui`|`impl`|`test`|`migration`|`mechanical`|`explore`), `brief`, an optional `vendor` (`cursor`|`agy`) that overrides the table, and `carry` (`keep`|`redo`), which is allowed only on a re-plan. In `feature.json`, `vendor` is always filled in for worker tasks.
 
 #### 10. `skills/feature/state.schema.json` (Create)
 
 *   **Type / Scope**: JSON Schema for the local `state.json`.
 *   **Proposed Changes**:
-    *   `name`, `lastReconcile`, `waitingOn`, `waitingNote`
-    *   `tasks`: keyed by task id, each holding `status`, `vendor`, `delegateTaskId`, `sessionId`, `round`, `resultFile`, `verify` (the last `verify` output)
-    *   `reviews`: keyed by review id, each holding `lenses`: `{lens: {status, vendor, model, reportFile}}`
+    *   `name`, `lastReconcile`
+    *   `tasks`: keyed by task id, each holding `status`, `vendor`, `rerouteFor` (set by `cooldown -Task`), `delegateTaskId`, `sessionId`, `round`, `councils`, `resultFile`, `verify` (the last `verify` output)
     *   `vendors`: `{cursor: {cooldownUntil}, agy: {cooldownUntil}}`
 
 #### 10b. `skills/feature/routing.json` (Create)
@@ -689,7 +714,9 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   The prompt tells the reviewer to read the target file with its file tools.
     *   **Rule files removed.** In read-only runs:
         *   Before launch, delete `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursor/`, `.cursorrules` and `.agents/` from the throwaway worktree, wherever they exist in its tree. Record the deleted paths.
-        *   After the process exits, and before the read-only check, restore them with `git -C <wt> checkout -- <paths>`. The read-only check then does not report them.
+        *   After the process exits, and before the read-only check, restore them with `git -C <wt> checkout -- <paths>` inside a `finally` block. The read-only check then does not report them.
+        *   A new switch, `-KeepRuleFiles`, skips the removal when rule files are part of the review target.
+        *   `-Cleanup` of a read-only worktree first restores any deleted tracked rule files, so an aborted run does not block it.
     *   **Standards lookup.** Replace the hard-coded `implementation_readiness` standard injection with a lookup in `personas/standards.json`.
     *   **No new profile.** Strong-tier reviews use `-Profile review -Model <id>`, which already works.
 
@@ -715,7 +742,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   refuses a dirty tree
         *   refuses a bad name
         *   refuses a second active feature
-        *   creates the branch, switches to it, and commits
+        *   creates the branch, switches to it, and commits with `generation: 1`
     *   **`stage` and `gate`**:
         *   a forward move without the gate fails
         *   the gate in the wrong stage fails
@@ -739,13 +766,17 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   the cap of 2
         *   `lead` tasks returned with `assignee: lead`
         *   returned tasks include `vendor` and the profile's worker `model`
-        *   a cooling-down vendor's tasks are rerouted (`rerouted: true`)
+        *   the cap counts `preflight` tasks
+        *   during a cooldown the cap is 1
+        *   only the task marked by `cooldown -Task` is rerouted (`rerouted: true`), and the cooled vendor's other tasks are held back
+        *   only held-back tasks ready returns `wait: cooldown` with the end time
         *   both vendors cooling down returns `blocked: quota`
         *   a glob entry counts as its literal folder for overlap
         *   phase advance
     *   **`merge` and `reconcile`**:
         *   a trailer merge is marked merged after the task branch is deleted
         *   a merge appends one routing outcome line with every field filled in
+        *   a merge carries both the `Xagent-Task` and `Xagent-Gen` trailers
         *   a manual merge with the trailer is absorbed
         *   local `merged` without a trailer is a contradiction
         *   a missing branch is a contradiction
@@ -758,11 +789,20 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   an untracked new file is counted
         *   a failing test is reported with its exit code
         *   the worktree is left unchanged
-    *   **`lens` and `cooldown`**:
-        *   the next lens not `done` is returned after a simulated interruption
+    *   **`cooldown`**:
         *   a cooldown expires after its time
         *   `-Clear` clears it
-        *   only the first set of a cooldown logs a decision
+    *   **Re-plan (keep and redo)**:
+        *   a re-plan missing a merged task is rejected
+        *   `carry` on a never-merged task is rejected
+        *   approval reverts `redo` merges newest first with `Xagent-Revert` and raises the generation
+        *   `keep` tasks stay merged under the new generation
+        *   an old-generation merge without `keep` does not count as merged
+        *   a conflicting revert aborts cleanly and the gate is not recorded
+    *   **Stops and derived status**:
+        *   a `[stop]` with no `[resume]` is reported as waiting, even with `state.json` deleted
+        *   `resume` without an open stop fails
+        *   lens progress is read from `.xagent/runs/<lens id>/*.review.md`
     *   **`status`**: each of the 4 selection rules.
     *   **`finish`**:
         *   fails without signed-off
@@ -826,6 +866,7 @@ Steps 2 and 3 do not share files and can be delegated in parallel. Step 4 is wri
 *   **delegate regression**: re-run the `delegate` checks in `docs/test-plan.md` that touch profiles and personas. Also add these checks:
     *   One strong-tier review on each vendor, of a target over 28,000 characters (this design doc). It must succeed on agy.
     *   One read-only run in a repo that has an `AGENTS.md`. It must report no violation, and the rule file must be back after the run.
+    *   One read-only run that is killed mid-run, followed by `-Cleanup`, which must succeed.
     *   One `council` run, to confirm the target-by-file change did not break it.
 *   **End to end**: the manual CUJ 1–7 checklist on the `sandbox` repo, in fresh sessions:
     *   CUJ 2 is run after `/clear`.
