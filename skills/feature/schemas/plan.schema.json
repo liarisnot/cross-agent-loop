@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feature plan",
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "n": { "type": "integer", "minimum": 1 },
+          "rationale": { "type": "string" },
+          "test": { "type": "string" },
+          "tasks": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/task" }
+          }
+        },
+        "required": ["n", "rationale", "test", "tasks"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["summary", "phases"],
+  "additionalProperties": false,
+  "$defs": {
+    "task": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,19}$" },
+        "title": { "type": "string" },
+        "dependsOn": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "test": { "type": "string" },
+        "profile": { "type": "string", "enum": ["code", "code-hard"] },
+        "brief": { "type": "string" }
+      },
+      "required": ["id", "title", "dependsOn", "files", "test", "profile", "brief"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feature schedule",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "liveRuns": { "type": "integer", "minimum": 0 },
+    "cap": { "const": 2 },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "delegateTaskId": { "type": "string" },
+          "profile": { "type": "string" },
+          "model": { "type": "string" },
+          "files": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["id", "delegateTaskId", "profile", "model", "files"]
+      }
+    }
+  },
+  "required": ["ok", "liveRuns", "cap", "tasks"]
+}

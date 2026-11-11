@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feature",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "stage": {
+      "type": "string",
+      "enum": ["design", "design-review", "plan", "build", "signoff", "abandoned"]
+    },
+    "checkin": { "type": "string", "enum": ["on-problems", "every-phase"] },
+    "designDoc": { "type": "string" },
+    "gates": {
+      "type": "object",
+      "propertyNames": {
+        "enum": ["design-locked", "plan-approved", "signed-off"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "at": { "type": "string" },
+          "quote": { "type": "string" },
+          "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+          "designBlob": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        },
+        "required": ["at", "quote", "sha"]
+      }
+    },
+    "summary": { "type": "string" },
+    "phases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "n": { "type": "integer" },
+          "rationale": { "type": "string" },
+          "test": { "type": "string" },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "delegateTaskId": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,48}$"
+                }
+              },
+              "required": ["delegateTaskId"]
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["name", "stage", "checkin", "designDoc", "gates"]
+}

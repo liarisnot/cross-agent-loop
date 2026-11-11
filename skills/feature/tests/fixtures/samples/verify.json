@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "inScope": true,
+  "changed": ["skills/feature/tests/feature.Tests.ps1"],
+  "outOfScope": [],
+  "test": {
+    "command": "pwsh -NoProfile -c \"exit 0\"",
+    "passed": true,
+    "exitCode": 0,
+    "tail": "line1\nline2\n"
+  }
+}

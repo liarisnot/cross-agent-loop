@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feature verify",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "inScope": { "type": "boolean" },
+    "changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "outOfScope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "test": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "exitCode": { "type": "integer" },
+        "tail": { "type": "string" }
+      },
+      "required": ["command", "passed", "exitCode", "tail"]
+    }
+  },
+  "required": ["ok", "inScope", "changed", "outOfScope", "test"]
+}
