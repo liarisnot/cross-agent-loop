@@ -1,7 +1,7 @@
 # `feature` skill: plain-language, feature-level development flow
 
 *   **Author:** Eugene Chin
-*   **Status:** In Review
+*   **Status:** Approved (locked 2026-11-11)
 *   **Date:** 2026-11-09 (revised 2026-11-11 after review stages 5–9)
 
 --------------------------------------------------------------------------------
@@ -669,6 +669,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 *   **Anonymized peer review in the council** (the epicsagas idea).
 *   **EGM sync script** (`scripts/egm-sync.ps1`, per decision 001): written when the first upstream change arrives.
 *   **Whole-diff `design_critic` at sign-off:** add it if real features show the drift report is too weak on its own.
+*   **Claude Code advisor tool** (experimental): compatible as an optional lead-session setting (`/advisor opus`) for the lead's own judgement calls, such as triage and its council position. It is not used for reviews: it is the same model family and sees the full context, while the goldfish lenses must be fresh and from other vendors. `feature` doesn't depend on it, and each call re-reads the whole transcript against the Claude plan's limits.
 
 --------------------------------------------------------------------------------
 

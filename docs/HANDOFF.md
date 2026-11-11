@@ -23,10 +23,11 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
   - **Stage 8 r3** (`fr-s8r3`, Grok, `intermediate_zoom_out_report_r3.md`): still the small version. The build council was cut down to its differences from `delegate`, plus 3 Nits.
   - **Decision with the user: no round 4.** Each round found defects in the previous round's fixes. The rest is left for the Pester suite at build time.
 
+- **Design locked** (Status: Approved, 2026-11-11). Last addition before the lock: a Future Improvements line saying the Claude Code advisor tool is an optional lead-session setting, never a review lens (same model family, full context).
+  - **Settled list**, for any later triage: "Rejected by author", the heading names, the sync stub, the single-lens sign-off, the invented "trickiest step" citation, `agy.enabled` (kept), and IR r3 M7/M10. It stays in the lead's triage and is never given to reviewers.
+
 ## Next
-1. **The user locks the design** (Status: Approved). That's the only step left before the build.
-   - **Keep the settled list** for any later review triage: "Rejected by author", the heading names, the sync stub, the single-lens sign-off, the invented "trickiest step" citation, `agy.enabled` (kept), and IR r3 M7/M10. It stays in the lead's triage and is never given to reviewers.
-2. **Build it**, in the order the design gives:
+1. **Build it**, in the order the design gives:
    - **Step 1: the `delegate` changes.** The vendored EGM personas are already committed, and listed in `THIRD_PARTY_NOTICES.md`.
    - **Step 2 onward:** delegate parts of the build where it makes sense.
 
