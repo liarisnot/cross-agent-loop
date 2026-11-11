@@ -285,7 +285,7 @@ The feature's lasting records are committed on `feature/<name>`, in `docs/featur
     *   the plan: a summary, then phases (each with its number, rationale and test command), then tasks (id, title, depends-on, declared files, test command, profile and brief).
 *   **`plan.md`.** Generated entirely from `feature.json` for the user to read, and never edited by hand.
 *   **`decisions.md`.** An append-only log. Each line is `- <ISO time> [<kind>] <text>`. Kinds:
-    *   `decision`, `gate`, `stage` and `scope`;
+    *   `decision`, `gate` and `stage`;
     *   `council`, with the task id and its outcome, and `round`, one per failed review round;
     *   `fix-up` (with the files and lines changed) and `dismiss`;
     *   `stop` and `resume`.
@@ -295,7 +295,7 @@ The feature's lasting records are committed on `feature/<name>`, in `docs/featur
 The design doc itself is `docs/designs/<name>.md` on the branch. It is drafted in place with `Status: Draft` and committed after each approved section.
 
 Fast-changing runtime state is local, in `<repo>/.xagent/features/<name>/state.json` (git-excluded):
-*   for each task: status (`pending`, `preflight`, `running`, `in-review`, `merged` or `failed`), `delegate` task id, session id, review round, result file and the last `verify` output;
+*   for each task: status (`pending`, `preflight`, `running`, `in-review`, `merged` or `failed`), `delegate` task id, session id, result file and the last `verify` output;
 *   the time of the last reconcile.
 
 A task under council stays `in-review`. A stop that follows is the committed `[stop]` decision.
@@ -304,7 +304,7 @@ A task under council stays `in-review`. A stop that follows is the committed `[s
 
 Derived, not stored:
 *   **What the flow is waiting for.** A gate the stage needs, an open `[stop]`, or a running worker.
-*   **Review rounds and council counts.** Counted from the committed `[round]` and `[council]` lines, so the council trigger and cap survive a lost local file.
+*   **Review rounds and council counts.** Counted from the committed lines, so the council trigger and cap survive a lost local file. A task's round count is its `[round]` lines since its latest `[council]` line. Its council count is all of its `[council]` lines.
 *   **Review progress.** A lens is done when its raw report is committed under `reviews/raw/`.
 *   **Token use.** The sum of the `runs.jsonl` lines whose `feature` field equals `<name>`, including cache reads, so it matches Cursor's usage page.
 
@@ -347,8 +347,7 @@ All worker merges into the feature branch use `git merge --no-ff` with the trail
 *   **Usage pools (confirmed 2026-11-10 on Cursor's Spending page, legacy Pro plan).** There are two monthly pools, shown as a percentage used, both resetting each billing month.
     *   **Cursor Models** (Grok, Composer). Usage beyond its limit spills into the Other Models pool, then into on-demand spend.
     *   **Other Models** (GLM, DeepSeek). Usage beyond its limit goes to on-demand spend, which is disabled on this account.
-*   **Usage limits.** When any run reports a usage limit, or fails in a way that looks like one, that's a problem stop. The user resumes when the allowance is back. v1 has no automatic retry timer, no model fallback and no dollar estimate.
-    *   **Detection.** No Cursor usage-limit error has been seen yet, so `delegate.ps1` can't classify one. The matcher is written from the first real error. Until then, an unrecognized failure follows the normal failed-run path, where a task's second failure is a problem stop.
+*   **Usage limits.** A run that reports a usage limit is a problem stop. The user resumes when the allowance is back. Every other failure follows the normal failed-run path, where a task's second failure is a problem stop. No Cursor usage-limit error has been seen yet, so v1 has no matcher for one. It is added once a real error is seen. v1 has no automatic retry timer, no model fallback and no dollar estimate.
 *   **Profile.** Each task starts on the profile the plan gives it.
 
 #### Task preflight
@@ -394,7 +393,7 @@ This applies to the build's task preflights only. The design and plan reviews fo
 *   **Build.** A `code` task that fails review twice, or a `code-hard` task that fails review once, triggers a council automatically.
     *   **The round limit.** This is the one place it is set for feature tasks, and it replaces `delegate`'s "about 3 rounds" for them.
     *   **Procedure and record.** The council uses `delegate`'s council procedure, with seats Grok 4.7 high and GLM 5.2. Its outcome is logged as `[council]`.
-    *   **Consensus.** The lead retries the task on `code-hard` with the council's guidance as a delta brief, without stopping. The round count starts again from 0. The council count never resets.
+    *   **Consensus.** The lead retries the task on `code-hard` with the council's guidance as a delta brief, without stopping. The round count starts again from 0, because only rounds after the latest council count. The council count never resets.
     *   **Disagreement.** The seats disagree on the fix, and the lead cannot settle it from verified facts. That's a problem stop, with `delegate`'s escalation brief.
     *   **Cap.** A task gets at most 2 councils. If the retry after the second council fails review, that's a problem stop.
 *   **On request.** At any stage, the user can ask for a council.
@@ -576,7 +575,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 
 #### G1. Git always wins
 *   **Pros**: Simple, and the local file never goes stale.
-*   **Cons**: Review rounds and session ids exist only locally, and would be lost or guessed.
+*   **Cons**: Session ids exist only locally, and would be lost or guessed.
 *   **Reason for Rejection**: Rejected by author.
 
 #### G2. The state file wins, and every mismatch stops
@@ -643,7 +642,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 | **The diff review is compressed by the Headroom proxy** | Per-file diffs, and a compression marker means "not reviewed" | — |
 | **The Cursor allowance runs out** | Any usage limit is a problem stop. The user resumes when the allowance is back. | The build waits. |
 | **Antigravity terms** | No `agy` automation (T0) | — |
-| **Local state is lost or contradicts git** | Reconcile rules, plus committed stops, rounds, councils and raw reports | Review rounds and session ids are lost and reported |
+| **Local state is lost or contradicts git** | Reconcile rules, plus committed stops, rounds, councils and raw reports | Session ids are lost and reported |
 | **A council agrees on a wrong fix, retried unattended** | At most 2 councils per task, the next review round, and the drift report at sign-off | Wasted runs before a stop |
 | **Damage to the user's only checkout** | Clean-tree and branch checks, and merge abort on conflict | — |
 | **Usage data from private repos ends up in this public repo** | Logs live in `%LOCALAPPDATA%\xagent\`, outside every repo | — |
@@ -822,10 +821,10 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote}`, append a decision and commit. Also record the approved `feature/<name>` SHA (and, for `design-locked`, the design file's blob id). `-Checkin` is allowed only with `plan-approved`, and sets the mode through the same code as `checkin`. |
     | `plan` | `-Name`, `-PlanFile` | Validate against `$defs/plan`: unique ids, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, non-empty `files`, task ids ≤ 49 characters. A re-plan must still contain every merged task, unchanged. Write the plan into `feature.json`, generate `plan.md`, delete the input file and commit. Allowed only in stage `plan`. |
     | `schedule` | `-Name` | From the lowest phase with unmerged tasks, return tasks that are `pending`, have every dependency `merged`, and whose overlap keys don't overlap any `preflight`, `running` or `in-review` task. Keep all of the feature's `delegate` runs at 2 or fewer. Return nothing while a `[stop]` is open. Each task includes the worker `model` for its profile, from `models.json`. |
-    | `task` | `-Name`, `-Task`, `[-Status] [-DelegateTaskId] [-SessionId] [-Round] [-ResultFile]` | Update local `state.json` only. |
+    | `task` | `-Name`, `-Task`, `[-Status] [-DelegateTaskId] [-SessionId] [-ResultFile]` | Update local `state.json` only. |
     | `verify` | `-Name`, `-Task` | In the worker's worktree: list the changed files (`git diff --name-only <base>...HEAD`, plus uncommitted and untracked files), and match them against `files` (exact, parent folder, or glob). Run `test` with a 15-minute timeout. Store the result and print `{inScope, outOfScope:[], test:{command, passed, exitCode, tail}}`. Change nothing. |
     | `merge` | `-Name`, `-Task`, `-Message` | Refuse unless the tree is clean and `HEAD` is `feature/<name>`. Run `git merge --no-ff xagent/<delegateTaskId>` with `<Message>`, a blank line, then `Xagent-Task: <id>`. On conflict, run `git merge --abort` and fail with the files. On success, set `merged`. |
-    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `scope`, `round`, `council`, `fix-up`, `dismiss`, `stop`, `resume`. `resume` fails without an open `stop`. |
+    | `decision` | `-Name`, `-Kind`, `-Text` | Append and commit. Kinds: `decision`, `gate`, `stage`, `round`, `council`, `fix-up`, `dismiss`, `stop`, `resume`. `resume` fails without an open `stop`. |
     | `checkin` | `-Name`, `-Mode <on-problems\|every-phase>` | Set it in `feature.json`, append a decision and commit. |
     | `finish` | `-Name` | Require `signed-off`, a clean tree and `HEAD` on `feature/<name>`. Run `git switch main` and `git merge --no-ff feature/<name>`. Refuse if `HEAD` differs from the SHA on `signed-off`, or the design blob differs from the one on `design-locked`. On conflict, run `git merge --abort` and `git switch feature/<name>`, clear `signed-off`, and fail. On success, set the stage to `done` and commit the final `feature.json` on `main`. Never push. |
 
@@ -845,7 +844,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
 #### 10. `skills/feature/state.schema.json` (Create)
 
 *   **Type / Scope**: JSON Schema for the local `state.json`.
-*   **Proposed Changes**: `name`, `lastReconcile`, and `tasks` (keyed by task id: `status`, `delegateTaskId`, `sessionId`, `round`, `resultFile`, `verify`).
+*   **Proposed Changes**: `name`, `lastReconcile`, and `tasks` (keyed by task id: `status`, `delegateTaskId`, `sessionId`, `resultFile`, `verify`).
 
 #### 11. `skills/feature/templates/decisions.md` (Create)
 
