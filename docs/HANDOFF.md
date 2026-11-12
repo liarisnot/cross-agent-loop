@@ -4,7 +4,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 
 ## Done
 - **The `delegate` skill** (the task-level loop). See `docs/test-plan.md` for every behaviour we've verified and every pitfall we've hit. **Its routing to agy must not be used** (see "Antigravity" below).
-- **The `feature` skill design:** `docs/designs/feature-skill.md`, status still In Review. Every report and resolution is in `docs/designs/reviews/feature-skill/`. Review history:
+- **The `feature` skill design:** `docs/designs/feature-skill.md`, now locked (see below). Every report and resolution is in `docs/designs/reviews/feature-skill/`. Review history:
   - Stage 5 (plus re-audit), stage 6, stage 7 rounds 1–3, stage 8.
   - **Stage 7 rounds 4–5** (`8ddc6c3`, `72f8d69`). Round 5 still churned; accepted and moved on, per the EGM rules.
   - **Stage 8 re-run** (`27134f5`, `intermediate_zoom_out_report_r2.md`): "still the small version". One Major (two round counters) was fixed.
@@ -30,10 +30,17 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
   - **Regression (Verification Plan):** passed. Live: Grok and GLM judgement lenses with `-Standard`, DeepSeek readiness with `-TargetFile` (quoted the marker line), council seats grok+glm on one id with one cleanup, a Composer worker run. Offline with a fake Cursor CLI: rule-file removal/restore, `-KeepRuleFiles`, secret vars stripped, pid file live then gone, kill mid-run then `-Cleanup`, scoped cleanup never touches `<id>-pc-*`, `agy`/`auto` refused.
   - **Bug the regression caught (fixed):** strict mode broke on `.Count` when a repo has 0 or 1 rule files (PowerShell unrolls one-item arrays), in the `finally` block.
 
+- **Build step 2, sub-steps 2.1–2.3 done (2026-11-11), every one through `delegate`** (the user's standing instruction: each build step dogfoods the skill; observations go in `docs/test-plan.md`, "Dogfooding `delegate`", D1–D15).
+  - **2.1** `fb-schemas` (schemas, templates, fixtures, test helpers) and `fb-egm` (vendored EGM files, byte-identical to upstream `b7d9e27` as git blobs; `THIRD_PARTY_NOTICES.md`).
+  - **2.2** `fb-core`: `feature.ps1` dispatcher plus `new`, `stage`, `gate`, `decision`, `reaudit`, `commit-design`, `commit-records`, `checkin`.
+  - **2.3** `fb-plan`: `plan` and `schedule`. 108 Pester tests pass (full suite about 5 minutes).
+  - **Loop per sub-step:** task file in `.xagent/tasks/`, comprehension (Composer) and readiness (DeepSeek) preflights, Composer worker, lead review (diff per file, tests rerun, probes in scratch repos), merge with `--no-ff`. Probes found 4 real bugs that green worker tests missed (D11, D14).
 ## Next
-1. **Build step 2: `feature.ps1`, schemas, templates, fixtures, Pester tests** (items 8–11, 18, 19), test-first, in the sub-steps the design lists. Steps 2 and 3 can be delegated in parallel.
-   - **Pid-file times:** PowerShell 7's `ConvertFrom-Json` turns ISO strings into `DateTime`, so reconcile must compare start times as `DateTime`, never as strings (a string compare always fails).
-   - **Permission rule:** the allow rule in `~/.claude/settings.json` matches `D:/cross-agent-loop/skills/delegate/scripts/delegate.ps1`. SKILL.md now says `<skill dir>`, which Claude Code may report as the junction path (`~/.claude/skills/delegate`); build step 5 adds that rule. Until then, call the `D:/` path.
+1. **Build step 2.4 (in progress): `task`, `verify`, `merge`** (`fb-tvm`, task file `.xagent/tasks/fb-tvm.md`, preflighted). Then 2.5 `reconcile` + `status`, 2.6 `finish` + `doctor`, each through `delegate`.
+2. **Step 4 (router and stage files):** the design says the lead writes these as prompt design. Raise with the user whether to delegate them anyway, under the dogfooding instruction.
+3. Steps 5 (docs and machine setup) and 6 (manual CUJ checklist).
+   - **Pid-file times:** `ConvertFrom-Json` turns ISO strings into `DateTime`; compare start times as `DateTime`.
+   - **Permission rules:** `~/.claude/settings.json` allows both the `D:/` path and the junction path `<user profile>/.claude/skills/delegate/scripts/delegate.ps1`.
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
