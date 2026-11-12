@@ -1,32 +1,90 @@
 # cross-agent-loop
 
-Run our dev loop with **Claude Code as the lead programmer**, delegating subtasks to **Cursor** and **Google Antigravity** agents — all locally, via their headless CLIs — then reviewing and iterating on the results.
+Run our dev loop with **Claude Code as the lead programmer**, delegating coding and review subtasks to **Cursor** through its headless CLI, then reviewing and iterating on the results.
 
-Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project aims to replace that with a Claude Code skill that calls the other two CLIs directly.
+Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project replaces that with Claude Code skills: `delegate` for one-off tasks and `feature` for a full design-to-merge flow.
+
+**Workers in v1:** only the Cursor CLI (`agent`). We do not call Google Antigravity (`agy`) from agents. Google's Antigravity FAQ (checked 2026-11-10, [T0 in the test plan](docs/test-plan.md#t0-policy-check-antigravity)) forbids wrapping `agy` inside third-party coding agents on consumer plans and names Claude Code as an example. That is the policy reason; the Google Pro subscription stays for your own interactive use.
 
 ## Constraints
 
-- **Local only** (for now): no cloud agents, no Cursor Cloud Agents API, no Gemini Managed Agents.
-- **Subscriptions**: Pro-level (~$20/mo) tier on all three: Claude, Cursor, Google (Antigravity).
-- **Platform**: Windows 11, PowerShell + Git Bash.
+- **Local only** (for now): no cloud agents, no Cursor Cloud Agents API.
+- **Subscriptions**: Pro-level (~$20/mo) on Claude and Cursor for the automated loop.
+- **Platform**: Windows 11, PowerShell 7 + Git Bash.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| [docs/research.md](docs/research.md) | Research findings (Nov 2026): APIs and CLIs from Cursor and Antigravity, existing harnesses, shared-channel options |
+| [docs/research.md](docs/research.md) | Research findings (Nov 2026): APIs and CLIs, existing harnesses, shared-channel options |
 | [docs/design.md](docs/design.md) | Draft design of the `delegate` skill and the dev loop |
-| [docs/test-plan.md](docs/test-plan.md) | Feasibility tests to run before building, including the Antigravity subscription-tier question |
-| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Licenses and attribution for vendored third-party material (Google EGM personas, Apache-2.0) |
-| `skills/delegate/` | The Claude Code skill: `SKILL.md` + `scripts/delegate.ps1` (linked into `~/.claude/skills/delegate` via a directory junction) |
+| [docs/designs/feature-skill.md](docs/designs/feature-skill.md) | Locked design of the `feature` skill |
+| [docs/test-plan.md](docs/test-plan.md) | Feasibility tests and the `feature` manual checklist |
+| [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Licenses and attribution for vendored third-party material (Google EGM, Apache-2.0) |
+| `skills/delegate/` | Claude Code skill: `SKILL.md` + `scripts/delegate.ps1` |
+| `skills/feature/` | Claude Code skill: router, stages, `feature.ps1`, schemas, EGM workflow copy |
 
 ## Status
 
 - [x] Research
 - [x] Install CLIs and run the feasibility tests (see test plan)
-- [x] Draft skill + wrapper script (v0)
-- [x] Add permission rule, run T2-T4 edit tests through the script
-- [ ] T0 ToS check, background parallel runs, real-repo trial
+- [x] Draft `delegate` skill + wrapper script (v0)
+- [x] Add permission rule, run T2–T4 edit tests through the script
+- [x] T0 Antigravity policy check (consumer plan: no `agy` in third-party agents)
+- [ ] Background parallel runs, real-repo trial
+
+## The `feature` skill
+
+`feature` takes one feature from a problem statement to a merge into `main`. You speak in plain language; Claude Code is the lead, Cursor workers code through `delegate`, and you approve each major gate. State lives in the repo (`feature/<name>`, `docs/features/<name>/`, `docs/designs/<name>.md`), so work survives `/clear` and new sessions.
+
+**Example entry phrases** (paraphrases count; the skill must not fire on sentences that only mention a feature):
+
+- design a feature for X
+- let's design X
+- review the design
+- lock the design
+- plan it
+- plan the feature
+- approve the plan
+- build it
+- continue
+- check in every phase
+- test and sign off
+- sign off
+- where are we?
+- status
+- get a second opinion on …
+- convene a council
+- go back to the design
+- go back to the plan
+- abandon this feature
+
+**Stages and gates:**
+
+```text
+design --> design-review --[GATE design-locked]--> plan --[GATE plan-approved]-->
+build (phase 1..n) --> signoff --[GATE signed-off]--> done
+                       any stage --> abandoned (user asks)
+```
+
+| Stage | Done when | Gate to leave |
+|---|---|---|
+| `design` | all sections of `docs/designs/<name>.md` approved | none |
+| `design-review` | goldfish findings resolved | **design-locked** |
+| `plan` | the plan imported and readiness-checked | **plan-approved** |
+| `build` | every task merged into `feature/<name>` and each phase's test passes | none (opt-in phase check-ins and problem stops pause it) |
+| `signoff` | full tests pass and the final check is shown | **signed-off**, then merge into `main` |
+
+### Installation
+
+1. Copy or clone this repo anywhere (`<repo>`).
+2. Link or copy `skills/delegate` and `skills/feature` into `~\.claude\skills\`. Junctions point at your checkout so skill edits in a feature apply immediately; use a copy if a feature will change `skills/` itself.
+   - `New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\feature" -Target "<repo>\skills\feature"`
+   - Same for `delegate`.
+3. Run `pwsh -NoProfile -File <repo>/skills/feature/scripts/feature.ps1 doctor` and add the two permission rules it prints (one for `feature.ps1`, one for `delegate.ps1`).
+4. Optional for the manual sandbox only: a real `python` on `PATH` (not the Windows Store alias).
+
+Logs from `delegate` land in `%LOCALAPPDATA%\xagent\` regardless of where the skills are installed.
 
 ## License
 
