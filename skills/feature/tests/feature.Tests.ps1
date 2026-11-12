@@ -2189,3 +2189,138 @@ Describe 'feature.ps1 reconcile' {
         $st2.tasks.t2.sessionId | Should -Be $sid
     }
 }
+
+Describe 'feature.ps1 finish' {
+    It 'refuses without signed-off, dirty tree, and wrong branch' {
+        $repo1 = New-TestRepo
+        New-FeatureAtStage -Repo $repo1 -Name 'finr1' -Stage 'signoff'
+        $r1 = Invoke-Feature @('finish', '-Repo', $repo1, '-Name', 'finr1') -WorkingDirectory $repo1
+        $r1.ExitCode | Should -Be 1
+        $r1.Json.error | Should -Match 'signed-off is not recorded'
+        Test-Path (Join-Path $repo1 '.xagent/features/finr1/.lock') | Should -BeFalse
+
+        $repo2 = New-TestRepo
+        New-FeatureAtStage -Repo $repo2 -Name 'finr2' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo2, '-Name', 'finr2') -WorkingDirectory $repo2)
+        Set-Content -LiteralPath (Join-Path $repo2 'README.md') -Value 'dirty' -NoNewline
+        $r2 = Invoke-Feature @('finish', '-Repo', $repo2, '-Name', 'finr2') -WorkingDirectory $repo2
+        $r2.ExitCode | Should -Be 1
+        $r2.Json.error | Should -Match 'working tree is not clean'
+        Test-Path (Join-Path $repo2 '.xagent/features/finr2/.lock') | Should -BeFalse
+
+        $repo3 = New-TestRepo
+        New-FeatureAtStage -Repo $repo3 -Name 'finr3' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo3, '-Name', 'finr3') -WorkingDirectory $repo3)
+        & git -C $repo3 switch main 2>&1 | Out-Null
+        $r3 = Invoke-Feature @('finish', '-Repo', $repo3, '-Name', 'finr3') -WorkingDirectory $repo3
+        $r3.ExitCode | Should -Be 1
+        $r3.Json.error | Should -Match 'check out feature/'
+        Test-Path (Join-Path $repo3 '.xagent/features/finr3/.lock') | Should -BeFalse
+    }
+
+    It 'succeeds right after signed-off' -Tag 'Slow' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'finok' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ship', '-Repo', $repo, '-Name', 'finok') -WorkingDirectory $repo)
+        $featHead = & git -C $repo rev-parse 'feature/finok'
+        $r = Assert-FeatureOk (Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'finok') -WorkingDirectory $repo)
+        (& git -C $repo rev-parse --abbrev-ref HEAD) | Should -Be 'main'
+        $parents = @(& git -C $repo rev-parse HEAD^@)
+        $parents.Count | Should -Be 2
+        $parents | Should -Contain $featHead
+        $st = Invoke-StatusOk $repo -Extra @('-Name', 'finok')
+        ($st.warnings -join ' ') | Should -Match 'feature finok is done'
+        $jn = Invoke-StatusOk $repo
+        ($jn.features | Where-Object { $_.name -eq 'finok' }).stage | Should -Be 'done'
+        Assert-FeatureOk (Invoke-Feature @('new', '-Name', 'finother', '-Repo', $repo) -WorkingDirectory $repo)
+    }
+
+    It 'refuses when files change after sign-off' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'fincg' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo, '-Name', 'fincg') -WorkingDirectory $repo)
+        Set-Content -LiteralPath (Join-Path $repo 'src-extra.txt') -Value 'x' -NoNewline
+        & git -C $repo add src-extra.txt 2>&1 | Out-Null
+        & git -C $repo commit -m 'outside feature folder' 2>&1 | Out-Null
+        $r = Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'fincg') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'changed since sign-off'
+        $r.Json.error | Should -Match 'src-extra.txt'
+
+        $repo2 = New-TestRepo
+        New-FeatureAtStage -Repo $repo2 -Name 'findsg' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo2, '-Name', 'findsg') -WorkingDirectory $repo2)
+        Set-Content -LiteralPath (Join-Path $repo2 'docs/designs/findsg.md') -Value '# changed' -NoNewline
+        & git -C $repo2 add docs/designs/findsg.md 2>&1 | Out-Null
+        & git -C $repo2 commit -m 'design tweak' 2>&1 | Out-Null
+        $r2 = Invoke-Feature @('finish', '-Repo', $repo2, '-Name', 'findsg') -WorkingDirectory $repo2
+        $r2.ExitCode | Should -Be 1
+        $r2.Json.error | Should -Match 'changed since sign-off'
+        $r2.Json.error | Should -Match 'docs/designs/findsg.md'
+    }
+
+    It 'refuses when design blob differs from design-locked' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'findb' -Stage 'signoff'
+        Set-Content -LiteralPath (Join-Path $repo 'docs/designs/findb.md') -Value '# revised' -NoNewline
+        Assert-FeatureOk (Invoke-FeatureInProcess @('commit-design', '-Section', 'rev', '-Repo', $repo, '-Name', 'findb') -WorkingDirectory $repo)
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo, '-Name', 'findb') -WorkingDirectory $repo)
+        $r = Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'findb') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'design changed since design-locked'
+    }
+
+    It 'clears signed-off on merge conflict' -Tag 'Slow' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'fincon' -Stage 'signoff'
+        & git -C $repo switch main 2>&1 | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'main-line' -NoNewline
+        & git -C $repo add README.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'main readme' 2>&1 | Out-Null
+        & git -C $repo switch 'feature/fincon' 2>&1 | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'feature-line' -NoNewline
+        & git -C $repo add README.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'feature readme' 2>&1 | Out-Null
+        $mainBefore = & git -C $repo rev-parse main
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo, '-Name', 'fincon') -WorkingDirectory $repo)
+        $r = Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'fincon') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'merge conflict in README.md'
+        (& git -C $repo rev-parse --abbrev-ref HEAD) | Should -Be 'feature/fincon'
+        & git -C $repo rev-parse main | Should -Be $mainBefore
+        & git -C $repo rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Not -Be 0
+        @(& git -C $repo status --porcelain) | Where-Object { $_ } | Should -BeNullOrEmpty
+        $featJson = (& git -C $repo show 'HEAD:docs/features/fincon/feature.json') -join "`n"
+        $feat = $featJson | ConvertFrom-Json
+        $feat.gates.PSObject.Properties['signed-off'] | Should -BeNullOrEmpty
+        (Get-Content -Raw (Join-Path $repo 'docs/features/fincon/decisions.md')) | Should -Match 'finish: merge conflict'
+    }
+}
+
+Describe 'feature.ps1 doctor' {
+    It 'reports prerequisites' -Tag 'Slow' {
+        $r = Invoke-Feature @('doctor') -WorkingDirectory $TestDrive
+        $r.ExitCode | Should -Be 0
+        $r.Json.ok | Should -BeTrue
+        @($r.Json.checks).Count | Should -Be 9
+        $names = @($r.Json.checks | ForEach-Object { $_.name })
+        $names | Should -Be @('powershell', 'git', 'delegate', 'cursor-cli', 'cursor-login', 'models', 'pester', 'python', 'log-dir')
+        # Checks that hold on any machine able to run this suite (PowerShell 7.4+, git, the repo's own skills, Pester).
+        foreach ($n in @('powershell', 'git', 'delegate', 'pester')) {
+            ($r.Json.checks | Where-Object { $_.name -eq $n }).ok | Should -BeTrue -Because "$n check should pass here"
+        }
+        foreach ($c in $r.Json.checks) {
+            $c.PSObject.Properties['name'] | Should -Not -BeNullOrEmpty
+            $c.PSObject.Properties['ok'] | Should -Not -BeNullOrEmpty
+            $c.PSObject.Properties['required'] | Should -Not -BeNullOrEmpty
+            $c.PSObject.Properties['detail'] | Should -Not -BeNullOrEmpty
+        }
+        $requiredOk = @($r.Json.checks | Where-Object { $_.required } | ForEach-Object { [bool]$_.ok })
+        $r.Json.ready | Should -Be ($requiredOk -notcontains $false)
+        @($r.Json.permissionRules).Count | Should -Be 2
+        ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/feature\.ps1 \*\)$' }).Count | Should -Be 1
+        ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/delegate\.ps1 \*\)$' }).Count | Should -Be 1
+        $r.Raw | Should -Not -Match '@'
+    }
+}

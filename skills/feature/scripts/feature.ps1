@@ -2467,6 +2467,354 @@ function Invoke-MergeFeature {
     }
 }
 
+function Out-DoctorResult([hashtable]$h) {
+    if (-not $h.ContainsKey('ok')) { $h['ok'] = $true }
+    $h | ConvertTo-Json -Compress -Depth 10
+    exit 0
+}
+
+function Invoke-DoctorCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [int]$TimeoutSec = 30
+    )
+    $stdoutFile = [IO.Path]::GetTempFileName()
+    $stderrFile = [IO.Path]::GetTempFileName()
+    try {
+        $proc = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+        $finished = $proc.WaitForExit($TimeoutSec * 1000)
+        if (-not $finished) {
+            $null = Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/T', '/F', "/PID", $proc.Id) -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            return @{ exitCode = -1; output = ''; timedOut = $true }
+        }
+        $stdout = [IO.File]::ReadAllText($stdoutFile, [Text.UTF8Encoding]::new($false))
+        $stderr = [IO.File]::ReadAllText($stderrFile, [Text.UTF8Encoding]::new($false))
+        $output = $stdout + $stderr
+        return @{ exitCode = $proc.ExitCode; output = $output; timedOut = $false }
+    } finally {
+        if (Test-Path -LiteralPath $stdoutFile) { Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $stderrFile) { Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Get-DoctorRequiredModelNames {
+    param([string]$ModelsJsonPath)
+    $text = [IO.File]::ReadAllText($ModelsJsonPath, [Text.UTF8Encoding]::new($false))
+    $root = $text | ConvertFrom-Json
+    $names = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($pProp in $root.profiles.PSObject.Properties) {
+        $pVal = $pProp.Value
+        $mProp = $pVal.PSObject.Properties['model']
+        if ($null -ne $mProp) {
+            $null = $names.Add([string]$mProp.Value)
+        }
+        $seatsProp = $pVal.PSObject.Properties['seats']
+        if ($null -ne $seatsProp) {
+            foreach ($sProp in $seatsProp.Value.PSObject.Properties) {
+                $null = $names.Add([string]$sProp.Value)
+            }
+        }
+    }
+    $rd = $root.seats.PSObject.Properties['readiness']
+    if ($null -ne $rd) { $null = $names.Add([string]$rd.Value) }
+    $jud = $root.seats.PSObject.Properties['judgement']
+    if ($null -ne $jud) {
+        foreach ($jm in @($jud.Value)) { $null = $names.Add([string]$jm) }
+    }
+    return @($names | Sort-Object)
+}
+
+function Get-DoctorPermissionRules {
+    $featureSkillDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $delegateSkillDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate'))
+    $featScript = ($featureSkillDir -replace '\\', '/') + '/scripts/feature.ps1'
+    $delScript = ($delegateSkillDir -replace '\\', '/') + '/scripts/delegate.ps1'
+    return @(
+        "Bash(pwsh -NoProfile -File $featScript *)"
+        "Bash(pwsh -NoProfile -File $delScript *)"
+    )
+}
+
+function Invoke-DoctorFeature {
+    $checks = [System.Collections.Generic.List[object]]::new()
+    $permissionRules = @()
+    try {
+        $permissionRules = @(Get-DoctorPermissionRules)
+
+        # powershell
+        try {
+            $ver = $PSVersionTable.PSVersion
+            $psOk = ($ver.Major -gt 7) -or ($ver.Major -eq 7 -and $ver.Minor -ge 4)
+            $detail = if ($psOk) { [string]$ver } else { 'need PowerShell 7.4 or later' }
+            $checks.Add(@{ name = 'powershell'; ok = $psOk; required = $true; detail = $detail }) | Out-Null
+        } catch {
+            $checks.Add(@{ name = 'powershell'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # git
+        try {
+            $gitExe = (Get-Command git -ErrorAction Stop).Source
+            $r = Invoke-DoctorCommand -FilePath $gitExe -ArgumentList @('--version')
+            if ($r.timedOut) {
+                $checks.Add(@{ name = 'git'; ok = $false; required = $true; detail = 'timed out after 30 s' }) | Out-Null
+            } elseif ($r.exitCode -ne 0) {
+                $checks.Add(@{ name = 'git'; ok = $false; required = $true; detail = $r.output.Trim() }) | Out-Null
+            } else {
+                $checks.Add(@{ name = 'git'; ok = $true; required = $true; detail = ($r.output -replace "`r`n", ' ').Trim() }) | Out-Null
+            }
+        } catch {
+            $checks.Add(@{ name = 'git'; ok = $false; required = $true; detail = 'git not found' }) | Out-Null
+        }
+
+        # delegate
+        $delegateOk = $false
+        try {
+            $delegateDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate'))
+            $modelsPath = Join-Path $delegateDir 'models.json'
+            $delegateScript = Join-Path $delegateDir 'scripts/delegate.ps1'
+            if ((Test-Path -LiteralPath $modelsPath) -and (Test-Path -LiteralPath $delegateScript)) {
+                $delegateOk = $true
+                $checks.Add(@{ name = 'delegate'; ok = $true; required = $true; detail = $delegateDir }) | Out-Null
+            } else {
+                $checks.Add(@{ name = 'delegate'; ok = $false; required = $true; detail = "missing delegate files at $modelsPath" }) | Out-Null
+            }
+        } catch {
+            $checks.Add(@{ name = 'delegate'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # cursor-cli
+        $launcher = Join-Path $env:LOCALAPPDATA 'cursor-agent\cursor-agent.ps1'
+        $cursorCliOk = $false
+        try {
+            if (Test-Path -LiteralPath $launcher) {
+                $cursorCliOk = $true
+                $checks.Add(@{ name = 'cursor-cli'; ok = $true; required = $true; detail = $launcher }) | Out-Null
+            } else {
+                $checks.Add(@{ name = 'cursor-cli'; ok = $false; required = $true; detail = "missing at $launcher" }) | Out-Null
+            }
+        } catch {
+            $checks.Add(@{ name = 'cursor-cli'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # cursor-login
+        $loginOk = $false
+        try {
+            if (-not $cursorCliOk) {
+                $checks.Add(@{ name = 'cursor-login'; ok = $false; required = $true; detail = 'cursor CLI missing' }) | Out-Null
+            } else {
+                $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, 'status')
+                $r = Invoke-DoctorCommand -FilePath $exe -ArgumentList $args
+                if ($r.timedOut) {
+                    $checks.Add(@{ name = 'cursor-login'; ok = $false; required = $true; detail = 'timed out after 30 s' }) | Out-Null
+                } elseif ($r.output -match 'Logged in') {
+                    $loginOk = $true
+                    $checks.Add(@{ name = 'cursor-login'; ok = $true; required = $true; detail = 'logged in' }) | Out-Null
+                } else {
+                    $checks.Add(@{ name = 'cursor-login'; ok = $false; required = $true; detail = 'not logged in: run agent login' }) | Out-Null
+                }
+            }
+        } catch {
+            $checks.Add(@{ name = 'cursor-login'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # models
+        try {
+            if (-not $cursorCliOk) {
+                $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = 'cursor CLI missing' }) | Out-Null
+            } elseif (-not $delegateOk) {
+                $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = 'models.json missing' }) | Out-Null
+            } elseif (-not $loginOk) {
+                $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = 'not logged in' }) | Out-Null
+            } else {
+                $delegateDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate'))
+                $modelsPath = Join-Path $delegateDir 'models.json'
+                $required = @(Get-DoctorRequiredModelNames $modelsPath)
+                $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, '--list-models')
+                $r = Invoke-DoctorCommand -FilePath $exe -ArgumentList $args
+                if ($r.timedOut) {
+                    $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = 'timed out after 30 s' }) | Out-Null
+                } else {
+                    $lineFirstWords = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                    foreach ($line in ($r.output -split "`n")) {
+                        $t = $line.Trim()
+                        if (-not $t) { continue }
+                        $fw = ($t -split '\s+', 2)[0]
+                        if ($fw) { $null = $lineFirstWords.Add($fw) }
+                    }
+                    $missing = @($required | Where-Object { -not $lineFirstWords.Contains($_) })
+                    if ($missing.Count -eq 0) {
+                        $checks.Add(@{ name = 'models'; ok = $true; required = $true; detail = "all $($required.Count) models available" }) | Out-Null
+                    } else {
+                        $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = ('missing: ' + ($missing -join ', ')) }) | Out-Null
+                    }
+                }
+            }
+        } catch {
+            $checks.Add(@{ name = 'models'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # pester
+        try {
+            $mod = Get-Module -ListAvailable Pester | Sort-Object { $_.Version } -Descending | Select-Object -First 1
+            $pestOk = $false
+            $detail = 'Pester 5.5 or later not installed'
+            if ($mod) {
+                $v = $mod.Version
+                $pestOk = ($v.Major -gt 5) -or ($v.Major -eq 5 -and $v.Minor -ge 5)
+                $detail = if ($pestOk) { "$($v.Major).$($v.Minor).$($v.Build)" } else { 'need Pester 5.5 or later' }
+            }
+            $checks.Add(@{ name = 'pester'; ok = $pestOk; required = $false; detail = $detail }) | Out-Null
+        } catch {
+            $checks.Add(@{ name = 'pester'; ok = $false; required = $false; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # python
+        try {
+            $pyOk = $false
+            $detail = 'python not found'
+            foreach ($cmd in @('python', 'py')) {
+                try {
+                    $pyExe = (Get-Command $cmd -ErrorAction Stop).Source
+                    $r = Invoke-DoctorCommand -FilePath $pyExe -ArgumentList @('--version')
+                    if (-not $r.timedOut -and $r.exitCode -eq 0) {
+                        $pyOk = $true
+                        $detail = ($r.output -replace "`r`n", ' ').Trim()
+                        break
+                    }
+                } catch { }
+            }
+            $checks.Add(@{ name = 'python'; ok = $pyOk; required = $false; detail = $detail }) | Out-Null
+        } catch {
+            $checks.Add(@{ name = 'python'; ok = $false; required = $false; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # log-dir
+        try {
+            $logDir = if ($env:XAGENT_LOG_DIR) { $env:XAGENT_LOG_DIR } else { Join-Path $env:LOCALAPPDATA 'xagent' }
+            if (-not (Test-Path -LiteralPath $logDir)) {
+                New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+            }
+            $tmp = Join-Path $logDir (".doctor-write-{0}.tmp" -f [guid]::NewGuid())
+            [IO.File]::WriteAllText($tmp, 'ok', [Text.UTF8Encoding]::new($false))
+            Remove-Item -LiteralPath $tmp -Force
+            $checks.Add(@{ name = 'log-dir'; ok = $true; required = $true; detail = $logDir }) | Out-Null
+        } catch {
+            $checks.Add(@{ name = 'log-dir'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        $ready = $true
+        foreach ($c in $checks) {
+            if ($c.required -and -not $c.ok) { $ready = $false; break }
+        }
+        Out-DoctorResult @{
+            ready             = $ready
+            checks            = @($checks.ToArray())
+            permissionRules   = @($permissionRules)
+        }
+    } catch {
+        $checks.Add(@{ name = 'doctor'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        Out-DoctorResult @{
+            ok                = $false
+            ready             = $false
+            checks            = @($checks.ToArray())
+            permissionRules   = @()
+        }
+    }
+}
+
+function Invoke-FinishFeature {
+    param([string]$Repository, [string]$FeatureName)
+
+    Enter-FeatureLock $Repository $FeatureName
+    try {
+        Assert-OnFeatureBranch $Repository $FeatureName
+        $state = Get-HeadFeatureState $Repository $FeatureName
+        $feat = $state.Feature
+
+        if (-not $feat.gates.PSObject.Properties['signed-off']) {
+            throw 'signed-off is not recorded'
+        }
+        if (-not (Test-TreeClean $Repository)) {
+            throw 'working tree is not clean'
+        }
+        & git -C $Repository show-ref --verify --quiet 'refs/heads/main' 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'no main branch'
+        }
+
+        $signSha = [string]$feat.gates.'signed-off'.sha
+        $featPrefix = "docs/features/$FeatureName/"
+        $diffPaths = @(Invoke-GitRepo $Repository 'diff' '--name-only' $signSha 'HEAD')
+        $badPaths = @($diffPaths | Where-Object {
+                $p = [string]$_
+                -not $p.StartsWith($featPrefix, [StringComparison]::Ordinal)
+            })
+        if ($badPaths.Count -gt 0) {
+            throw ('changed since sign-off: ' + ($badPaths -join ', '))
+        }
+
+        $doc = [string]$feat.designDoc
+        $dlProp = $feat.gates.PSObject.Properties['design-locked']
+        $expectedBlob = $null
+        if ($null -ne $dlProp) {
+            $blobProp = $dlProp.Value.PSObject.Properties['designBlob']
+            if ($null -ne $blobProp) { $expectedBlob = [string]$blobProp.Value }
+        }
+        $currentBlob = $null
+        try {
+            $currentBlob = @(Invoke-GitRepo $Repository 'rev-parse' "HEAD:$doc")[0]
+        } catch {
+            $currentBlob = $null
+        }
+        if ($null -eq $expectedBlob -or $null -eq $currentBlob -or $currentBlob -cne $expectedBlob) {
+            throw 'design changed since design-locked'
+        }
+
+        Invoke-GitRepo $Repository 'switch' 'main' | Out-Null
+        $featureBranch = "feature/$FeatureName"
+        $mergeMsg = "feature($FeatureName): finish"
+        $out = & git -C $Repository merge --no-ff -m $mergeMsg $featureBranch 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $conflictFiles = @()
+            try {
+                $conflictFiles = @(Invoke-GitRepo $Repository 'diff' '--name-only' '--diff-filter=U')
+            } catch { }
+
+            if ($conflictFiles.Count -gt 0) {
+                $filesJoin = $conflictFiles -join ', '
+                Invoke-GitRepo $Repository 'merge' '--abort' | Out-Null
+                Invoke-GitRepo $Repository 'switch' $featureBranch | Out-Null
+                $state2 = Get-HeadFeatureState $Repository $FeatureName
+                $feat2 = $state2.Feature
+                Remove-GateKeys $feat2 @('signed-off')
+                Write-FeatureJsonFile $state2.FeatPath $feat2
+                $decLine = Format-DecisionLine -Kind 'decision' -Body "finish: merge conflict in $filesJoin; signed-off cleared"
+                Append-TextLf $state2.DecPath $decLine.TrimEnd("`n")
+                $rel = "docs/features/$FeatureName"
+                $null = Invoke-FeatureCommit $Repository "feature($FeatureName): signed-off cleared" @($rel)
+                throw "merge conflict in $filesJoin; signed-off cleared, sign off again after resolving"
+            }
+
+            & git -C $Repository rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                try { Invoke-GitRepo $Repository 'merge' '--abort' | Out-Null } catch { }
+            }
+            try { Invoke-GitRepo $Repository 'switch' $featureBranch | Out-Null } catch { }
+            $msg = ($out | Out-String).Trim()
+            throw "git merge failed: $msg"
+        }
+
+        $mergeSha = @(Invoke-GitRepo $Repository 'rev-parse' 'HEAD')[0]
+        Out-FeatureOk @{ name = $FeatureName; mergeSha = $mergeSha }
+    } finally {
+        Exit-FeatureLock
+    }
+}
+
 function Invoke-CheckinFeature {
     param([string]$Repository, [string]$FeatureName)
     if ($Mode -notin @('on-problems', 'every-phase')) { throw 'invalid checkin mode' }
@@ -2491,6 +2839,11 @@ function Invoke-CheckinFeature {
 }
 
 try {
+    if ($Subcommand -eq 'doctor') {
+        Invoke-DoctorFeature
+        return
+    }
+
     Assert-DelegateFiles
     $repoRoot = Resolve-Repository
     Ensure-XagentExclude $repoRoot
@@ -2555,6 +2908,10 @@ try {
         'reconcile' {
             $fname = Resolve-FeatureName $repoRoot
             Invoke-ReconcileFeature $repoRoot $fname
+        }
+        'finish' {
+            $fname = Resolve-FeatureName $repoRoot
+            Invoke-FinishFeature $repoRoot $fname
         }
         default { throw "unknown subcommand $Subcommand" }
     }
