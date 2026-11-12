@@ -1,4 +1,4 @@
-﻿#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
+#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -113,6 +113,86 @@ Describe 'helpers' {
         $r.Json.ok | Should -BeTrue
         $r.Json.cwd | Should -Be $repoResolved
         $r.Stderr | Should -Match 'warn'
+    }
+
+    It 'Invoke-FeatureInProcess matches child process for setup and leaves no lock or strict-mode leak' {
+        $repo = New-TestRepo
+        $good = Invoke-FeatureInProcess @('new', '-Name', 'ipgood', '-Repo', $repo) -WorkingDirectory $repo
+        $good.ExitCode | Should -Be 0
+        $good.Json.ok | Should -BeTrue
+        Test-Path (Join-Path $repo '.xagent/features/ipgood/.lock') | Should -BeFalse
+
+        $bad = Invoke-FeatureInProcess @('new', '-Name', 'Bad_Name', '-Repo', $repo) -WorkingDirectory $repo
+        $bad.ExitCode | Should -Be 1
+        $bad.Json.ok | Should -BeFalse
+        $bad.Json.error | Should -Not -BeNullOrEmpty
+        Test-Path (Join-Path $repo '.xagent/features/Bad_Name/.lock') | Should -BeFalse
+
+        { $null.Foo } | Should -Not -Throw
+
+        $dec = Invoke-Feature @('decision', '-Kind', 'decision', '-Text', 'ok', '-Repo', $repo, '-Name', 'ipgood') -WorkingDirectory $repo
+        $dec.ExitCode | Should -Be 0
+        $dec.Json.ok | Should -BeTrue
+    }
+}
+
+Describe 'path rules (unit)' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @(
+                'Normalize-ScopePath', 'Convert-ScopeGlobToRegex', 'Test-PathInScope',
+                'Get-OverlapKey', 'Test-OverlapKeysOverlap'
+            ))
+    }
+
+    $pathCases = @(
+        @{ entry = 'src/test*.ts'; path = 'src/testing.ts'; expected = $true },
+        @{ entry = 'src/test*.ts'; path = 'src/other.ts'; expected = $false },
+        @{ entry = 'src/test*.ts'; path = 'src/sub/test1.ts'; expected = $false },
+        @{ entry = 'docs/'; path = 'docs/a/b.md'; expected = $true },
+        @{ entry = 'docs/'; path = 'src/docs/x.md'; expected = $false },
+        @{ entry = 'src/**/x.ts'; path = 'src/x.ts'; expected = $true },
+        @{ entry = 'src/**/x.ts'; path = 'src/a/b/x.ts'; expected = $true },
+        @{ entry = 'src/**/x.ts'; path = 'src/y.ts'; expected = $false },
+        @{ entry = 'src/a.ts'; path = 'Src/A.ts'; expected = $true },
+        @{ entry = './src/a.ts'; path = 'src/a.ts'; expected = $true },
+        @{ entry = 'src\a.ts'; path = 'src/a.ts'; expected = $true },
+        @{ entry = 'src/a[1].ts'; path = 'src/a[1].ts'; expected = $true },
+        @{ entry = 'src/a[1].ts'; path = 'src/a1.ts'; expected = $false },
+        @{ entry = 'src/a[1]*.ts'; path = 'src/a[1]x.ts'; expected = $true },
+        @{ entry = 'src/a[1]*.ts'; path = 'src/a1x.ts'; expected = $false },
+        @{ entry = 'src/a?.ts'; path = 'src/ab.ts'; expected = $true },
+        @{ entry = 'src/a?.ts'; path = 'src/a/.ts'; expected = $false }
+    )
+
+    It 'Test-PathInScope -Path <path> -ScopeFiles @(<entry>) returns <expected>' -ForEach $pathCases {
+        Test-PathInScope -Path $_.path -ScopeFiles @($_.entry) | Should -Be $_.expected
+    }
+
+    $overlapKeyCases = @(
+        @{ entry = 'src/test*.ts'; key = 'src/' },
+        @{ entry = '**'; key = '' },
+        @{ entry = '*.md'; key = '' },
+        @{ entry = 'docs/**/x.md'; key = 'docs/' },
+        @{ entry = 'src/a.ts'; key = 'src/a.ts' },
+        @{ entry = 'Src\A.ts'; key = 'src/a.ts' }
+    )
+
+    It 'Get-OverlapKey <entry> returns <key>' -ForEach $overlapKeyCases {
+        Get-OverlapKey $_.entry | Should -Be $_.key
+    }
+
+    $overlapCases = @(
+        @{ a = 'src/a.ts'; b = 'src/a.ts'; expected = $true },
+        @{ a = 'src/'; b = 'src/x/y.ts'; expected = $true },
+        @{ a = '**'; b = 'src/a.ts'; expected = $true },
+        @{ a = '*.md'; b = 'src/a.ts'; expected = $true },
+        @{ a = 'src/test*.ts'; b = 'src/testing.ts'; expected = $true },
+        @{ a = 'src/a/*'; b = 'src/b/x.ts'; expected = $false },
+        @{ a = 'src/a.ts'; b = 'src/a.tsx'; expected = $false }
+    )
+
+    It 'Test-OverlapKeysOverlap (Get-OverlapKey <a>) (Get-OverlapKey <b>) returns <expected>' -ForEach $overlapCases {
+        Test-OverlapKeysOverlap (Get-OverlapKey $_.a) (Get-OverlapKey $_.b) | Should -Be $_.expected
     }
 }
 
@@ -347,7 +427,7 @@ Describe 'feature.ps1 reaudit' {
 }
 
 Describe 'feature.ps1 lock' {
-    It 'blocks when lock matches running pid and start time' {
+    It 'blocks when lock matches running pid and start time' -Tag 'Slow' {
         $repo = New-TestRepo
         New-FeatureAtStage -Repo $repo -Name 'lk' -Stage 'design'
         $lockDir = Join-Path $repo '.xagent/features/lk'
@@ -835,46 +915,6 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks | Should -Be @()
     }
 
-    It 'overlap: folder vs file under it' {
-        $repo = New-TestRepo
-        Import-TestPlan -Repo $repo -Name 'ov2' -Plan (New-OverlapTestPlan -FileA 'src/' -FileB 'src/x/y.ts') | Out-Null
-        Set-TaskState -Repo $repo -Name 'ov2' -States @{ ta = 'running' }
-        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov2') -WorkingDirectory $repo
-        $r.Json.tasks | Should -Be @()
-    }
-
-    It 'overlap: ** overlaps anything' {
-        $repo = New-TestRepo
-        Import-TestPlan -Repo $repo -Name 'ov3' -Plan (New-OverlapTestPlan -FileA '**' -FileB 'anywhere/foo.ts') | Out-Null
-        Set-TaskState -Repo $repo -Name 'ov3' -States @{ ta = 'running' }
-        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov3') -WorkingDirectory $repo
-        $r.Json.tasks | Should -Be @()
-    }
-
-    It 'overlap: *.md overlaps anything' {
-        $repo = New-TestRepo
-        Import-TestPlan -Repo $repo -Name 'ov4' -Plan (New-OverlapTestPlan -FileA '*.md' -FileB 'z.ts') | Out-Null
-        Set-TaskState -Repo $repo -Name 'ov4' -States @{ ta = 'running' }
-        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov4') -WorkingDirectory $repo
-        $r.Json.tasks | Should -Be @()
-    }
-
-    It 'overlap: src/test*.ts vs src/testing.ts' {
-        $repo = New-TestRepo
-        Import-TestPlan -Repo $repo -Name 'ov5' -Plan (New-OverlapTestPlan -FileA 'src/test*.ts' -FileB 'src/testing.ts') | Out-Null
-        Set-TaskState -Repo $repo -Name 'ov5' -States @{ ta = 'running' }
-        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov5') -WorkingDirectory $repo
-        $r.Json.tasks | Should -Be @()
-    }
-
-    It 'overlap: src/a/* vs src/b/x.ts does not overlap' {
-        $repo = New-TestRepo
-        Import-TestPlan -Repo $repo -Name 'ov6' -Plan (New-OverlapTestPlan -FileA 'src/a/*' -FileB 'src/b/x.ts') | Out-Null
-        Set-TaskState -Repo $repo -Name 'ov6' -States @{ ta = 'running' }
-        $r = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'ov6') -WorkingDirectory $repo
-        $r.Json.tasks.id | Should -Be @('tb')
-    }
-
     It 'overlap: src/a.ts vs src/a.tsx does not overlap' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'ov7' -Plan (New-OverlapTestPlan -FileA 'src/a.ts' -FileB 'src/a.tsx') | Out-Null
@@ -897,7 +937,7 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks.id | Should -Be @('ta')
     }
 
-    It 'cap blocks tasks when two live runs exist for feature' {
+    It 'cap blocks tasks when two live runs exist for feature' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'cap' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
         $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
@@ -918,7 +958,7 @@ Describe 'feature.ps1 schedule' {
         }
     }
 
-    It 'live run count ignores pid files for another feature' {
+    It 'live run count ignores pid files for another feature' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'cap2' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
         $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
@@ -938,7 +978,7 @@ Describe 'feature.ps1 schedule' {
         }
     }
 
-    It 'mismatched start time is not live' {
+    It 'mismatched start time is not live' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'cap3' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
         $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
@@ -993,7 +1033,7 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks.id | Should -Not -Contain 't1'
     }
 
-    It 'returns one task when one live run and two ready tasks' {
+    It 'returns one task when one live run and two ready tasks' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'one' -Plan (New-OverlapTestPlan -FileA 'a' -FileB 'b') | Out-Null
         $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
@@ -1163,7 +1203,7 @@ Describe 'feature.ps1 task' {
 }
 
 Describe 'feature.ps1 verify' {
-    It 'lists committed and uncommitted in-scope changes' {
+    It 'lists committed and uncommitted in-scope changes' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1184,36 +1224,28 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'matches src/test*.ts glob and folder docs/' {
-        foreach ($case in @(
-                @{ Name = 'vg1'; Files = @('src/test*.ts'); Path = 'src/testing.ts'; In = $true },
-                @{ Name = 'vg2'; Files = @('src/test*.ts'); Path = 'src/other.ts'; In = $false },
-                @{ Name = 'vg3'; Files = @('docs/'); Path = 'docs/a/b.md'; In = $true },
-                @{ Name = 'vg4'; Files = @('docs/'); Path = 'src/docs/x.md'; In = $false },
-                @{ Name = 'vg5'; Files = @('src/**/x.ts'); Path = 'src/x.ts'; In = $true },
-                @{ Name = 'vg6'; Files = @('src/**/x.ts'); Path = 'src/a/b/x.ts'; In = $true },
-                @{ Name = 'vg7'; Files = @('src/**/x.ts'); Path = 'src/y.ts'; In = $false }
-            )) {
-            $repo = New-TestRepo
-            $wt = $null
-            try {
-                $ctx = New-TaskWorktree -Repo $repo -Name $case.Name -Files $case.Files
-                $wt = (Get-TaskWorktreeRoot $ctx)
-                $dir = Split-Path (Join-Path $wt $case.Path) -Parent
-                New-Item -ItemType Directory -Force $dir | Out-Null
-                Set-Content -LiteralPath (Join-Path $wt $case.Path) -Value 'x' -NoNewline
-                & git -C $wt add -- $case.Path 2>&1 | Out-Null
-                & git -C $wt commit -m c 2>&1 | Out-Null
-                $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', $case.Name, '-Task', 't1') -WorkingDirectory $repo
-                $r.Json.inScope | Should -Be $case.In
-                if (-not $case.In) { $r.Json.outOfScope | Should -Contain $case.Path }
-            } finally {
-                if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
-            }
+    It 'flags in-scope and out-of-scope changed files' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vscope' -Files @('src/test*.ts')
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content -LiteralPath (Join-Path $wt 'src/testing.ts') -Value 'in' -NoNewline
+            Set-Content -LiteralPath (Join-Path $wt 'src/other.ts') -Value 'out' -NoNewline
+            & git -C $wt add src/testing.ts src/other.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vscope', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.inScope | Should -Be $false
+            $r.Json.changed | Should -Contain 'src/testing.ts'
+            $r.Json.changed | Should -Contain 'src/other.ts'
+            $r.Json.outOfScope | Should -Be @('src/other.ts')
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
     }
 
-    It 'counts untracked, ignores __pycache__ and .xagent' {
+    It 'counts untracked, ignores __pycache__ and .xagent' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1242,7 +1274,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'serializes changed as JSON array for zero or one element' {
+    It 'serializes changed as JSON array for zero or one element' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1267,7 +1299,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'runs test command and records pass or fail with exit 0 on verify' {
+    It 'runs test command and records pass or fail with exit 0 on verify' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1294,7 +1326,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'captures hello in tail' {
+    It 'captures hello in tail' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1307,7 +1339,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'times out and kills process tree' {
+    It 'times out and kills process tree' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         $sleeperPid = $null
@@ -1334,7 +1366,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'stores verify in state without changing status' {
+    It 'stores verify in state without changing status' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1354,7 +1386,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'does not change worktree git status or HEAD' {
+    It 'does not change worktree git status or HEAD' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1370,7 +1402,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'fails without worktree and when folder missing' {
+    It 'fails without worktree and when folder missing' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'vnowt' -Plan (New-OneTaskPlan) | Out-Null
         (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vnowt', '-Task', 't1') -WorkingDirectory $repo).Json.error | Should -Match 'no worktree in state'
@@ -1385,7 +1417,7 @@ Describe 'feature.ps1 verify' {
         (Invoke-Feature @('verify', '-Repo', $repo2, '-Name', 'vgone', '-Task', 't1') -WorkingDirectory $repo2).Json.error | Should -Match 'worktree not found'
     }
 
-    It 'computes changed before test writes out.txt' {
+    It 'computes changed before test writes out.txt' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1400,7 +1432,7 @@ Describe 'feature.ps1 verify' {
         }
     }
 
-    It 'fails invalid TimeoutSec, unknown task, missing Task' {
+    It 'fails invalid TimeoutSec, unknown task, missing Task' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'verr' -Plan (New-OneTaskPlan) | Out-Null
         foreach ($t in @('0', '-1', 'abc')) {
@@ -1412,7 +1444,7 @@ Describe 'feature.ps1 verify' {
 }
 
 Describe 'feature.ps1 merge' {
-    It 'merges task branch with trailer and updates state' {
+    It 'merges task branch with trailer and updates state' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1438,7 +1470,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'rejects re-plan change to merged task' {
+    It 'rejects re-plan change to merged task' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1461,7 +1493,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'refuses merge when feature repo working tree is dirty' {
+    It 'refuses merge when feature repo working tree is dirty' -Tag 'Slow' {
         $repo = New-TestRepo
         $ctx = New-TaskWorktree -Repo $repo -Name 'mgdirty'
         $wt = (Get-TaskWorktreeRoot $ctx)
@@ -1473,7 +1505,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'refuses merge when main is checked out' {
+    It 'refuses merge when main is checked out' -Tag 'Slow' {
         $repo = New-TestRepo
         $ctx = New-TaskWorktree -Repo $repo -Name 'mgmain'
         $wt = (Get-TaskWorktreeRoot $ctx)
@@ -1485,7 +1517,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'refuses merge when task branch is missing' {
+    It 'refuses merge when task branch is missing' -Tag 'Slow' {
         $repo = New-TestRepo
         $ctx = New-TaskWorktree -Repo $repo -Name 'mgnobr'
         $wt = (Get-TaskWorktreeRoot $ctx)
@@ -1500,7 +1532,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'refuses merge when task branch is already merged' {
+    It 'refuses merge when task branch is already merged' -Tag 'Slow' {
         $repo = New-TestRepo
         $ctx = New-TaskWorktree -Repo $repo -Name 'mgdone'
         $wt = (Get-TaskWorktreeRoot $ctx)
@@ -1517,7 +1549,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'refuses merge when worktree has uncommitted changes' {
+    It 'refuses merge when worktree has uncommitted changes' -Tag 'Slow' {
         $repo = New-TestRepo
         $ctx = New-TaskWorktree -Repo $repo -Name 'mgun' -NoRecord
         $wt = (Get-TaskWorktreeRoot $ctx)
@@ -1539,7 +1571,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'aborts on conflict and keeps HEAD clean' {
+    It 'aborts on conflict and keeps HEAD clean' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {
@@ -1566,7 +1598,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'fails on missing Message, unknown task, merge in progress' {
+    It 'fails on missing Message, unknown task, merge in progress' -Tag 'Slow' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'mge' -Plan (New-OneTaskPlan) | Out-Null
         (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mge', '-Task', 't1') -WorkingDirectory $repo).Json.error | Should -Match '-Message is required'
@@ -1592,7 +1624,7 @@ Describe 'feature.ps1 merge' {
         }
     }
 
-    It 'keeps other task state and lastReconcile after merge' {
+    It 'keeps other task state and lastReconcile after merge' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
         try {

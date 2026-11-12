@@ -53,6 +53,58 @@ function Invoke-Feature {
     }
 }
 
+function Invoke-FeatureInProcess {
+    param(
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [string]$ScriptPath = (Join-Path $PSScriptRoot '../scripts/feature.ps1')
+    )
+    if (-not $Arguments -or $Arguments.Count -eq 0 -or ($Arguments.Count % 2 -eq 0)) {
+        throw 'Invoke-FeatureInProcess: bad arguments'
+    }
+    $h = @{ Subcommand = $Arguments[0] }
+    for ($i = 1; $i -lt $Arguments.Count; $i += 2) {
+        $h[$Arguments[$i].TrimStart('-')] = $Arguments[$i + 1]
+    }
+    $global:LASTEXITCODE = 0
+    $pushed = $false
+    try {
+        Push-Location -LiteralPath $WorkingDirectory
+        $pushed = $true
+        $out = & $ScriptPath @h
+        $code = $LASTEXITCODE
+    } finally {
+        if ($pushed) { Pop-Location }
+    }
+    $raw = (@($out) -join "`n").TrimEnd()
+    $json = $null
+    if ($raw) {
+        try { $json = $raw | ConvertFrom-Json } catch { }
+    }
+    [pscustomobject]@{
+        ExitCode = $code
+        Json     = $json
+        Raw      = $raw
+        Stderr   = ''
+    }
+}
+
+function Get-FeatureFunctionScript {
+    param([string[]]$Name)
+    $path = Join-Path $PSScriptRoot '../scripts/feature.ps1'
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($n in $Name) {
+        $found = $defs | Where-Object { $_.Name -ceq $n } | Select-Object -First 1
+        if (-not $found) { throw "function not found: $n" }
+        $parts.Add($found.Extent.Text)
+    }
+    return [scriptblock]::Create(($parts -join "`n`n"))
+}
+
 function Get-SampleSchemaName {
     param([string]$FileName)
     $base = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
@@ -86,25 +138,25 @@ function New-FeatureAtStage {
         [string]$Stage
     )
     $common = @{ '-Repo' = $Repo; '-WorkingDirectory' = $Repo; '-Name' = $Name }
-    Assert-FeatureOk (Invoke-Feature @('new', '-Name', $Name, '-Repo', $Repo) -WorkingDirectory $Repo)
+    Assert-FeatureOk (Invoke-FeatureInProcess @('new', '-Name', $Name, '-Repo', $Repo) -WorkingDirectory $Repo)
     if ($Stage -eq 'design') { return }
     if (@('design-review', 'plan', 'build', 'signoff') -contains $Stage) {
-        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'design-review', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('stage', '-To', 'design-review', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
     }
     if (@('plan', 'build', 'signoff') -contains $Stage) {
         $designPath = Join-Path $Repo "docs/designs/$Name.md"
         New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
         Set-Content -LiteralPath $designPath -Value '# design' -NoNewline
-        Assert-FeatureOk (Invoke-Feature @('commit-design', '-Section', 'intro', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
-        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'design-locked', '-Quote', 'lock it', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
-        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'plan', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('commit-design', '-Section', 'intro', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('gate', '-Gate', 'design-locked', '-Quote', 'lock it', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('stage', '-To', 'plan', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
     }
     if (@('build', 'signoff') -contains $Stage) {
-        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'plan-approved', '-Quote', 'approve', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
-        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'build', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('gate', '-Gate', 'plan-approved', '-Quote', 'approve', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('stage', '-To', 'build', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
     }
     if ($Stage -eq 'signoff') {
-        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'signoff', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+        Assert-FeatureOk (Invoke-FeatureInProcess @('stage', '-To', 'signoff', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
     }
 }
 
@@ -200,7 +252,7 @@ function Import-TestPlan {
     New-FeatureAtStage -Repo $Repo -Name $Name -Stage 'plan'
     $planPath = Join-Path $TestDrive ("plan-$Name-{0}.json" -f [guid]::NewGuid())
     New-PlanFile -Path $planPath -Plan $Plan
-    $r = Invoke-Feature @('plan', '-PlanFile', $planPath, '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo
+    $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $planPath, '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo
     Assert-FeatureOk $r
     return $r
 }
@@ -282,7 +334,7 @@ function New-TaskWorktree {
     & git -C $Repo worktree add -b "xagent/$delegateId" $wtRootPath "feature/$Name" 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'worktree add failed' }
     if (-not $NoRecord) {
-        Assert-FeatureOk (Invoke-Feature @(
+        Assert-FeatureOk (Invoke-FeatureInProcess @(
                 'task', '-Repo', $Repo, '-Name', $Name, '-Task', $TaskId,
                 '-Worktree', $wtRootPath, '-BaseSha', $base
             ) -WorkingDirectory $Repo)
