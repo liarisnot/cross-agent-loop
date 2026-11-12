@@ -75,7 +75,7 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
    - Read the actual diff in the worktree, **one file at a time** (`git -C <worktree> diff <baseSha> -- <file>`, plus untracked files from `changes`). Headroom compresses large tool outputs, so a whole diff at once may arrive cut short. If you see a compression marker (`[... compressed ...]`, `[↑NL same as …]`, `<<ccr:…>>`), read smaller chunks.
    - Rerun the test command yourself inside the worktree.
    - Check that the change stays within scope.
-5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split.
+5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split. If the next round starts a **fresh** session (no `-Resume`, e.g. after a timeout), the follow-up file is the whole task for a worker with no context: give it the comprehension preflight first, and readiness too if it changes scope.
 6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself. (The `feature` skill merges with `--no-ff` and an `Xagent-Task: <id>` trailer, which its records read.)
 7. **Cleanup** with `-Cleanup -Repo <repo>`. Tell the user what each worker did, what you changed during review, and anything left open.
 
