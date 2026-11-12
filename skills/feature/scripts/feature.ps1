@@ -1664,6 +1664,340 @@ function Invoke-ScheduleFeature {
     Out-FeatureOk @{ liveRuns = $liveRuns; cap = $cap; tasks = @($tasksOut) }
 }
 
+function Get-PlanTasksInOrder {
+    param([object]$Feature)
+    $result = [System.Collections.Generic.List[object]]::new()
+    if (-not $Feature.PSObject.Properties['phases'] -or $null -eq $Feature.phases) { return @() }
+    foreach ($phase in @($Feature.phases | Sort-Object { [int]$_.n })) {
+        foreach ($task in @($phase.tasks)) {
+            $result.Add($task) | Out-Null
+        }
+    }
+    return @($result)
+}
+
+function Test-FeatureStateFileValid {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $raw = [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false))
+    try {
+        $null = $raw | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    return (Test-Json -Json $raw -SchemaFile $script:SchemaState -ErrorAction SilentlyContinue)
+}
+
+function Test-ProcessStartTimeMatch {
+    param([int]$ProcessId, $StartTime)
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+        $expected = if ($StartTime -is [datetime]) {
+            $StartTime.ToUniversalTime()
+        } else {
+            ([datetime]([string]$StartTime)).ToUniversalTime()
+        }
+        return ($proc.StartTime.ToUniversalTime() -eq $expected)
+    } catch {
+        return $false
+    }
+}
+
+function Get-DelegateRunDirs {
+    param([string]$Repository, [string]$DelegateTaskId)
+    $runsRoot = Join-Path $Repository '.xagent/runs'
+    if (-not (Test-Path -LiteralPath $runsRoot)) { return [string[]]@() }
+    $dirs = [System.Collections.Generic.List[string]]::new()
+    $exact = Join-Path $runsRoot $DelegateTaskId
+    if (Test-Path -LiteralPath $exact) { $dirs.Add($exact) | Out-Null }
+    foreach ($suffix in @('-pc', '-pr')) {
+        $p = Join-Path $runsRoot ($DelegateTaskId + $suffix)
+        if (Test-Path -LiteralPath $p) { $dirs.Add($p) | Out-Null }
+    }
+    $esc = [regex]::Escape($DelegateTaskId)
+    foreach ($child in Get-ChildItem -LiteralPath $runsRoot -Directory -ErrorAction SilentlyContinue) {
+        if ($child.Name -match "^$esc-c\d+$") {
+            $dirs.Add($child.FullName) | Out-Null
+        }
+    }
+    return [string[]]@($dirs)
+}
+
+function Get-DelegateRunPidFiles {
+    param([string]$Repository, [string]$DelegateTaskId)
+    $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($dir in (Get-DelegateRunDirs $Repository $DelegateTaskId)) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.pid' -File -ErrorAction SilentlyContinue) {
+            $files.Add($f) | Out-Null
+        }
+    }
+    return @($files)
+}
+
+function Get-NewestStdoutJsonPath {
+    param([string]$Repository, [string]$DelegateTaskId)
+    $bestStamp = $null
+    $bestPath = $null
+    foreach ($dir in (Get-DelegateRunDirs $Repository $DelegateTaskId)) {
+        foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.stdout.json' -File -ErrorAction SilentlyContinue) {
+            if ($f.Name -match '^(\d{8}-\d{6})-') {
+                $stamp = $Matches[1]
+                if ($null -eq $bestStamp -or $stamp -gt $bestStamp) {
+                    $bestStamp = $stamp
+                    $bestPath = $f.FullName
+                }
+            }
+        }
+    }
+    return $bestPath
+}
+
+function Test-StdoutJsonFinished {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    $raw = [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false)).Trim()
+    return ($raw.Length -gt 0)
+}
+
+function Update-ReconcileInFlightTask {
+    param(
+        [string]$Repository,
+        [string]$DelegateTaskId,
+        [object]$Rec
+    )
+    $pidFiles = Get-DelegateRunPidFiles -Repository $Repository -DelegateTaskId $DelegateTaskId
+    foreach ($pf in $pidFiles) {
+        $obj = $null
+        try {
+            $raw = [IO.File]::ReadAllText($pf.FullName, [Text.UTF8Encoding]::new($false))
+            $obj = $raw | ConvertFrom-Json
+        } catch { continue }
+        if ($null -eq $obj.PSObject.Properties['pid'] -or $null -eq $obj.PSObject.Properties['startTime']) { continue }
+        if (Test-ProcessStartTimeMatch -ProcessId ([int]$obj.pid) -StartTime $obj.startTime) {
+            return @{ changed = $false; becameFailed = $false; incrementFailures = $false }
+        }
+    }
+    $orphanKilled = $false
+    foreach ($pf in $pidFiles) {
+        $obj = $null
+        try {
+            $raw = [IO.File]::ReadAllText($pf.FullName, [Text.UTF8Encoding]::new($false))
+            $obj = $raw | ConvertFrom-Json
+        } catch { continue }
+        if ($null -eq $obj.PSObject.Properties['childPid'] -or $null -eq $obj.PSObject.Properties['childStartTime']) { continue }
+        $childPid = [int]$obj.childPid
+        if (-not (Test-ProcessStartTimeMatch -ProcessId $childPid -StartTime $obj.childStartTime)) { continue }
+        $parentLive = $false
+        if ($null -ne $obj.PSObject.Properties['pid'] -and $null -ne $obj.PSObject.Properties['startTime']) {
+            $parentLive = (Test-ProcessStartTimeMatch -ProcessId ([int]$obj.pid) -StartTime $obj.startTime)
+        }
+        if ($parentLive) { continue }
+        & taskkill.exe /T /F /PID $childPid 2>&1 | Out-Null
+        $orphanKilled = $true
+    }
+    $stdoutPath = Get-NewestStdoutJsonPath -Repository $Repository -DelegateTaskId $DelegateTaskId
+    if (-not $orphanKilled -and (Test-StdoutJsonFinished $stdoutPath)) {
+        return @{ changed = $true; newStatus = 'in-review'; becameFailed = $false; incrementFailures = $false }
+    }
+    return @{ changed = $true; newStatus = 'failed'; becameFailed = $true; incrementFailures = $true }
+}
+
+function Invoke-ReconcileFeature {
+    param([string]$Repository, [string]$FeatureName)
+    $branch = "feature/$FeatureName"
+    $statePath = Join-Path $Repository ".xagent/features/$FeatureName/state.json"
+    & git -C $Repository show-ref --verify --quiet "refs/heads/$branch" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        if (Test-Path -LiteralPath $statePath) {
+            Enter-FeatureLock $Repository $FeatureName
+            try {
+                Out-FeatureOk @{
+                    name           = $FeatureName
+                    changes        = @()
+                    contradictions = @(@{ kind = 'branch-missing'; message = "branch $branch is missing" })
+                    lost           = @()
+                }
+            } finally {
+                Exit-FeatureLock
+            }
+            return
+        }
+        throw "no feature $FeatureName"
+    }
+
+    $feat = Get-FeatureJsonFromRef $Repository $branch $FeatureName
+    if (-not $feat) { throw "no feature $FeatureName" }
+
+    $stateMissing = -not (Test-Path -LiteralPath $statePath)
+    if (-not $stateMissing) {
+        if (-not (Test-FeatureStateFileValid $statePath)) {
+            throw 'state.json is not valid; fix it, or delete it so reconcile rebuilds it'
+        }
+    }
+
+    $decPath = "docs/features/$FeatureName/decisions.md"
+    $decText = try {
+        (Invoke-GitRepo $Repository 'show' "${branch}:$decPath") -join "`n"
+    } catch {
+        throw "no feature $FeatureName"
+    }
+    if (-not $decText.EndsWith("`n")) { $decText += "`n" }
+
+    Enter-FeatureLock $Repository $FeatureName
+    try {
+        $contradictions = [System.Collections.Generic.List[hashtable]]::new()
+        $changes = [System.Collections.Generic.List[hashtable]]::new()
+        $lost = [string[]]@()
+        $newFailedTasks = [System.Collections.Generic.List[string]]::new()
+
+        $effStage = Get-EffectiveStage $Repository $FeatureName $feat
+        $currentBranch = @(Invoke-GitRepo $Repository 'branch' '--show-current')[0]
+        if ($effStage -ne 'done' -and $effStage -ne 'abandoned' -and $currentBranch -cne $branch) {
+            $cur = if ([string]::IsNullOrEmpty($currentBranch)) { 'detached HEAD' } else { $currentBranch }
+            $contradictions.Add(@{
+                    kind    = 'wrong-branch'
+                    message = "check out $branch to continue; $cur is checked out"
+                }) | Out-Null
+        }
+
+        if ($currentBranch -ceq 'main') {
+            & git -C $Repository rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $contradictions.Add(@{
+                        kind    = 'merge-in-progress'
+                        message = 'a merge into main is in progress; finish or abort it'
+                    }) | Out-Null
+            }
+        }
+
+        if (Test-MergeBaseIsAncestor $Repository $branch 'main') {
+            $hasSignoff = $false
+            if ($feat.PSObject.Properties['gates'] -and $null -ne $feat.gates) {
+                $hasSignoff = $null -ne $feat.gates.PSObject.Properties['signed-off']
+            }
+            if (-not $hasSignoff) {
+                $contradictions.Add(@{
+                        kind    = 'merged-without-signoff'
+                        message = "$branch is merged into main but signed-off is not recorded"
+                    }) | Out-Null
+            }
+        }
+
+        $state = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
+        $trailerMerged = @(Get-XagentMergedTaskIds -Repository $Repository -FeatureName $FeatureName)
+
+        if ($stateMissing) {
+            $lostList = [System.Collections.Generic.List[string]]::new()
+            foreach ($task in (Get-PlanTasksInOrder $feat)) {
+                $tid = [string]$task.id
+                $state.tasks[$tid] = New-DefaultTaskStateRecord
+                if ($trailerMerged -notcontains $tid) {
+                    $lostList.Add($tid) | Out-Null
+                }
+            }
+            $lost = [string[]]@($lostList)
+        }
+
+        foreach ($task in (Get-PlanTasksInOrder $feat)) {
+            $tid = [string]$task.id
+            $delegateId = [string]$task.delegateTaskId
+            $hadRecord = $state.tasks.ContainsKey($tid)
+            $rec = if ($hadRecord) { Copy-TaskStateRecord $state.tasks[$tid] } else { New-DefaultTaskStateRecord }
+            $fromStatus = [string]$rec.status
+            if (-not $hadRecord) { $fromStatus = 'pending' }
+
+            if ($trailerMerged -contains $tid) {
+                if ([string]$rec.status -cne 'merged') {
+                    $rec.status = 'merged'
+                    $changes.Add(@{ task = $tid; from = $fromStatus; to = 'merged' }) | Out-Null
+                }
+                $state.tasks[$tid] = $rec
+                continue
+            }
+
+            if ([string]$rec.status -ceq 'merged') {
+                $contradictions.Add(@{
+                        kind    = 'merged-without-trailer'
+                        message = "task $tid is merged in state.json but has no Xagent-Task merge"
+                    }) | Out-Null
+                $state.tasks[$tid] = $rec
+                continue
+            }
+
+            if ([string]$rec.status -cin @('preflight', 'running')) {
+                $flight = Update-ReconcileInFlightTask -Repository $Repository -DelegateTaskId $delegateId -Rec $rec
+                if (-not $flight.changed) {
+                    $state.tasks[$tid] = $rec
+                    continue
+                }
+                $newSt = [string]$flight.newStatus
+                $rec.status = $newSt
+                if ($flight.incrementFailures) {
+                    $rec.failures = [int]$rec.failures + 1
+                }
+                if ($flight.becameFailed) {
+                    $newFailedTasks.Add($tid) | Out-Null
+                }
+                if ($newSt -cne $fromStatus) {
+                    $changes.Add(@{ task = $tid; from = $fromStatus; to = $newSt }) | Out-Null
+                }
+                $state.tasks[$tid] = $rec
+                continue
+            }
+
+            if ($hadRecord) {
+                $state.tasks[$tid] = $rec
+            }
+        }
+
+        $state.lastReconcile = Get-UtcDecisionTime
+        Write-FeatureStateObject -Repository $Repository -FeatureName $FeatureName -State $state
+
+        $stopTasks = @($newFailedTasks | Where-Object {
+                $state.tasks[$_].failures -ge 2
+            })
+        if ($stopTasks.Count -gt 0 -and -not (Test-StopOpen $decText)) {
+            $onFeature = ($currentBranch -ceq $branch)
+            if ($onFeature) {
+                $decFile = Join-Path $Repository $decPath
+                $decDir = Split-Path $decFile -Parent
+                if (-not (Test-Path -LiteralPath $decDir)) {
+                    New-Item -ItemType Directory -Force $decDir | Out-Null
+                }
+                if (-not (Test-Path -LiteralPath $decFile)) {
+                    $tpl = [IO.File]::ReadAllText($script:TemplateDecisions, [Text.UTF8Encoding]::new($false))
+                    $tpl = $tpl -replace '<name>', $FeatureName
+                    Write-TextLf $decFile $tpl
+                }
+                $planOrder = @(Get-PlanTasksInOrder $feat | ForEach-Object { [string]$_.id })
+                $orderedStop = @($stopTasks | Sort-Object { $planOrder.IndexOf($_) })
+                foreach ($sid in $orderedStop) {
+                    $line = Format-DecisionLine -Kind 'stop' -Body "${sid}: failed twice"
+                    Append-TextLf $decFile $line
+                }
+                $null = Invoke-FeatureCommit $Repository "feature($FeatureName): stop" @("docs/features/$FeatureName")
+            }
+            else {
+                foreach ($sid in $stopTasks) {
+                    $contradictions.Add(@{
+                            kind    = 'stop-not-recorded'
+                            message = "task $sid failed twice; check out $branch and run reconcile again to record the stop"
+                        }) | Out-Null
+                }
+            }
+        }
+
+        Out-FeatureOk @{
+            name           = $FeatureName
+            changes        = @($changes)
+            contradictions = @($contradictions)
+            lost           = @($lost)
+        }
+    } finally {
+        Exit-FeatureLock
+    }
+}
+
 function Test-StateJsonSchema([string]$json) {
     if (-not (Test-Json -Json $json -SchemaFile $script:SchemaState -ErrorAction SilentlyContinue)) {
         throw 'state.json does not match state.schema.json'
@@ -2217,6 +2551,10 @@ try {
         }
         'status' {
             Invoke-StatusFeature $repoRoot
+        }
+        'reconcile' {
+            $fname = Resolve-FeatureName $repoRoot
+            Invoke-ReconcileFeature $repoRoot $fname
         }
         default { throw "unknown subcommand $Subcommand" }
     }
