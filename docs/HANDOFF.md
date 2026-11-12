@@ -36,11 +36,11 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
   - **2.3** `fb-plan`: `plan` and `schedule`. 108 Pester tests pass (full suite about 5 minutes).
   - **Loop per sub-step:** task file in `.xagent/tasks/`, comprehension (Composer) and readiness (DeepSeek) preflights, Composer worker, lead review (diff per file, tests rerun, probes in scratch repos), merge with `--no-ff`. Probes found 4 real bugs that green worker tests missed (D11, D14).
 ## Next
-1. **Build step 2.5, split: `fb-status` (running), then `fb-reconcile`**, then 2.6 `finish` + `doctor`, each through `delegate`. Tests have a fast tier (`$c.Filter.ExcludeTag = 'Slow'`, about 225 s) and the full suite (about 366 s), after `fb-speed` (D18). Step 2.4 (`task`, `verify`, `merge`) is merged (`79af2a4`, 138 tests; the full suite now takes about 635 s). **Launch workers detached** (SKILL.md, D16).
-2. **Step 4 (router and stage files):** the design says the lead writes these as prompt design. Raise with the user whether to delegate them anyway, under the dogfooding instruction.
-3. Steps 5 (docs and machine setup) and 6 (manual CUJ checklist).
-   - **Pid-file times:** `ConvertFrom-Json` turns ISO strings into `DateTime`; compare start times as `DateTime`.
-   - **Permission rules:** `~/.claude/settings.json` allows both the `D:/` path and the junction path `<user profile>/.claude/skills/delegate/scripts/delegate.ps1`.
+1. **Build steps 1-5 are done (2026-11-12).** Step 2 sub-steps 2.1-2.6 (`feature.ps1`, 200 Pester tests: full suite about 10 min, fast tier `ExcludeTag Slow` about 7 min), step 3 (vendored EGM), step 4 (router `skills/feature/SKILL.md` and `stages/*.md`, delegated at the user's request), step 5 (sandbox script and fixtures, test-plan `feature` section with the manual checklist, decision 001, README). `feature.ps1 doctor` reports ready on this machine.
+2. **Step 6: the manual CUJ checklist** in `docs/test-plan.md`, section "The feature skill". Needs the user, in fresh Claude Code sessions. First do the machine setup below.
+3. **Machine setup not yet done (left for the user, it changes the global Claude Code setup):** junction `~/.claude/skills/feature` to `skills/feature` (`delegate` is already linked), and add the `feature.ps1` allow rule that `doctor` prints, using the junction path (`<user profile>/.claude/skills/feature/scripts/feature.ps1`) as Claude Code reports it.
+4. **Design write-back (docs):** the task files added decisions the design doesn't have (D19): `reconcile`'s output `name` and `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, the router's handling of entry rows without stage files, on-request council ids `<name12>-dc<k>`/`-pc<k>`. Fold them into `docs/designs/feature-skill.md` (a post-lock amendment the user should approve).
+   - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
