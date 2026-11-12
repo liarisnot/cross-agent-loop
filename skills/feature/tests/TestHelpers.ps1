@@ -175,13 +175,22 @@ function Set-TaskState {
     param(
         [string]$Repo,
         [string]$Name,
-        [hashtable]$States
+        [hashtable]$States,
+        [hashtable]$FailureCounts = @{},
+        [hashtable]$ExtraFields = @{}
     )
     $dir = Join-Path $Repo ".xagent/features/$Name"
     New-Item -ItemType Directory -Force $dir | Out-Null
     $tasks = [ordered]@{}
     foreach ($id in $States.Keys) {
-        $tasks[$id] = [ordered]@{ status = [string]$States[$id]; failures = 0 }
+        $failures = if ($FailureCounts.ContainsKey($id)) { [int]$FailureCounts[$id] } else { 0 }
+        $rec = [ordered]@{ status = [string]$States[$id]; failures = $failures }
+        if ($ExtraFields.ContainsKey($id)) {
+            foreach ($ek in $ExtraFields[$id].Keys) {
+                $rec[$ek] = $ExtraFields[$id][$ek]
+            }
+        }
+        $tasks[$id] = $rec
     }
     $body = [ordered]@{
         name          = $Name
@@ -405,6 +414,63 @@ function Invoke-StatusOk {
     }
     Test-Schema -Json $r.Raw -SchemaName 'status' | Should -BeTrue
     return $r.Json
+}
+
+function Invoke-ReconcileOk {
+    param(
+        [string]$Repo,
+        [string]$Name
+    )
+    $r = Invoke-Feature @('reconcile', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo
+    if ($r.ExitCode -ne 0 -or -not $r.Json -or -not $r.Json.ok) {
+        throw "reconcile failed: $($r.Raw) $($r.Stderr)"
+    }
+    return $r.Json
+}
+
+function Get-PlanDelegateTaskId {
+    param(
+        [string]$Repo,
+        [string]$Name,
+        [string]$TaskId
+    )
+    $featJson = (& git -C $Repo show "HEAD:docs/features/$Name/feature.json") -join "`n" | ConvertFrom-Json
+    foreach ($ph in @($featJson.phases)) {
+        foreach ($t in @($ph.tasks)) {
+            if ([string]$t.id -ceq $TaskId) { return [string]$t.delegateTaskId }
+        }
+    }
+    throw 'delegateTaskId not found'
+}
+
+function Write-DelegateRunStdout {
+    param(
+        [string]$Repo,
+        [string]$DelegateId,
+        [string]$Stamp,
+        [string]$Label = 'cursor',
+        [string]$Content = '{}',
+        [string]$RunSuffix = ''
+    )
+    $dir = Join-Path $Repo ".xagent/runs/${DelegateId}${RunSuffix}"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $path = Join-Path $dir "$Stamp-$Label.stdout.json"
+    [IO.File]::WriteAllText($path, $Content, [Text.UTF8Encoding]::new($false))
+}
+
+function Write-DelegateRunPid {
+    param(
+        [string]$Repo,
+        [string]$DelegateId,
+        [string]$Stamp,
+        [string]$Label = 'cursor',
+        [hashtable]$Body,
+        [string]$RunSuffix = ''
+    )
+    $dir = Join-Path $Repo ".xagent/runs/${DelegateId}${RunSuffix}"
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $json = $Body | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText((Join-Path $dir "$Stamp-$Label.pid"), $json, [Text.UTF8Encoding]::new($false))
 }
 
 function New-OverlapTestPlan {

@@ -1941,3 +1941,251 @@ Describe 'feature.ps1 status' {
         ($jn.features | Where-Object { $_.name -eq 'donef' }).stage | Should -Be 'done'
     }
 }
+
+Describe 'feature.ps1 reconcile' {
+    It 'trailer merges become merged and second reconcile is unchanged' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'rct1'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'ok' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m 'change' 2>&1 | Out-Null
+            & git -C $repo switch 'feature/rct1' 2>&1 | Out-Null
+            Assert-FeatureOk (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'rct1', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo)
+            Set-TaskState -Repo $repo -Name 'rct1' -States @{ t1 = 'pending' }
+            $j = Invoke-ReconcileOk $repo 'rct1'
+            @($j.changes).Count | Should -Be 1
+            $j.changes[0].task | Should -Be 't1'
+            $j.changes[0].from | Should -Be 'pending'
+            $j.changes[0].to | Should -Be 'merged'
+            & git -C $repo branch -D $ctx.AgentBranch 2>&1 | Out-Null
+            (Invoke-ReconcileOk $repo 'rct1').changes | Should -Be @()
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'reports merged-without-trailer and keeps merged status' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rctr' -Plan (New-OneTaskPlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'rctr' -States @{ t1 = 'merged' }
+        $j = Invoke-ReconcileOk $repo 'rctr'
+        $j.contradictions.Count | Should -Be 1
+        $j.contradictions[0].kind | Should -Be 'merged-without-trailer'
+        $j.contradictions[0].message | Should -Match 'task t1'
+        (Get-Content -Raw (Join-Path $repo '.xagent/features/rctr/state.json') | ConvertFrom-Json).tasks.t1.status | Should -Be 'merged'
+    }
+
+    It 'branch-missing with state or fails without' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcbr' -Plan (New-OneTaskPlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'rcbr' -States @{ t1 = 'pending' }
+        & git -C $repo switch main 2>&1 | Out-Null
+        & git -C $repo branch -D 'feature/rcbr' 2>&1 | Out-Null
+        $before = Get-Content -Raw (Join-Path $repo '.xagent/features/rcbr/state.json')
+        $j = Invoke-ReconcileOk $repo 'rcbr'
+        $j.contradictions.Count | Should -Be 1
+        $j.contradictions[0].kind | Should -Be 'branch-missing'
+        $j.changes | Should -Be @()
+        Get-Content -Raw (Join-Path $repo '.xagent/features/rcbr/state.json') | Should -Be $before
+        Remove-Item -LiteralPath (Join-Path $repo '.xagent/features/rcbr/state.json') -Force
+        $r = Invoke-Feature @('reconcile', '-Repo', $repo, '-Name', 'rcbr') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'no feature'
+    }
+
+    It 'wrong-branch on main still reconciles trailer merge' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcwb' -Plan (New-OneTaskPlan) | Out-Null
+        & git -C $repo switch 'feature/rcwb' 2>&1 | Out-Null
+        Set-Content (Join-Path $repo 'x.txt') -Value 'm' -NoNewline
+        & git -C $repo add x.txt 2>&1 | Out-Null
+        & git -C $repo commit -m 'm' -m 'Xagent-Task: t1' 2>&1 | Out-Null
+        Set-TaskState -Repo $repo -Name 'rcwb' -States @{ t1 = 'pending' }
+        & git -C $repo switch main 2>&1 | Out-Null
+        $j = Invoke-ReconcileOk $repo 'rcwb'
+        ($j.contradictions | Where-Object { $_.kind -eq 'wrong-branch' }).Count | Should -Be 1
+        ($j.changes | Where-Object { $_.to -eq 'merged' }).task | Should -Be 't1'
+    }
+
+    It 'reports merge-in-progress and wrong-branch' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'rcmg' -Stage 'design'
+        & git -C $repo switch main 2>&1 | Out-Null
+        & git -C $repo switch -c side 2>&1 | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'side' -NoNewline
+        & git -C $repo commit -am 'side' 2>&1 | Out-Null
+        & git -C $repo switch main 2>&1 | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'main' -NoNewline
+        & git -C $repo commit -am 'main' 2>&1 | Out-Null
+        & git -C $repo merge side 2>&1 | Out-Null
+        try {
+            $j = Invoke-ReconcileOk $repo 'rcmg'
+            ($j.contradictions | Where-Object { $_.kind -eq 'merge-in-progress' }).Count | Should -Be 1
+            ($j.contradictions | Where-Object { $_.kind -eq 'wrong-branch' }).Count | Should -Be 1
+        } finally {
+            & git -C $repo merge --abort 2>&1 | Out-Null
+        }
+    }
+
+    It 'reports merged-without-signoff' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'rcms' -Stage 'build'
+        & git -C $repo switch main 2>&1 | Out-Null
+        & git -C $repo merge --no-ff 'feature/rcms' -m 'merge feature' 2>&1 | Out-Null
+        & git -C $repo switch 'feature/rcms' 2>&1 | Out-Null
+        $j = Invoke-ReconcileOk $repo 'rcms'
+        $j.contradictions.Count | Should -Be 1
+        $j.contradictions[0].kind | Should -Be 'merged-without-signoff'
+    }
+
+    It 'running with no run folder becomes failed and is not scheduled' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcfd' -Plan (New-OneTaskPlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'rcfd' -States @{ t1 = 'running' }
+        $j = Invoke-ReconcileOk $repo 'rcfd'
+        $j.changes[0].to | Should -Be 'failed'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcfd/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 1
+        (Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'rcfd') -WorkingDirectory $repo).Json.tasks | Should -Be @()
+    }
+
+    It 'finished stdout moves to in-review; empty stdout alone is failed' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcfin' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcfin' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-100000' -Content ''
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-110000' -Content '{"ok":true}'
+        Set-TaskState -Repo $repo -Name 'rcfin' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo 'rcfin').changes[0].to | Should -Be 'in-review'
+        $repo2 = New-TestRepo
+        Import-TestPlan -Repo $repo2 -Name 'rcfem' -Plan (New-OneTaskPlan) | Out-Null
+        $d2 = Get-PlanDelegateTaskId $repo2 'rcfem' 't1'
+        Write-DelegateRunStdout -Repo $repo2 -DelegateId $d2 -Stamp '20260101-100000' -Content ''
+        Set-TaskState -Repo $repo2 -Name 'rcfem' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo2 'rcfem').changes[0].to | Should -Be 'failed'
+    }
+
+    It 'records stop on second failure or stop-not-recorded on main' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcst' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcst' 't1'
+        Set-TaskState -Repo $repo -Name 'rcst' -States @{ t1 = 'running' } -FailureCounts @{ t1 = 1 }
+        $j = Invoke-ReconcileOk $repo 'rcst'
+        $j.changes[0].to | Should -Be 'failed'
+        (Get-Content -Raw (Join-Path $repo 'docs/features/rcst/decisions.md')) | Should -Match '\[stop\] t1: failed twice'
+        (Invoke-StatusOk $repo -Extra @('-Name', 'rcst')).waitingOn.stop | Should -Be 't1: failed twice'
+        $repo2 = New-TestRepo
+        Import-TestPlan -Repo $repo2 -Name 'rcstm' -Plan (New-OneTaskPlan) | Out-Null
+        Set-TaskState -Repo $repo2 -Name 'rcstm' -States @{ t1 = 'running' } -FailureCounts @{ t1 = 1 }
+        & git -C $repo2 switch main 2>&1 | Out-Null
+        $j2 = Invoke-ReconcileOk $repo2 'rcstm'
+        ($j2.contradictions | Where-Object { $_.kind -eq 'stop-not-recorded' }).Count | Should -Be 1
+        $decOnBranch = (& git -C $repo2 show 'feature/rcstm:docs/features/rcstm/decisions.md') -join "`n"
+        $decOnBranch | Should -Not -Match '\[stop\] t1: failed twice'
+    }
+
+    It 'live preflight run stays preflight' -Tag 'Slow' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rclv' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rclv' 't1'
+        $holder = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120')
+        try {
+            Start-Sleep -Milliseconds 400
+            $holder.Refresh()
+            $start = $holder.StartTime.ToUniversalTime().ToString('o')
+            Write-DelegateRunPid -Repo $repo -DelegateId $d -Stamp '20260101-100000' -RunSuffix '-pr' -Body @{
+                pid       = $holder.Id
+                startTime = $start
+                feature   = 'rclv'
+            }
+            Set-TaskState -Repo $repo -Name 'rclv' -States @{ t1 = 'preflight' }
+            (Invoke-ReconcileOk $repo 'rclv').changes | Should -Be @()
+            (Get-Content -Raw (Join-Path $repo '.xagent/features/rclv/state.json') | ConvertFrom-Json).tasks.t1.status | Should -Be 'preflight'
+            Get-Process -Id $holder.Id -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        } finally {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'kills orphaned child or leaves reused pid alone' -Tag 'Slow' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcor' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcor' 't1'
+        $deadPid = 999999
+        $deadStart = '2019-01-01T00:00:00.0000000Z'
+        $child = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120')
+        try {
+            Start-Sleep -Milliseconds 400
+            $child.Refresh()
+            $childStart = $child.StartTime.ToUniversalTime().ToString('o')
+            Write-DelegateRunPid -Repo $repo -DelegateId $d -Stamp '20260101-100000' -Body @{
+                pid             = $deadPid
+                startTime       = $deadStart
+                childPid        = $child.Id
+                childStartTime  = $childStart
+                feature         = 'rcor'
+            }
+            Set-TaskState -Repo $repo -Name 'rcor' -States @{ t1 = 'running' }
+            (Invoke-ReconcileOk $repo 'rcor').changes[0].to | Should -Be 'failed'
+            Get-Process -Id $child.Id -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+            $child2 = Start-Process -PassThru -WindowStyle Hidden -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120')
+            try {
+                Start-Sleep -Milliseconds 400
+                $child2.Refresh()
+                Write-DelegateRunPid -Repo $repo -DelegateId $d -Stamp '20260101-110000' -Body @{
+                    pid            = $deadPid
+                    startTime      = $deadStart
+                    childPid       = $child2.Id
+                    childStartTime = '2019-01-01T00:00:00.0000000Z'
+                    feature        = 'rcor'
+                }
+                Set-TaskState -Repo $repo -Name 'rcor' -States @{ t1 = 'running' }
+                Invoke-ReconcileOk $repo 'rcor' | Out-Null
+                Get-Process -Id $child2.Id -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            } finally {
+                Stop-Process -Id $child2.Id -Force -ErrorAction SilentlyContinue
+            }
+        } finally {
+            Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'invalid state.json fails without changing file' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcinv' -Plan (New-OneTaskPlan) | Out-Null
+        $path = Join-Path $repo '.xagent/features/rcinv/state.json'
+        [IO.File]::WriteAllText($path, 'not json', [Text.UTF8Encoding]::new($false))
+        $r = Invoke-Feature @('reconcile', '-Repo', $repo, '-Name', 'rcinv') -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'state.json is not valid'
+        Get-Content -Raw $path | Should -Be 'not json'
+    }
+
+    It 'rebuilds lost tasks and keeps sessionId on reconcile' {
+        $repo = New-TestRepo
+        $twoTask = Get-StandardTwoPhasePlan
+        $twoTask.phases = @($twoTask.phases[0])
+        Import-TestPlan -Repo $repo -Name 'rcrb' -Plan $twoTask | Out-Null
+        & git -C $repo switch 'feature/rcrb' 2>&1 | Out-Null
+        & git -C $repo commit --allow-empty -m 'm' -m 'Xagent-Task: t1' 2>&1 | Out-Null
+        Remove-Item -LiteralPath (Join-Path $repo '.xagent/features/rcrb/state.json') -Force -ErrorAction SilentlyContinue
+        $j = Invoke-ReconcileOk $repo 'rcrb'
+        $j.lost | Should -Be @('t2')
+        $j.lost -is [array] | Should -BeTrue
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcrb/state.json') | ConvertFrom-Json
+        $st.tasks.t1.status | Should -Be 'merged'
+        $st.tasks.t2.status | Should -Be 'pending'
+        $st.lastReconcile | Should -Not -BeNullOrEmpty
+        $sid = 'sess-keep-1'
+        Set-TaskState -Repo $repo -Name 'rcrb' -States @{ t1 = 'merged'; t2 = 'pending' } -ExtraFields @{
+            t2 = @{ sessionId = $sid }
+        }
+        Invoke-ReconcileOk $repo 'rcrb' | Out-Null
+        $st2 = Get-Content -Raw (Join-Path $repo '.xagent/features/rcrb/state.json') | ConvertFrom-Json
+        $st2.tasks.t2.sessionId | Should -Be $sid
+    }
+}
