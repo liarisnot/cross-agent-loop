@@ -1062,3 +1062,557 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks[0].files[0] | Should -Be 'src/a.ts'
     }
 }
+
+Describe 'feature.ps1 task' {
+    It 'sets status, sessionId, resultFile, worktree, baseSha and validates state.json' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'tsk' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $base = & git -C $repo rev-parse 'feature/tsk'
+        $r = Invoke-Feature @(
+            'task', '-Repo', $repo, '-Name', 'tsk', '-Task', 't1',
+            '-Status', 'running', '-SessionId', 's1', '-ResultFile', '/r.json',
+            '-Worktree', 'D:/wt', '-BaseSha', $base
+        ) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $statePath = Join-Path $repo '.xagent/features/tsk/state.json'
+        $stateJson = Get-Content -Raw -LiteralPath $statePath
+        Test-Schema -Json $stateJson -SchemaName 'state' | Should -BeTrue
+        $r.Json.state.status | Should -Be 'running'
+        $r.Json.state.sessionId | Should -Be 's1'
+    }
+
+    It 'stores worktree as absolute path with forward slashes' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'wtrel' -Plan (New-OneTaskPlan) | Out-Null
+        $rel = Join-Path $repo 'sub\wt'
+        New-Item -ItemType Directory -Force (Split-Path $rel) | Out-Null
+        $base = & git -C $repo rev-parse 'feature/wtrel'
+        $r = Invoke-Feature @(
+            'task', '-Repo', $repo, '-Name', 'wtrel', '-Task', 't1',
+            '-Worktree', $rel, '-BaseSha', $base
+        ) -WorkingDirectory $repo
+        $r.Json.state.worktree | Should -Match '^[A-Za-z]:/'
+        $r.Json.state.worktree | Should -Not -Match '\\'
+    }
+
+    It 'only changes passed fields' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'part' -Plan (New-OneTaskPlan) | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'part', '-Task', 't1', '-SessionId', 'keep') -WorkingDirectory $repo)
+        $r = Invoke-Feature @('task', '-Repo', $repo, '-Name', 'part', '-Task', 't1', '-Status', 'running') -WorkingDirectory $repo
+        $r.Json.state.sessionId | Should -Be 'keep'
+        $r = Invoke-Feature @('task', '-Repo', $repo, '-Name', 'part', '-Task', 't1', '-SessionId', '', '-BaseSha', '') -WorkingDirectory $repo
+        $r.Json.state.sessionId | Should -BeNullOrEmpty
+        $r.Json.state.baseSha | Should -BeNullOrEmpty
+    }
+
+    It 'succeeds with no field params and prints default record' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'def' -Plan (New-OneTaskPlan) | Out-Null
+        $r = Invoke-Feature @('task', '-Repo', $repo, '-Name', 'def', '-Task', 't1') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $r.Json.state.status | Should -Be 'pending'
+        $r.Json.state.failures | Should -Be 0
+    }
+
+    It 'keeps another task record and lastReconcile' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'keep' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'keep' -States @{ t2 = 'in-review' }
+        $statePath = Join-Path $repo '.xagent/features/keep/state.json'
+        $lr = (Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json).lastReconcile
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'keep', '-Task', 't1', '-Status', 'running') -WorkingDirectory $repo)
+        $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        $state.tasks.t2.status | Should -Be 'in-review'
+        $state.lastReconcile | Should -Be $lr
+    }
+
+    It 'increments failures on failed and not when already failed' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'fail' -Plan (New-OneTaskPlan) | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1', '-Status', 'failed') -WorkingDirectory $repo)
+        Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1', '-Status', 'failed') -WorkingDirectory $repo | Out-Null
+        $n = (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1') -WorkingDirectory $repo).Json.state.failures
+        $n | Should -Be 1
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1', '-Status', 'pending') -WorkingDirectory $repo)
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1', '-Status', 'failed') -WorkingDirectory $repo)
+        $n2 = (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'fail', '-Task', 't1') -WorkingDirectory $repo).Json.state.failures
+        $n2 | Should -Be 2
+    }
+
+    It 'fails on invalid status, unknown task, bad BaseSha, missing Task' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'err' -Plan (New-OneTaskPlan) | Out-Null
+        $base = & git -C $repo rev-parse 'feature/err'
+        (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'err', '-Task', 't1', '-Status', 'bogus') -WorkingDirectory $repo).Json.error | Should -Match 'invalid status'
+        (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'err', '-Task', 'nope') -WorkingDirectory $repo).Json.error | Should -Match 'unknown task'
+        (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'err', '-Task', 't1', '-BaseSha', 'bad') -WorkingDirectory $repo).Json.error | Should -Match 'invalid -BaseSha'
+        (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'err') -WorkingDirectory $repo).Json.error | Should -Match '-Task is required'
+    }
+
+    It 'does not change git HEAD or porcelain and works on main' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'mainok' -Plan (New-OneTaskPlan) | Out-Null
+        & git -C $repo switch main 2>&1 | Out-Null
+        $headBefore = & git -C $repo rev-parse HEAD
+        $porcBefore = & git -C $repo status --porcelain
+        Assert-FeatureOk (Invoke-Feature @('task', '-Repo', $repo, '-Name', 'mainok', '-Task', 't1', '-Status', 'running') -WorkingDirectory $repo)
+        & git -C $repo rev-parse HEAD | Should -Be $headBefore
+        @(& git -C $repo status --porcelain) | Should -Be @($porcBefore | Where-Object { $_ })
+    }
+}
+
+Describe 'feature.ps1 verify' {
+    It 'lists committed and uncommitted in-scope changes' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vc1' -Files @('src/a.ts')
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content -LiteralPath (Join-Path $wt 'src/a.ts') -Value 'a' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            Set-Content -LiteralPath (Join-Path $wt 'src/a.ts') -Value 'b'
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vc1', '-Task', 't1') -WorkingDirectory $repo
+            Test-Schema -Json $r.Raw -SchemaName 'verify' | Should -BeTrue
+            $r.Json.inScope | Should -BeTrue
+            $r.Json.changed | Should -Contain 'src/a.ts'
+            $r.Json.changed.Count | Should -BeGreaterOrEqual 1
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'matches src/test*.ts glob and folder docs/' {
+        foreach ($case in @(
+                @{ Name = 'vg1'; Files = @('src/test*.ts'); Path = 'src/testing.ts'; In = $true },
+                @{ Name = 'vg2'; Files = @('src/test*.ts'); Path = 'src/other.ts'; In = $false },
+                @{ Name = 'vg3'; Files = @('docs/'); Path = 'docs/a/b.md'; In = $true },
+                @{ Name = 'vg4'; Files = @('docs/'); Path = 'src/docs/x.md'; In = $false },
+                @{ Name = 'vg5'; Files = @('src/**/x.ts'); Path = 'src/x.ts'; In = $true },
+                @{ Name = 'vg6'; Files = @('src/**/x.ts'); Path = 'src/a/b/x.ts'; In = $true },
+                @{ Name = 'vg7'; Files = @('src/**/x.ts'); Path = 'src/y.ts'; In = $false }
+            )) {
+            $repo = New-TestRepo
+            $wt = $null
+            try {
+                $ctx = New-TaskWorktree -Repo $repo -Name $case.Name -Files $case.Files
+                $wt = (Get-TaskWorktreeRoot $ctx)
+                $dir = Split-Path (Join-Path $wt $case.Path) -Parent
+                New-Item -ItemType Directory -Force $dir | Out-Null
+                Set-Content -LiteralPath (Join-Path $wt $case.Path) -Value 'x' -NoNewline
+                & git -C $wt add -- $case.Path 2>&1 | Out-Null
+                & git -C $wt commit -m c 2>&1 | Out-Null
+                $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', $case.Name, '-Task', 't1') -WorkingDirectory $repo
+                $r.Json.inScope | Should -Be $case.In
+                if (-not $case.In) { $r.Json.outOfScope | Should -Contain $case.Path }
+            } finally {
+                if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+            }
+        }
+    }
+
+    It 'counts untracked, ignores __pycache__ and .xagent' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            Import-TestPlan -Repo $repo -Name 'vu' -Plan (New-OneTaskPlan -Files @('src/a.ts')) | Out-Null
+            Set-Content (Join-Path $repo '.gitignore') -Value '__pycache__/'
+            & git -C $repo add .gitignore 2>&1 | Out-Null
+            & git -C $repo commit -m 'ignore pycache' 2>&1 | Out-Null
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vu' -Files @('src/a.ts') -NoRecord -SkipPlanImport
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            Assert-FeatureOk (Invoke-Feature @(
+                    'task', '-Repo', $repo, '-Name', 'vu', '-Task', 't1',
+                    '-Worktree', $wt, '-BaseSha', $ctx.BaseSha
+                ) -WorkingDirectory $repo)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/new.ts') -Value 'n'
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src/__pycache__') | Out-Null
+            Set-Content (Join-Path $wt 'src/__pycache__/z.pyc') -Value 'z'
+            New-Item -ItemType Directory -Force (Join-Path $wt '.xagent') | Out-Null
+            Set-Content (Join-Path $wt '.xagent/local.json') -Value '{}'
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vu', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.changed | Should -Contain 'src/new.ts'
+            $r.Json.changed | Should -Not -Contain 'src/__pycache__/z.pyc'
+            $r.Json.changed | Should -Not -Contain '.xagent/local.json'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'serializes changed as JSON array for zero or one element' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'varr' -Files @('only.ts')
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            Set-Content (Join-Path $wt 'only.ts') -Value '1' -NoNewline
+            & git -C $wt add only.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'varr', '-Task', 't1') -WorkingDirectory $repo
+            $r.Raw | Should -Match '"changed":\["only\.ts"\]'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+        $repo2 = New-TestRepo
+        $wt2 = $null
+        try {
+            $wt2 = Get-TaskWorktreeRoot (New-TaskWorktree -Repo $repo2 -Name 'vempty' -Files @('none.ts'))
+            $r2 = Invoke-Feature @('verify', '-Repo', $repo2, '-Name', 'vempty', '-Task', 't1') -WorkingDirectory $repo2
+            $r2.Raw | Should -Match '"changed":\[\]'
+        } finally {
+            if ($wt2) { Remove-TaskWorktree -Repo $repo2 -WtRoot $wt2 }
+        }
+    }
+
+    It 'runs test command and records pass or fail with exit 0 on verify' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vtpass' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtpass', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.passed | Should -BeTrue
+            $r.Json.test.exitCode | Should -Be 0
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+        $repo2 = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo2 -Name 'vtfail' -Test 'pwsh -NoProfile -c "exit 3"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo2, '-Name', 'vtfail', '-Task', 't1') -WorkingDirectory $repo2
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be 3
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo2 -WtRoot $wt }
+        }
+    }
+
+    It 'captures hello in tail' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vtail' -Test 'pwsh -NoProfile -c "Write-Output hello"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtail', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.test.tail | Should -Match 'hello'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'times out and kills process tree' {
+        $repo = New-TestRepo
+        $wt = $null
+        $sleeperPid = $null
+        try {
+            $cmd = 'pwsh -NoProfile -c ''$PID | Set-Content sleeper.pid; Start-Sleep 30'''
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vto' -Test $cmd
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vto', '-Task', 't1', '-TimeoutSec', '5') -WorkingDirectory $repo
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.tail | Should -Match 'timed out after 5 s'
+            $pidFile = Join-Path $wt 'sleeper.pid'
+            if (Test-Path -LiteralPath $pidFile) {
+                $sleeperPid = [int](Get-Content -LiteralPath $pidFile -Raw).Trim()
+            }
+            if (-not $sleeperPid) { Set-ItResult -Failed -Because 'sleeper.pid missing' }
+            $running = Get-Process -Id $sleeperPid -ErrorAction SilentlyContinue
+            $running | Should -BeNullOrEmpty
+        } finally {
+            if ($sleeperPid) {
+                Stop-Process -Id $sleeperPid -Force -ErrorAction SilentlyContinue
+            }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'stores verify in state without changing status' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vst' -Files @('src/a.ts') -NoRecord
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $base = & git -C $repo rev-parse 'feature/vst'
+            Assert-FeatureOk (Invoke-Feature @(
+                    'task', '-Repo', $repo, '-Name', 'vst', '-Task', 't1',
+                    '-Worktree', $wt, '-BaseSha', $base, '-Status', 'in-review'
+                ) -WorkingDirectory $repo)
+            Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vst', '-Task', 't1') -WorkingDirectory $repo | Out-Null
+            $state = Get-Content -Raw (Join-Path $repo '.xagent/features/vst/state.json') | ConvertFrom-Json
+            $state.tasks.t1.verify | Should -Not -BeNullOrEmpty
+            $state.tasks.t1.status | Should -Be 'in-review'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'does not change worktree git status or HEAD' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vwt' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $head = & git -C $wt rev-parse HEAD
+            $porc = & git -C $wt status --porcelain
+            Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vwt', '-Task', 't1') -WorkingDirectory $repo | Out-Null
+            & git -C $wt rev-parse HEAD | Should -Be $head
+            @(& git -C $wt status --porcelain) | Should -Be @($porc | Where-Object { $_ })
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'fails without worktree and when folder missing' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'vnowt' -Plan (New-OneTaskPlan) | Out-Null
+        (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vnowt', '-Task', 't1') -WorkingDirectory $repo).Json.error | Should -Match 'no worktree in state'
+        $repo2 = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo2 -Name 'vgone' -NoRecord
+        $base = $ctx.BaseSha
+        Assert-FeatureOk (Invoke-Feature @(
+                'task', '-Repo', $repo2, '-Name', 'vgone', '-Task', 't1',
+                '-Worktree', (Get-TaskWorktreeRoot $ctx), '-BaseSha', $base
+            ) -WorkingDirectory $repo2)
+        Remove-TaskWorktree -Repo $repo2 -WtRoot (Get-TaskWorktreeRoot $ctx)
+        (Invoke-Feature @('verify', '-Repo', $repo2, '-Name', 'vgone', '-Task', 't1') -WorkingDirectory $repo2).Json.error | Should -Match 'worktree not found'
+    }
+
+    It 'computes changed before test writes out.txt' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $test = 'pwsh -NoProfile -c "Set-Content out.txt x"'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vpre' -Test $test
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vpre', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.changed | Should -Not -Contain 'out.txt'
+            Test-Path (Join-Path $wt 'out.txt') | Should -BeTrue
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'fails invalid TimeoutSec, unknown task, missing Task' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'verr' -Plan (New-OneTaskPlan) | Out-Null
+        foreach ($t in @('0', '-1', 'abc')) {
+            (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr', '-Task', 't1', '-TimeoutSec', $t) -WorkingDirectory $repo).Json.error | Should -Match 'invalid -TimeoutSec'
+        }
+        (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr', '-Task', 'nope') -WorkingDirectory $repo).Json.error | Should -Match 'unknown task'
+        (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr') -WorkingDirectory $repo).Json.error | Should -Match '-Task is required'
+    }
+}
+
+Describe 'feature.ps1 merge' {
+    It 'merges task branch with trailer and updates state' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'mg1'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'ok' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m 'task change' 2>&1 | Out-Null
+            & git -C $repo switch "feature/mg1" 2>&1 | Out-Null
+            Test-Path (Join-Path $repo '.git/MERGE_HEAD') | Should -BeFalse
+            $r = Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mg1', '-Task', 't1', '-Message', 'merge t1') -WorkingDirectory $repo
+            $r.Json.ok | Should -BeTrue
+            $parents = @(& git -C $repo rev-parse HEAD^@)
+            $parents.Count | Should -Be 2
+            (& git -C $repo log -1 --format=%s) | Should -Be 'merge t1'
+            $taskTrailer = @(& git -C $repo log -1 --format='%(trailers:key=Xagent-Task,valueonly)') | Where-Object { $_ } | Select-Object -First 1
+            $taskTrailer | Should -Be 't1'
+            $st = Get-Content -Raw (Join-Path $repo '.xagent/features/mg1/state.json') | ConvertFrom-Json
+            $st.tasks.t1.status | Should -Be 'merged'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'rejects re-plan change to merged task' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'mgplan'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'x' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            & git -C $repo switch 'feature/mgplan' 2>&1 | Out-Null
+            Assert-FeatureOk (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgplan', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo)
+            $plan = New-OneTaskPlan
+            $plan.phases[0].tasks[0].brief = 'changed'
+            $planPath = Join-Path $TestDrive 'replan.json'
+            New-PlanFile -Path $planPath -Plan $plan
+            $r = Invoke-Feature @('plan', '-PlanFile', $planPath, '-Repo', $repo, '-Name', 'mgplan') -WorkingDirectory $repo
+            $r.Json.error | Should -Match 'already merged'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses merge when feature repo working tree is dirty' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgdirty'
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            Set-Content (Join-Path $repo 'README.md') -Value 'dirty'
+            (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgdirty', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'working tree is not clean'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses merge when main is checked out' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgmain'
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            & git -C $repo switch main 2>&1 | Out-Null
+            (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgmain', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'check out feature/'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses merge when task branch is missing' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgnobr'
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            & git -C $repo switch 'feature/mgnobr' 2>&1 | Out-Null
+            Remove-TaskWorktree -Repo $repo -WtRoot $wt
+            $wt = $null
+            & git -C $repo branch -D $ctx.AgentBranch 2>&1 | Out-Null
+            (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgnobr', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'no branch'
+        } finally {
+            if ($wt -and (Test-Path $wt)) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses merge when task branch is already merged' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgdone'
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'c' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            & git -C $repo switch 'feature/mgdone' 2>&1 | Out-Null
+            Assert-FeatureOk (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgdone', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo)
+            (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgdone', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'already merged'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses merge when worktree has uncommitted changes' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgun' -NoRecord
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            $base = $ctx.BaseSha
+            Assert-FeatureOk (Invoke-Feature @(
+                    'task', '-Repo', $repo, '-Name', 'mgun', '-Task', 't1',
+                    '-Worktree', $wt, '-BaseSha', $base
+                ) -WorkingDirectory $repo)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'x' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m 'agent work' 2>&1 | Out-Null
+            Set-Content (Join-Path $wt 'untracked.txt') -Value 'u'
+            & git -C $repo switch 'feature/mgun' 2>&1 | Out-Null
+            (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgun', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'uncommitted changes'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'aborts on conflict and keeps HEAD clean' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'mgc'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $repo 'src') | Out-Null
+            Set-Content (Join-Path $repo 'src/a.ts') -Value 'feature' -NoNewline
+            & git -C $repo add src/a.ts 2>&1 | Out-Null
+            & git -C $repo commit -m 'on feature' 2>&1 | Out-Null
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'agent' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m 'on agent' 2>&1 | Out-Null
+            $headBefore = & git -C $repo rev-parse HEAD
+            $r = Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgc', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo
+            $r.Json.error | Should -Match 'merge conflict in'
+            $r.Json.error | Should -Match 'src/a.ts'
+            & git -C $repo rev-parse HEAD | Should -Be $headBefore
+            & git -C $repo rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+            $LASTEXITCODE | Should -Not -Be 0
+            @(& git -C $repo status --porcelain) | Where-Object { $_ } | Should -BeNullOrEmpty
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'fails on missing Message, unknown task, merge in progress' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'mge' -Plan (New-OneTaskPlan) | Out-Null
+        (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mge', '-Task', 't1') -WorkingDirectory $repo).Json.error | Should -Match '-Message is required'
+        (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mge', '-Task', 'nope', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'unknown task'
+        $repo2 = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo2 -Name 'mginp' -NoRecord
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            New-Item -ItemType Directory -Force (Join-Path $repo2 'src') | Out-Null
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $repo2 'src/x.ts') -Value 'x' -NoNewline
+            Set-Content (Join-Path $wt 'src/x.ts') -Value 'y' -NoNewline
+            & git -C $repo2 add src/x.ts 2>&1 | Out-Null
+            & git -C $wt add src/x.ts 2>&1 | Out-Null
+            & git -C $repo2 commit -m f 2>&1 | Out-Null
+            & git -C $wt commit -m a 2>&1 | Out-Null
+            & git -C $repo2 switch 'feature/mginp' 2>&1 | Out-Null
+            & git -C $repo2 merge $ctx.AgentBranch 2>&1 | Out-Null
+            (Invoke-Feature @('merge', '-Repo', $repo2, '-Name', 'mginp', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo2).Json.error | Should -Match 'merge is in progress'
+            & git -C $repo2 merge --abort 2>&1 | Out-Null
+        } finally {
+            Remove-TaskWorktree -Repo $repo2 -WtRoot $wt
+        }
+    }
+
+    It 'keeps other task state and lastReconcile after merge' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            Import-TestPlan -Repo $repo -Name 'mgkeep' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+            Set-TaskState -Repo $repo -Name 'mgkeep' -States @{ t2 = 'running' }
+            $ctx = New-TaskWorktree -Repo $repo -Name 'mgkeep' -Files @('src/a.ts') -SkipPlanImport
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'z' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            & git -C $repo switch 'feature/mgkeep' 2>&1 | Out-Null
+            $lr = (Get-Content -Raw (Join-Path $repo '.xagent/features/mgkeep/state.json') | ConvertFrom-Json).lastReconcile
+            Assert-FeatureOk (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgkeep', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo)
+            $state = Get-Content -Raw (Join-Path $repo '.xagent/features/mgkeep/state.json') | ConvertFrom-Json
+            $state.tasks.t1.status | Should -Be 'merged'
+            $state.tasks.t2.status | Should -Be 'running'
+            $state.lastReconcile | Should -Be $lr
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+}

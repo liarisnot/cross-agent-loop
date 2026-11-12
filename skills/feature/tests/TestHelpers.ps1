@@ -221,6 +221,95 @@ function Write-FeatureJsonFileLocal {
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
 }
 
+function New-OneTaskPlan {
+    param(
+        [string]$TaskId = 't1',
+        [string[]]$Files = @('src/a.ts'),
+        [string]$Test = 'pwsh -NoProfile -c "exit 0"'
+    )
+    return @{
+        summary = 'one task plan'
+        phases  = @(
+            @{
+                n         = 1
+                rationale = 'R'
+                test      = 'pwsh -NoProfile -c "exit 0"'
+                tasks     = @(
+                    @{
+                        id        = $TaskId
+                        title     = 'Task'
+                        dependsOn = @()
+                        files     = $Files
+                        test      = $Test
+                        profile   = 'code'
+                        brief     = 'Brief'
+                    }
+                )
+            }
+        )
+    }
+}
+
+function New-TaskWorktree {
+    param(
+        [string]$Repo,
+        [string]$Name,
+        [string]$TaskId = 't1',
+        [string[]]$Files = @('src/a.ts'),
+        [string]$Test = 'pwsh -NoProfile -c "exit 0"',
+        [switch]$NoRecord,
+        [switch]$SkipPlanImport
+    )
+    if (-not $SkipPlanImport) {
+        Import-TestPlan -Repo $Repo -Name $Name -Plan (New-OneTaskPlan -TaskId $TaskId -Files $Files -Test $Test) | Out-Null
+    }
+    $featJson = (& git -C $Repo show "HEAD:docs/features/$Name/feature.json") -join "`n" | ConvertFrom-Json
+    $delegateId = $null
+    foreach ($ph in @($featJson.phases)) {
+        foreach ($t in @($ph.tasks)) {
+            if ([string]$t.id -ceq $TaskId) {
+                $delegateId = [string]$t.delegateTaskId
+                break
+            }
+        }
+    }
+    if (-not $delegateId) { throw 'delegateTaskId not found' }
+    $base = @(& git -C $Repo rev-parse "feature/$Name")[0]
+    $driveRoot = [IO.Path]::GetFullPath(([string]$TestDrive).Trim())
+    $wtRootPath = Join-Path $driveRoot ('wt-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $wtRootPath = [IO.Path]::GetFullPath($wtRootPath).Trim()
+    if (-not $wtRootPath) { throw 'empty worktree path' }
+    & git -C $Repo worktree add -b "xagent/$delegateId" $wtRootPath "feature/$Name" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'worktree add failed' }
+    if (-not $NoRecord) {
+        Assert-FeatureOk (Invoke-Feature @(
+                'task', '-Repo', $Repo, '-Name', $Name, '-Task', $TaskId,
+                '-Worktree', $wtRootPath, '-BaseSha', $base
+            ) -WorkingDirectory $Repo)
+    }
+    return [pscustomobject]@{
+        Dir            = [string]$wtRootPath
+        AgentBranch    = [string]"xagent/$delegateId"
+        BaseSha        = [string]$base
+        TaskId         = [string]$TaskId
+        DelegateTaskId = [string]$delegateId
+    }
+}
+
+function Get-TaskWorktreeRoot {
+    param($Ctx)
+    return ([string]$Ctx.Dir).Trim()
+}
+
+function Remove-TaskWorktree {
+    param(
+        [string]$Repo,
+        [string]$WtRoot
+    )
+    & git -C $Repo worktree remove --force $WtRoot 2>&1 | Out-Null
+    & git -C $Repo worktree prune 2>&1 | Out-Null
+}
+
 function New-OverlapTestPlan {
     param(
         [string]$FileA,

@@ -17,7 +17,14 @@ param(
     [string]$Section,
     [string]$Message,
     [string]$Mode,
-    [string]$PlanFile
+    [string]$PlanFile,
+    [string]$Task,
+    [string]$Status,
+    [string]$SessionId,
+    [string]$ResultFile,
+    [string]$Worktree,
+    [string]$BaseSha,
+    [string]$TimeoutSec
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +42,9 @@ $script:DecisionKinds = @('decision', 'gate', 'stage', 'round', 'council', 'fix-
 $script:SkillDir = Split-Path $PSScriptRoot -Parent
 $script:SchemaFeature = Join-Path $script:SkillDir 'schemas/feature.schema.json'
 $script:SchemaPlan = Join-Path $script:SkillDir 'schemas/plan.schema.json'
+$script:SchemaState = Join-Path $script:SkillDir 'schemas/state.schema.json'
+$script:SchemaVerify = Join-Path $script:SkillDir 'schemas/verify.schema.json'
+$script:TaskStatuses = @('pending', 'preflight', 'running', 'in-review', 'merged', 'failed')
 $script:ModelsPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate/models.json'))
 $script:TemplateDecisions = Join-Path $script:SkillDir 'templates/decisions.md'
 $script:LockHeld = $false
@@ -919,7 +929,7 @@ function Invoke-PlanFeature {
 function Get-OverlapKey([string]$FileEntry) {
     $p = ([string]$FileEntry) -replace '\\', '/'
     $p = $p.ToLowerInvariant()
-    if ($p.StartsWith('./')) { $p = $p.Substring(2) }
+    if ($p.StartsWith('./', [StringComparison]::Ordinal)) { $p = $p.Substring(2) }
     if ($p -notmatch '[\*\?\[]') { return $p }
     $m = [regex]::Match($p, '[\*\?\[]')
     $before = $p.Substring(0, $m.Index)
@@ -932,7 +942,7 @@ function Test-OverlapKeysOverlap([string]$A, [string]$B) {
     if ($A -eq '' -or $B -eq '') { return $true }
     $aCmp = if ($A.EndsWith('/')) { $A } else { "$A/" }
     $bCmp = if ($B.EndsWith('/')) { $B } else { "$B/" }
-    return ($aCmp.StartsWith($bCmp) -or $bCmp.StartsWith($aCmp))
+    return ($aCmp.StartsWith($bCmp, [StringComparison]::Ordinal) -or $bCmp.StartsWith($aCmp, [StringComparison]::Ordinal))
 }
 
 function Test-TaskFileSetsOverlap([string[]]$FilesA, [string[]]$FilesB) {
@@ -1114,6 +1124,475 @@ function Invoke-ScheduleFeature {
     Out-FeatureOk @{ liveRuns = $liveRuns; cap = $cap; tasks = @($tasksOut) }
 }
 
+function Test-StateJsonSchema([string]$json) {
+    if (-not (Test-Json -Json $json -SchemaFile $script:SchemaState -ErrorAction SilentlyContinue)) {
+        throw 'state.json does not match state.schema.json'
+    }
+}
+
+function New-DefaultTaskStateRecord {
+    return [ordered]@{
+        status     = 'pending'
+        failures   = 0
+        sessionId  = $null
+        resultFile = $null
+        worktree   = $null
+        baseSha    = $null
+        verify     = $null
+    }
+}
+
+function Copy-TaskStateRecord([object]$Rec) {
+    $out = New-DefaultTaskStateRecord
+    if ($null -eq $Rec) { return $out }
+    if ($Rec -is [System.Collections.IDictionary]) {
+        if ($Rec.Contains('status') -and $null -ne $Rec['status']) { $out.status = [string]$Rec['status'] }
+        if ($Rec.Contains('failures') -and $null -ne $Rec['failures']) { $out.failures = [int]$Rec['failures'] }
+        foreach ($f in @('sessionId', 'resultFile', 'worktree', 'baseSha', 'verify')) {
+            if ($Rec.Contains($f)) { $out[$f] = $Rec[$f] }
+        }
+        return $out
+    }
+    if ($null -ne $Rec.PSObject.Properties['status'] -and $null -ne $Rec.status) {
+        $out.status = [string]$Rec.status
+    }
+    if ($null -ne $Rec.PSObject.Properties['failures'] -and $null -ne $Rec.failures) {
+        $out.failures = [int]$Rec.failures
+    }
+    foreach ($f in @('sessionId', 'resultFile', 'worktree', 'baseSha')) {
+        $p = $Rec.PSObject.Properties[$f]
+        if ($null -ne $p) { $out[$f] = $p.Value }
+    }
+    $vp = $Rec.PSObject.Properties['verify']
+    if ($null -ne $vp) { $out.verify = $vp.Value }
+    return $out
+}
+
+function Get-FeatureStateObject {
+    param([string]$Repository, [string]$FeatureName)
+    $path = Join-Path $Repository ".xagent/features/$FeatureName/state.json"
+    if (-not (Test-Path -LiteralPath $path)) {
+        return @{
+            name  = $FeatureName
+            tasks = @{}
+        }
+    }
+    $raw = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false))
+    $obj = $raw | ConvertFrom-Json
+    $tasks = @{}
+    if ($null -ne $obj.PSObject.Properties['tasks'] -and $null -ne $obj.tasks) {
+        foreach ($prop in $obj.tasks.PSObject.Properties) {
+            $tasks[$prop.Name] = Copy-TaskStateRecord $prop.Value
+        }
+    }
+    $state = @{
+        name  = $FeatureName
+        tasks = $tasks
+    }
+    $lr = $obj.PSObject.Properties['lastReconcile']
+    if ($null -ne $lr -and $null -ne $lr.Value) {
+        $state.lastReconcile = ([datetime]$lr.Value).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    return $state
+}
+
+function Write-FeatureStateObject {
+    param([string]$Repository, [string]$FeatureName, $State)
+    $path = Join-Path $Repository ".xagent/features/$FeatureName/state.json"
+    $dir = Split-Path $path -Parent
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $body = @{
+        name  = $FeatureName
+        tasks = $State.tasks
+    }
+    if ($State.ContainsKey('lastReconcile') -and $null -ne $State.lastReconcile) {
+        $body['lastReconcile'] = $State.lastReconcile
+    }
+    $json = $body | ConvertTo-Json -Depth 10
+    $json = $json -replace "`r`n", "`n" -replace "`r", "`n"
+    if (-not $json.EndsWith("`n")) { $json += "`n" }
+    Test-StateJsonSchema $json
+    Write-TextLf $path $json.TrimEnd("`n")
+}
+
+function Set-FeatureStateTask {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$TaskId,
+        [scriptblock]$Update
+    )
+    $state = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
+    $rec = if ($state.tasks.ContainsKey($TaskId)) {
+        Copy-TaskStateRecord $state.tasks[$TaskId]
+    }
+    else {
+        New-DefaultTaskStateRecord
+    }
+    & $Update $rec
+    $state.tasks[$TaskId] = $rec
+    Write-FeatureStateObject -Repository $Repository -FeatureName $FeatureName -State $state
+    return $rec
+}
+
+function Get-PlanTaskFromFeature {
+    param([string]$Repository, [string]$FeatureName, [string]$TaskId)
+    $branch = "feature/$FeatureName"
+    & git -C $Repository show-ref --verify --quiet "refs/heads/$branch" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "no feature $FeatureName" }
+    $feat = Get-FeatureJsonFromRef $Repository $branch $FeatureName
+    if (-not $feat) { throw "no feature $FeatureName" }
+    $planTask = Get-HeadPlanTaskById -Feature $feat -TaskId $TaskId
+    if (-not $planTask) { throw "unknown task $TaskId" }
+    return $planTask
+}
+
+function Normalize-ScopePath([string]$Path) {
+    $p = ([string]$Path) -replace '\\', '/'
+    $p = $p.ToLowerInvariant()
+    if ($p.StartsWith('./', [StringComparison]::Ordinal)) { $p = $p.Substring(2) }
+    return $p
+}
+
+function Convert-ScopeGlobToRegex([string]$Glob) {
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.Append('^')
+    $i = 0
+    while ($i -lt $Glob.Length) {
+        $c = $Glob[$i]
+        if ($c -eq '*' -and ($i + 1) -lt $Glob.Length -and $Glob[$i + 1] -eq '*') {
+            if (($i + 2) -lt $Glob.Length -and $Glob[$i + 2] -eq '/') {
+                [void]$sb.Append('(?:[^/]+/)*')
+                $i += 3
+            } else {
+                [void]$sb.Append('(?s:.*)')
+                $i += 2
+            }
+        } elseif ($c -eq '*') {
+            [void]$sb.Append('[^/]*')
+            $i++
+        } elseif ($c -eq '?') {
+            [void]$sb.Append('[^/]')
+            $i++
+        } else {
+            if ($c -match '[\.\+\^\$\{\}\(\)\|\[\]\\]') { [void]$sb.Append('\') }
+            [void]$sb.Append($c)
+            $i++
+        }
+    }
+    [void]$sb.Append('$')
+    return $sb.ToString()
+}
+
+function Test-PathInScope {
+    param([string]$Path, [string[]]$ScopeFiles)
+    $normPath = Normalize-ScopePath $Path
+    foreach ($entry in @($ScopeFiles)) {
+        $normEntry = Normalize-ScopePath $entry
+        if ($normEntry.EndsWith('/')) {
+            if ($normPath.StartsWith($normEntry, [StringComparison]::Ordinal)) { return $true }
+            continue
+        }
+        if ($normEntry -notmatch '[\*\?]') {
+            if ($normPath -ceq $normEntry) { return $true }
+            continue
+        }
+        $rx = Convert-ScopeGlobToRegex $normEntry
+        if ([regex]::IsMatch($normPath, $rx)) { return $true }
+    }
+    return $false
+}
+
+function Get-ChangedPaths {
+    param([string]$WorktreePath, [string]$BaseSha)
+    $gitBase = @('-c', 'core.quotepath=off', '-C', $WorktreePath)
+    $diffOut = @(& git @gitBase 'diff' '--name-only' $BaseSha 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "git diff --name-only $BaseSha failed" }
+    $untracked = @(& git @gitBase 'ls-files' '--others' '--exclude-standard' 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'git ls-files --others failed' }
+    $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($p in (@($diffOut) + @($untracked))) {
+        $line = ([string]$p).Trim()
+        if (-not $line) { continue }
+        if ($line.StartsWith('.xagent/', [StringComparison]::Ordinal)) { continue }
+        [void]$set.Add($line)
+    }
+    $arr = [string[]]::new($set.Count)
+    $set.CopyTo($arr)
+    [Array]::Sort($arr, [StringComparer]::Ordinal)
+    return ,[string[]]$arr
+}
+
+function Invoke-TaskTestCommand {
+    param(
+        [string]$WorktreePath,
+        [string]$TestCommand,
+        [int]$TimeoutSec
+    )
+    $wrapper = @"
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new(`$false)
+`$ErrorActionPreference = 'Stop'
+`$global:LASTEXITCODE = 0
+try { & { $TestCommand } 2>&1 | ForEach-Object { "`$_" } } catch { "`$_"; exit 1 }
+exit `$LASTEXITCODE
+"@
+    $bytes = [Text.Encoding]::Unicode.GetBytes($wrapper)
+    $encoded = [Convert]::ToBase64String($bytes)
+    $outFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-out-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $errFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-err-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    $exitCode = 0
+    $timedOut = $false
+    try {
+        $proc = Start-Process -FilePath 'pwsh' -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded
+        ) -WorkingDirectory $WorktreePath -PassThru -NoNewWindow `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $waited = $proc.WaitForExit($TimeoutSec * 1000)
+        if (-not $waited) {
+            $timedOut = $true
+            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
+            $proc.WaitForExit(10000) | Out-Null
+            $exitCode = -1
+        } else {
+            $exitCode = $proc.ExitCode
+        }
+    } finally {
+        $stdout = ''
+        $stderr = ''
+        if (Test-Path -LiteralPath $outFile) {
+            $stdout = [IO.File]::ReadAllText($outFile, [Text.UTF8Encoding]::new($false))
+        }
+        if (Test-Path -LiteralPath $errFile) {
+            $stderr = [IO.File]::ReadAllText($errFile, [Text.UTF8Encoding]::new($false))
+        }
+        Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($ln in (($stdout -split "`n") + ($stderr -split "`n"))) {
+        $lines.Add($ln.TrimEnd("`r"))
+    }
+    while ($lines.Count -gt 0 -and [string]::IsNullOrEmpty($lines[$lines.Count - 1])) {
+        $lines.RemoveAt($lines.Count - 1)
+    }
+    $take = [Math]::Min(40, $lines.Count)
+    $tailLines = if ($take -eq 0) { @() } else { $lines.GetRange($lines.Count - $take, $take) }
+    if ($timedOut) {
+        $tailLines += "timed out after $TimeoutSec s"
+    }
+    $tail = ($tailLines -join "`n")
+    return @{
+        command  = $TestCommand
+        passed   = ($exitCode -eq 0)
+        exitCode = $exitCode
+        tail     = $tail
+    }
+}
+
+function Invoke-TaskFeature {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [hashtable]$Bound
+    )
+    if (-not $Bound) { $Bound = @{} }
+    if (-not $Task) { throw '-Task is required' }
+    $null = Get-PlanTaskFromFeature -Repository $Repository -FeatureName $FeatureName -TaskId $Task
+
+    $setStatus = $Bound.ContainsKey('Status')
+    $setSession = $Bound.ContainsKey('SessionId')
+    $setResult = $Bound.ContainsKey('ResultFile')
+    $setWorktree = $Bound.ContainsKey('Worktree')
+    $setBaseSha = $Bound.ContainsKey('BaseSha')
+
+    Enter-FeatureLock $Repository $FeatureName
+    try {
+        $rec = Set-FeatureStateTask -Repository $Repository -FeatureName $FeatureName -TaskId $Task -Update {
+            param($r)
+            if ($setStatus) {
+                if ($Status -eq '') { throw "invalid status $Status" }
+                if ($script:TaskStatuses -notcontains $Status) { throw "invalid status $Status" }
+                if ($Status -eq 'failed' -and $r.status -cne 'failed') {
+                    $r.failures = [int]$r.failures + 1
+                }
+                $r.status = $Status
+            }
+            if ($setSession) {
+                $r.sessionId = if ($SessionId -eq '') { $null } else { $SessionId }
+            }
+            if ($setResult) {
+                $r.resultFile = if ($ResultFile -eq '') { $null } else { $ResultFile }
+            }
+            if ($setWorktree) {
+                if ($Worktree -eq '') {
+                    $r.worktree = $null
+                } else {
+                    $full = [IO.Path]::GetFullPath($Worktree.Trim())
+                    $r.worktree = $full.Replace('\', '/')
+                }
+            }
+            if ($setBaseSha) {
+                if ($BaseSha -eq '') {
+                    $r.baseSha = $null
+                } elseif ($BaseSha -notmatch '^[0-9a-f]{40}$') {
+                    throw 'invalid -BaseSha'
+                } else {
+                    $r.baseSha = $BaseSha
+                }
+            }
+        }
+        Out-FeatureOk @{ name = $FeatureName; task = $Task; state = $rec }
+    } finally {
+        Exit-FeatureLock
+    }
+}
+
+function Invoke-VerifyFeature {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [hashtable]$Bound
+    )
+    if (-not $Bound) { $Bound = @{} }
+    if (-not $Task) { throw '-Task is required' }
+    $planTask = Get-PlanTaskFromFeature -Repository $Repository -FeatureName $FeatureName -TaskId $Task
+    $timeout = 900
+    if ($Bound.ContainsKey('TimeoutSec')) {
+        $parsed = 0
+        if (-not [int]::TryParse($TimeoutSec, [ref]$parsed) -or $parsed -le 0) {
+            throw 'invalid -TimeoutSec'
+        }
+        $timeout = $parsed
+    }
+
+    $stateObj = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
+    if (-not $stateObj.tasks.ContainsKey($Task)) {
+        throw "task $Task has no worktree in state.json; set it with task -Worktree -BaseSha"
+    }
+    $taskRec = $stateObj.tasks[$Task]
+    $wt = $taskRec.worktree
+    $base = $taskRec.baseSha
+    if ($null -eq $wt -or $null -eq $base) {
+        throw "task $Task has no worktree in state.json; set it with task -Worktree -BaseSha"
+    }
+    if (-not (Test-Path -LiteralPath $wt)) {
+        throw "worktree not found: $wt"
+    }
+
+    $changed = Get-ChangedPaths -WorktreePath $wt -BaseSha $base
+    $scopeFiles = Get-JsonPropertyStringArray $planTask 'files'
+    $outOfScope = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in $changed) {
+        if (-not (Test-PathInScope -Path $p -ScopeFiles $scopeFiles)) {
+            $outOfScope.Add($p) | Out-Null
+        }
+    }
+    $outArr = @($outOfScope.ToArray())
+    $inScope = ($outArr.Count -eq 0)
+    $testCmd = [string]$planTask.test
+    $testResult = Invoke-TaskTestCommand -WorktreePath $wt -TestCommand $testCmd -TimeoutSec $timeout
+
+    $verifyRec = [ordered]@{
+        at          = Get-UtcDecisionTime
+        inScope     = $inScope
+        changed     = [string[]]@($changed)
+        outOfScope  = [string[]]@($outArr)
+        test        = $testResult
+    }
+
+    Enter-FeatureLock $Repository $FeatureName
+    try {
+        Set-FeatureStateTask -Repository $Repository -FeatureName $FeatureName -TaskId $Task -Update {
+            param($r)
+            $r.verify = [pscustomobject]$verifyRec
+        } | Out-Null
+    } finally {
+        Exit-FeatureLock
+    }
+
+    Out-FeatureOk @{
+        name       = $FeatureName
+        task       = $Task
+        inScope    = $inScope
+        changed    = [string[]]@($changed)
+        outOfScope = [string[]]@($outArr)
+        test       = $testResult
+    }
+}
+
+function Invoke-MergeFeature {
+    param([string]$Repository, [string]$FeatureName)
+    if (-not $Task) { throw '-Task is required' }
+    Assert-OneLine 'Message' $Message
+    if (-not $Message) { throw '-Message is required' }
+
+    $planTask = Get-PlanTaskFromFeature -Repository $Repository -FeatureName $FeatureName -TaskId $Task
+    $delegateTaskId = [string]$planTask.delegateTaskId
+    $agentBranch = "xagent/$delegateTaskId"
+
+    Enter-FeatureLock $Repository $FeatureName
+    try {
+        & git -C $Repository rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { throw 'a merge is in progress; finish or abort it first' }
+
+        if (-not (Test-TreeClean $Repository)) { throw 'working tree is not clean' }
+        Assert-OnFeatureBranch $Repository $FeatureName
+
+        & git -C $Repository show-ref --verify --quiet "refs/heads/$agentBranch" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "no branch $agentBranch" }
+
+        $featureBranch = "feature/$FeatureName"
+        if (Test-MergeBaseIsAncestor $Repository $agentBranch $featureBranch) {
+            throw "$agentBranch is already merged"
+        }
+
+        $stateObj = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
+        if ($stateObj.tasks.ContainsKey($Task)) {
+            $wt = $stateObj.tasks[$Task].worktree
+            if ($null -ne $wt -and (Test-Path -LiteralPath $wt)) {
+                $porcelain = & git -C $wt 'status' '--porcelain' '--untracked-files=all' 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "git status in worktree: $porcelain" }
+                if ((@(@($porcelain) | Where-Object { $_ })).Count -gt 0) {
+                    throw "worktree has uncommitted changes; commit them on $agentBranch first"
+                }
+            }
+        }
+
+        $out = & git -C $Repository merge --no-ff -m $Message -m "Xagent-Task: $Task" $agentBranch 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $conflictFiles = @()
+            try {
+                $conflictFiles = @(Invoke-GitRepo $Repository 'diff' '--name-only' '--diff-filter=U')
+            } catch { }
+            $hasMergeHead = $false
+            & git -C $Repository rev-parse -q --verify MERGE_HEAD 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $hasMergeHead = $true }
+            if ($hasMergeHead) {
+                Invoke-GitRepo $Repository 'merge' '--abort' | Out-Null
+            }
+            if ($conflictFiles.Count -gt 0) {
+                throw ("merge conflict in " + ($conflictFiles -join ', '))
+            }
+            $msg = ($out | Out-String).Trim()
+            throw "git merge failed: $msg"
+        }
+
+        $mergeSha = @(Invoke-GitRepo $Repository 'rev-parse' 'HEAD')[0]
+        Set-FeatureStateTask -Repository $Repository -FeatureName $FeatureName -TaskId $Task -Update {
+            param($r)
+            $r.status = 'merged'
+        } | Out-Null
+
+        Out-FeatureOk @{
+            name     = $FeatureName
+            task     = $Task
+            branch   = $agentBranch
+            mergeSha = $mergeSha
+        }
+    } finally {
+        Exit-FeatureLock
+    }
+}
+
 function Invoke-CheckinFeature {
     param([string]$Repository, [string]$FeatureName)
     if ($Mode -notin @('on-problems', 'every-phase')) { throw 'invalid checkin mode' }
@@ -1183,6 +1662,18 @@ try {
         'schedule' {
             $fname = Resolve-FeatureName $repoRoot
             Invoke-ScheduleFeature $repoRoot $fname
+        }
+        'task' {
+            $fname = Resolve-FeatureName $repoRoot
+            Invoke-TaskFeature $repoRoot $fname $PSBoundParameters
+        }
+        'verify' {
+            $fname = Resolve-FeatureName $repoRoot
+            Invoke-VerifyFeature $repoRoot $fname $PSBoundParameters
+        }
+        'merge' {
+            $fname = Resolve-FeatureName $repoRoot
+            Invoke-MergeFeature $repoRoot $fname
         }
         default { throw "unknown subcommand $Subcommand" }
     }
