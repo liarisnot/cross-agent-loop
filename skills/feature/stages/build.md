@@ -1,0 +1,152 @@
+Follow `delegate`'s loop (task file, preflight, run, review, iterate, merge, cleanup). This file lists only what differs for feature tasks.
+
+When this file applies: the stage is `build`, or the user said "build it" or "continue" and the stage is `build`.
+
+Read and follow `<delegate dir>/SKILL.md`: "The loop", "Goldfish preflight & review", and the detached launch for long worker runs. Where that file says `<skill dir>`, use `<delegate dir>`.
+
+`feature.ps1 <subcommand>` means `pwsh -NoProfile -File <skill dir>/scripts/feature.ps1 <subcommand>`, and `delegate.ps1` means `pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1`. `<skill dir>`, `<delegate dir>`, `<repo>` and `<name>` are defined in SKILL.md. Every `feature.ps1` call passes `-Repo <repo> -Name <name>`.
+
+If `status.waitingOn.stop` is set, do not schedule work. Follow [Problem stop](#problem-stop). If `waitingOn.running` lists a task, do not launch it again. `schedule` will not return a `failed` task. When the user says "continue" and a task is `failed` and no `[stop]` is open, ask once whether to retry it. On a clear yes, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status pending`, then schedule.
+
+## Picking tasks
+
+Take tasks only from `feature.ps1 schedule -Repo <repo> -Name <name>`. Read `liveRuns`, `cap` and `tasks`. Each task has `id`, `delegateTaskId`, `profile`, `model` and `files`. When `tasks` lists two, run both in the same message. Do not start a task `schedule` did not return. `code` uses that task's `model` (Composer 2.5, `composer-2.5`). `code-hard` uses that task's `model` (Grok 4.7 high, `grok-4.7-high`). Each task starts on the profile the plan gives it.
+
+## Running a task
+
+1. Write `<repo>/.xagent/features/<name>/<id>.task.md` from `<skill dir>/templates/task.md`. Copy the task's `files` and `test` from `docs/features/<name>/feature.json` exactly.
+2. Do [Preflight](#preflight) when `delegate`'s rules call for it. Run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status preflight` before that preflight. Read `task` and `state`.
+3. Run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status running` before the worker, then:
+
+```text
+delegate.ps1 -Agent cursor -Model <model> -Profile <profile> -Feature <name> -Base feature/<name> -Repo <repo> -TaskId <delegateTaskId> -TaskFile <task file>
+```
+
+`<model>` and `<profile>` come from `schedule.tasks`. Workers are long runs: launch them detached, the way `<delegate dir>/SKILL.md` launches long runs. Preflights, reviews and council seats stay in the foreground.
+
+4. When the run returns with `ok: true` and `timedOut` is not true, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status in-review -SessionId <sessionId> -ResultFile <worktree>/.xagent/result.json -Worktree <worktree> -BaseSha <baseSha>`. Take `sessionId`, `worktree` and `baseSha` from `delegate.ps1`'s summary. Omit `-SessionId` when the summary has none. Then do [After each worker run](#after-each-worker-run). A failed run (`ok: false` or `timedOut: true`) follows [Failed runs](#failed-runs) instead, and does not move to `in-review`. A task under council stays `in-review`.
+
+## Preflight
+
+Do this after the task file is written and before the worker command above. Run it when `delegate`'s preflight rules call for it, on the task file, following the cap rule in SKILL.md. Skip a trivial edit. For a small mechanical task, comprehension alone is enough. When both lenses are called for, run:
+
+```text
+delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Model <worker model> -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pc -TaskFile <task file>
+delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Standard implementation-readiness-standard.md -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pr -TaskFile <task file>
+```
+
+`<worker model>` is that task's `model` from `schedule` (Composer 2.5 for `code`, Grok 4.7 high for `code-hard`). The standard file is in `<delegate dir>/personas/`.
+
+Clean up each lens:
+
+```text
+delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <that id>
+```
+
+Read `reviewFile`. Triage per `delegate`'s rule (fix what would make two workers build different behaviour or interfaces). A failed preflight follows [Failed runs](#failed-runs).
+
+## After each worker run
+
+Run `feature.ps1 verify -Repo <repo> -Name <name> -Task <id>`. Read `changed`, `outOfScope`, `inScope` and `test` (`passed`, `exitCode`, `tail`). A non-empty `outOfScope` is a problem stop. Do not revert the files. The script does not revert them. A failing `test.passed` is a failed review round, handled under [Review rounds](#review-rounds).
+
+Then read each changed file's diff separately: `git -C <worktree> diff <baseSha> -- <file>`. Never trust the worker's `result` summary on its own. A compression marker means that file is unread. The forms seen so far are `[... compressed ...]`, `[↑NL same as …]` and `<<ccr:…>>`. Read the file in smaller ranges (`git -C <worktree> diff <baseSha> -U3 -- <file>`, or `Read` with an offset) until no marker remains. `headroom_retrieve` may also work, but it is untested (T6 in `docs/test-plan.md`), so smaller ranges are the fallback.
+
+## Failed runs
+
+A usage-limit message is a problem stop at once. Do not retry it. There is no retry timer, no model fallback and no dollar estimate. The user resumes when the allowance is back. If the task is `preflight` or `running`, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`, then make the problem stop even when `failures` is 1.
+
+Every other failed run (`ok: false` or `timedOut: true`) takes the normal failed-run path. Read `stderrTail` and the logs, then retry once with the same command. After a timeout, do not pass `-Resume`: the worktree and its uncommitted changes are reused. If it fails again, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`. Run `feature.ps1 status -Repo <repo> -Name <name>` and read that task's `failures` in `status.tasks`. If `failures` is now 2, make a problem stop. This path covers workers and task preflights. Review lenses are not build tasks; they follow the ladder in `stages/design-review.md`.
+
+## Review rounds
+
+During review, either fix the issue yourself ([Fix-ups](#fix-ups)) or send it back. Weigh the token and time cost of each path. "About 3 files and 30 lines" is a guideline for your own effort, not a cap.
+
+This round limit replaces `delegate`'s "about 3 rounds" for feature tasks. Do not stop at about 3 rounds yourself.
+
+When the review fails and you are not fixing it yourself, log the failed round immediately, before any rerun:
+
+```text
+feature.ps1 decision -Repo <repo> -Name <name> -Kind round -Text "<id>: <reason>"
+```
+
+Read `line`. Then run `feature.ps1 status -Repo <repo> -Name <name>`. `status.tasks[].rounds` counts only the rounds since that task's latest council. `status.tasks[].councils` is all of its `[council]` lines. Do not rerun until that line is logged.
+
+Cap check first. A failed review when `councils` is already 2 is a problem stop. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind stop -Text "<id>: failed review after the second council — <reason>"`. Do not log a `[council]` line. Convene nothing. Do not rerun.
+
+Otherwise, when `rounds` reaches 2 on `code`, or 1 on `code-hard`, convene a build council. Do not send the task back first.
+
+Otherwise the round line is already logged. Send it back per `delegate`'s loop: write the review file, and rerun with the same `-TaskId` (`<delegateTaskId>`), `-TaskFile` set to that review file, and `-Resume <sessionId>`. If the next round is a fresh session (no `-Resume`, for example after a timeout), give it the comprehension preflight first, and readiness too if it changes scope.
+
+## Council escalation
+
+The user can also ask for a second opinion on a task. Convene this build council then too. If `councils` is already 2, say so and do not convene a third.
+
+Follow `<delegate dir>/SKILL.md`, section "Council", with only the differences below. `<k>` is `councils + 1`.
+
+- **Question.** Write `<repo>/.xagent/features/<name>/<id>.council-<k>.q.md`: the task file, each failed round's review feedback, the last attempt's diff (`git -C <worktree> diff <baseSha>`), and the line "What change would make this task pass review? Name the concrete fix." Keep it neutral. Write your own position first, to `<repo>/.xagent/features/<name>/<id>.council-<k>.lead.md`, before reading the seats. Where the seats disagree on a fact, verify it yourself.
+- **Runs.** Both seats, in one message, following the cap rule in SKILL.md. At most two rounds, and round 2 only when the seats name different fixes.
+
+```text
+delegate.ps1 -Agent cursor -Profile council -Seat grok -Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k> -TaskFile <question file>
+delegate.ps1 -Agent cursor -Profile council -Seat glm -Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k> -TaskFile <question file>
+```
+
+Round 2 writes `<repo>/.xagent/features/<name>/<id>.council-<k>.r2.md` and adds `-Resume <that seat's sessionId>`, using that round-2 file as `-TaskFile`. A failed seat follows "Failed delegate.ps1 runs" in SKILL.md (read `stderrTail`, retry once, no `-Resume` after a timeout). A usage-limit message is a problem stop at once.
+
+Clean up:
+
+```text
+delegate.ps1 -Cleanup -Profile council -Repo <repo> -TaskId <delegateTaskId>-c<k>
+```
+
+- **Consensus** (`delegate`'s rule: all three agree, or one concedes with a stated reason). Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind council -Text "<id>: consensus — <one-line guidance>"`. Write the delta brief `<repo>/.xagent/features/<name>/<id>.council-<k>.md` (the task file, then `## Council guidance`, then `## Previous attempt` with the failed feedback). Discard the attempt: `delegate.ps1 -Cleanup -Discard -Repo <repo> -TaskId <delegateTaskId>`. Rerun the same `delegateTaskId` on `-Profile code-hard` with the delta brief and no `-Resume`:
+
+```text
+delegate.ps1 -Agent cursor -Model grok-4.7-high -Profile code-hard -Feature <name> -Base feature/<name> -Repo <repo> -TaskId <delegateTaskId> -TaskFile <delta brief>
+```
+
+Run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status running` before that rerun. The round count is 0 again, because only rounds after the latest council count. The council count never resets. Do not stop.
+
+- **Disagreement.** The seats disagree on the fix, and you cannot settle it from verified facts. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind council -Text "<id>: disagreement — <summary>"`. Save `delegate`'s escalation brief to `<repo>/.xagent/features/<name>/<id>.council-<k>.brief.md`, show it, and make a problem stop. A task gets at most 2 councils. If the retry after the second council fails review, that is the cap-check stop above.
+
+## Fix-ups
+
+**Before the merge.** First stage the worker's work (`git -C <worktree> add -A`). Then make the edit in the worktree, and take the counts from `git -C <worktree> diff --shortstat`, which now shows only your unstaged edit. The merge step's commit includes both. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind fix-up -Text "<id>: <files> files, <lines> lines — <what>"`. Then run `feature.ps1 verify -Repo <repo> -Name <name> -Task <id>` again.
+
+**After the merge** (a phase test failing on `feature/<name>`). Edit in `<repo>`, commit with the message `fix-up: <what>`, and log the same way, with `phase <n>` in place of the task id: `feature.ps1 decision -Repo <repo> -Name <name> -Kind fix-up -Text "phase <n>: <files> files, <lines> lines — <what>"`. The phase test is the check.
+
+## Merge
+
+`merge` refuses unless the tree is clean and `HEAD` is `feature/<name>`. On accept:
+
+1. Commit everything in the worker worktree so a fix-up is included: `git -C <worktree> add -A`, then commit with the message `task(<id>): <title>`. If cleanup later reports tracked changes, stop rather than discard them.
+2. Run `feature.ps1 merge -Repo <repo> -Name <name> -Task <id> -Message "<title>"`. Read `mergeSha`. `-Message` is `<title>`. The script merges with `--no-ff` and the trailer `Xagent-Task: <id>`. If it fails with `merge conflict in …`, the merge was aborted. Show `error` and the files, and stop for the user. Do not discard the worker branch.
+3. Run `delegate.ps1 -Cleanup -Repo <repo> -TaskId <delegateTaskId>`.
+
+## Phase end
+
+When all tasks of a phase are merged:
+
+1. Run the phase test in `<repo>`. The command is that phase's `test` in `docs/features/<name>/feature.json` (also `Test:` under the phase in `plan.md`). If a fix-up solves a failure, log it as an after-merge fix-up. Otherwise make a problem stop.
+2. If phase check-ins are on (`status.checkin` is `every-phase`), report and stop. The user turns check-ins on, at plan approval or with "check in every phase". You never turn them on yourself.
+3. Otherwise, continue to the next phase.
+
+## Merging main in
+
+At a phase boundary, when the user asks: run `git -C <repo> merge --no-ff main`. Never rebase. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "merged main into feature/<name>"`, and run the phase test again. On a conflict, run `git -C <repo> merge --abort`, show the files, and stop for the user. Otherwise the branch diverges until sign-off.
+
+## End of build
+
+When the last phase is done, run `feature.ps1 stage -Repo <repo> -Name <name> -To signoff`. Read `from` and `to`, and report. Do not start sign-off until the user asks to test and sign off, or says continue.
+
+## Problem stop
+
+Stop for: a council that disagrees, or a failure after a task's second council; a test failure on `feature/<name>` that a fix-up cannot solve; a change outside the declared files; a needed change to the plan or the design; a usage limit; a task that fails a second time. A needed design or plan change stops here. The user can say "go back to the design" or "go back to the plan". Do not edit the locked design or the imported plan in place.
+
+**Stopping.** Run `feature.ps1 decision -Repo <repo> -Name <name> -Kind stop -Text "<id or phase>: <why>"`. Read `line`. Report to the user, and end the turn. A stop is committed, so it survives a lost local state file.
+
+**Resuming.** When the user says to go on:
+
+1. Run `feature.ps1 decision -Repo <repo> -Name <name> -Kind resume -Text "<what was decided>"`. Read `line`. `resume` fails when no `[stop]` is open.
+2. For a `failed` task the user wants retried, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status pending`.
+3. After a council stop, the retry uses the profile and brief the user chose. The default is `code-hard` with the last delta brief (`-Profile code-hard -Model grok-4.7-high -TaskFile` that brief, no `-Resume`).
