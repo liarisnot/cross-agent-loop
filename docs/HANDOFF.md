@@ -36,7 +36,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
   - **2.3** `fb-plan`: `plan` and `schedule`. 108 Pester tests pass (full suite about 5 minutes).
   - **Loop per sub-step:** task file in `.xagent/tasks/`, comprehension (Composer) and readiness (DeepSeek) preflights, Composer worker, lead review (diff per file, tests rerun, probes in scratch repos), merge with `--no-ff`. Probes found 4 real bugs that green worker tests missed (D11, D14).
 ## Next
-1. **Build step 2.5: `reconcile` + `status`**, then 2.6 `finish` + `doctor`, each through `delegate`. Step 2.4 (`task`, `verify`, `merge`) is merged (`79af2a4`, 138 tests; the full suite now takes about 635 s). **Launch workers detached** (SKILL.md, D16).
+1. **Build step 2.5, split: `fb-status` (running), then `fb-reconcile`**, then 2.6 `finish` + `doctor`, each through `delegate`. Tests have a fast tier (`$c.Filter.ExcludeTag = 'Slow'`, about 225 s) and the full suite (about 366 s), after `fb-speed` (D18). Step 2.4 (`task`, `verify`, `merge`) is merged (`79af2a4`, 138 tests; the full suite now takes about 635 s). **Launch workers detached** (SKILL.md, D16).
 2. **Step 4 (router and stage files):** the design says the lead writes these as prompt design. Raise with the user whether to delegate them anyway, under the dogfooding instruction.
 3. Steps 5 (docs and machine setup) and 6 (manual CUJ checklist).
    - **Pid-file times:** `ConvertFrom-Json` turns ISO strings into `DateTime`; compare start times as `DateTime`.
