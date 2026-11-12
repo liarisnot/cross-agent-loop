@@ -1648,3 +1648,296 @@ Describe 'feature.ps1 merge' {
         }
     }
 }
+
+Describe 'feature.ps1 status' {
+    It 'reports no features when the repo has none' {
+        $repo = New-TestRepo
+        $j = Invoke-StatusOk $repo
+        $j.selected | Should -BeNullOrEmpty
+        $j.features | Should -Be @()
+    }
+
+    It 'selects via -Cwd, lists two in progress on main, and sole in-progress feature' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'sela' -Stage 'design'
+        & git -C $repo switch main 2>&1 | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Cwd', $repo, '-Name', 'sela')
+        $j.selected | Should -Be 'sela'
+        New-FeatureBranchByHand -Repo $repo -Name 'selb'
+        $j2 = Invoke-StatusOk $repo
+        $j2.selected | Should -BeNullOrEmpty
+        @($j2.features).Count | Should -Be 2
+        & git -C $repo switch 'feature/sela' 2>&1 | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'abandoned', '-Repo', $repo, '-Name', 'sela') -WorkingDirectory $repo)
+        & git -C $repo switch 'feature/selb' 2>&1 | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'abandoned', '-Repo', $repo, '-Name', 'selb') -WorkingDirectory $repo)
+        New-FeatureAtStage -Repo $repo -Name 'selc' -Stage 'design'
+        & git -C $repo switch main 2>&1 | Out-Null
+        $j3 = Invoke-StatusOk $repo
+        $j3.selected | Should -Be 'selc'
+    }
+
+    It 'skips abandoned feature checked out and uses sole in-progress rule' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'abad' -Stage 'design'
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'abandoned', '-Repo', $repo, '-Name', 'abad') -WorkingDirectory $repo)
+        New-FeatureAtStage -Repo $repo -Name 'live' -Stage 'design'
+        & git -C $repo switch 'feature/abad' 2>&1 | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Cwd', $repo)
+        $j.selected | Should -Be 'live'
+    }
+
+    It 'reports design stage defaults, treeClean, branch, and detached HEAD' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'dsn' -Stage 'design'
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'dsn')
+        $j.phase | Should -BeNullOrEmpty
+        $j.tasks | Should -Be @()
+        $j.reviewRuns | Should -Be @()
+        $j.waitingOn | Should -BeNullOrEmpty
+        $j.nextAction | Should -Be 'Draft the next design section and get it approved.'
+        $j.lastDecisions | Should -Be @()
+        $j.warnings | Should -Be @()
+        $j.treeClean | Should -BeTrue
+        $j.branch | Should -Be 'feature/dsn'
+        Set-Content -LiteralPath (Join-Path $repo 'README.md') -Value 'dirty'
+        (Invoke-StatusOk $repo -Extra @('-Name', 'dsn')).treeClean | Should -BeFalse
+        & git -C $repo switch --detach 2>&1 | Out-Null
+        (Invoke-StatusOk $repo -Extra @('-Name', 'dsn')).branch | Should -Be ''
+    }
+
+    It 'lists ten design review runs with models and standards in design-review' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'drev' -Stage 'design-review'
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'drev')
+        $j.waitingOn.gate | Should -Be 'design-locked'
+        @($j.reviewRuns).Count | Should -Be 10
+        @($j.reviewRuns | Select-Object -ExpandProperty id -Unique).Count | Should -Be 10
+        ($j.reviewRuns | Where-Object { $_.persona -eq 'zoom_out' }).Count | Should -Be 2
+        ($j.reviewRuns | Where-Object { $_.persona -eq 'style' }).Count | Should -Be 2
+        ($j.reviewRuns | Where-Object { $_.persona -eq 'zoom_out' } | Select-Object -First 1).standard | Should -Be 'zoom-out-standard.md'
+        ($j.reviewRuns | Where-Object { $_.persona -eq 'comprehension' } | Select-Object -First 1).standard | Should -BeNullOrEmpty
+    }
+
+    It 'tracks review done state, reaudit rows, and review number after synthesis' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'rprog' -Stage 'design-review'
+        $models = Get-Content -Raw (Join-Path $PSScriptRoot '../../delegate/models.json') | ConvertFrom-Json
+        $prefix = 'rprog'
+        $id1 = "$prefix-d1-zo-p5"
+        $id2 = "$prefix-d1-ic-p5"
+        $rawDir = Join-Path $repo "docs/features/rprog/reviews/raw"
+        New-Item -ItemType Directory -Force $rawDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $rawDir "$id1.md") -Value 'r'
+        Set-Content -LiteralPath (Join-Path $rawDir "$id2.md") -Value 'r'
+        & git -C $repo add docs/features/rprog/reviews/raw 2>&1 | Out-Null
+        & git -C $repo commit -m 'raw reviews' 2>&1 | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'rprog')
+        ($j.reviewRuns | Where-Object { $_.id -eq $id1 }).done | Should -BeTrue
+        ($j.reviewRuns | Where-Object { $_.id -eq $id2 }).done | Should -BeTrue
+        Assert-FeatureOk (Invoke-Feature @('reaudit', '-Phase', '7', '-Repo', $repo, '-Name', 'rprog') -WorkingDirectory $repo)
+        $j2 = Invoke-StatusOk $repo -Extra @('-Name', 'rprog')
+        @($j2.reviewRuns | Where-Object { $_.id -match '-r1$' }).Count | Should -Be 3
+        $syn = Join-Path $repo 'docs/features/rprog/reviews/design-1.md'
+        New-Item -ItemType Directory -Force (Split-Path $syn) | Out-Null
+        Set-Content -LiteralPath $syn -Value '# design review 1'
+        & git -C $repo add docs/features/rprog/reviews/design-1.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'design synthesis' 2>&1 | Out-Null
+        $j3 = Invoke-StatusOk $repo -Extra @('-Name', 'rprog')
+        ($j3.reviewRuns | Select-Object -First 1).id | Should -Match '-d2-'
+        $models | Out-Null
+    }
+
+    It 'reports plan stage phase, tasks, plan review runs, and plan gate' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'plst' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'plst')
+        $j.phase.current | Should -Be 1
+        $j.phase.total | Should -Be 2
+        @($j.tasks).Count | Should -Be 3
+        $j.tasks[0].delegateTaskId | Should -Be 'plst-t1'
+        @($j.reviewRuns).Count | Should -Be 2
+        $j.reviewRuns[0].id | Should -Be 'plst-p1-cm'
+        $j.reviewRuns[0].phase | Should -BeNullOrEmpty
+        $j.waitingOn.gate | Should -Be 'plan-approved'
+    }
+
+    It 'derives task status, waitingOn.running array, merged trailers, and phase current' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'tsk' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Set-TaskState -Repo $repo -Name 'tsk' -States @{ t2 = 'running' }
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'tsk')
+        $j.tasks[1].status | Should -Be 'running'
+        $j.waitingOn.running | Should -Be @('tsk-t2')
+        $j.waitingOn.running -is [array] | Should -BeTrue
+        & git -C $repo switch 'feature/tsk' 2>&1 | Out-Null
+        Set-Content (Join-Path $repo 'm.txt') -Value 'x' -NoNewline
+        & git -C $repo add m.txt 2>&1 | Out-Null
+        & git -C $repo commit -m 'merge t1' -m 'Xagent-Task: t1' 2>&1 | Out-Null
+        $j2 = Invoke-StatusOk $repo -Extra @('-Name', 'tsk')
+        ($j2.tasks | Where-Object { $_.id -eq 't1' }).status | Should -Be 'merged'
+        ($j2.tasks | Where-Object { $_.id -eq 't2' }).status | Should -Be 'running'
+        Set-TaskState -Repo $repo -Name 'tsk' -States @{ t1 = 'merged'; t2 = 'merged' }
+        $j3 = Invoke-StatusOk $repo -Extra @('-Name', 'tsk')
+        $j3.phase.current | Should -Be 2
+    }
+
+    It 'counts councils and rounds from decisions and survives missing state.json' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'crc' -Plan (New-OneTaskPlan -TaskId 't1') | Out-Null
+        $lines = @(
+            '- 2026-01-01T00:00:00Z [round] t1: a'
+            '- 2026-01-01T00:01:00Z [round] t1: b'
+            '- 2026-01-01T00:02:00Z [council] t1: c'
+            '- 2026-01-01T00:03:00Z [round] t1: d'
+            '- 2026-01-01T00:04:00Z [round] t10: e'
+        )
+        $dec = Join-Path $repo 'docs/features/crc/decisions.md'
+        [IO.File]::AppendAllText($dec, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+        & git -C $repo add docs/features/crc/decisions.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'decision lines' 2>&1 | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'crc')
+        $j.tasks[0].councils | Should -Be 1
+        $j.tasks[0].rounds | Should -Be 1
+        Remove-Item -LiteralPath (Join-Path $repo '.xagent/features/crc/state.json') -Force -ErrorAction SilentlyContinue
+        $j2 = Invoke-StatusOk $repo -Extra @('-Name', 'crc')
+        $j2.tasks[0].councils | Should -Be 1
+        $j2.tasks[0].rounds | Should -Be 1
+    }
+
+    It 'reports open stop and clears after resume' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'stp' -Plan (New-OneTaskPlan) | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('decision', '-Kind', 'stop', '-Text', 't1: second failure', '-Repo', $repo, '-Name', 'stp') -WorkingDirectory $repo)
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'stp')
+        $j.waitingOn.stop | Should -Be 't1: second failure'
+        $j.nextAction | Should -Match 'problem stop'
+        Remove-Item -LiteralPath (Join-Path $repo '.xagent/features/stp/state.json') -Force -ErrorAction SilentlyContinue
+        $j2 = Invoke-StatusOk $repo -Extra @('-Name', 'stp')
+        $j2.waitingOn.stop | Should -Be 't1: second failure'
+        Assert-FeatureOk (Invoke-Feature @('decision', '-Kind', 'resume', '-Text', 'ok', '-Repo', $repo, '-Name', 'stp') -WorkingDirectory $repo)
+        $j3 = Invoke-StatusOk $repo -Extra @('-Name', 'stp')
+        $j3.waitingOn.stop | Should -BeNullOrEmpty
+    }
+
+    It 'sums tokens from XAGENT_LOG_DIR and warns when log dir missing' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'alpha' -Stage 'design'
+        $logDir = Join-Path $TestDrive ("log-{0}" -f [guid]::NewGuid())
+        New-Item -ItemType Directory -Force $logDir | Out-Null
+        Copy-Item -LiteralPath $script:RunsJsonl -Destination (Join-Path $logDir 'runs.jsonl')
+        $prev = $env:XAGENT_LOG_DIR
+        try {
+            $env:XAGENT_LOG_DIR = $logDir
+            $j = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
+            $j.tokens.total | Should -Be 13175
+            $j.tokens.input | Should -Be 3500
+        }
+        finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prev }
+        }
+        $bad = Join-Path $TestDrive "missing-$([guid]::NewGuid())"
+        $prev2 = $env:XAGENT_LOG_DIR
+        try {
+            $env:XAGENT_LOG_DIR = $bad
+            $j2 = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
+            $j2.tokens | Should -BeNullOrEmpty
+            ($j2.warnings -join ' ') | Should -Match 'usage log not readable'
+        }
+        finally {
+            if ($null -eq $prev2) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prev2 }
+        }
+    }
+
+    It 'sets diffTouchesRuleFiles for cursor rules changes' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'diff' -Stage 'design'
+        & git -C $repo switch 'feature/diff' 2>&1 | Out-Null
+        $rule = Join-Path $repo '.cursor/rules/x.md'
+        New-Item -ItemType Directory -Force (Split-Path $rule) | Out-Null
+        Set-Content -LiteralPath $rule -Value 'r' -NoNewline
+        & git -C $repo add .cursor/rules/x.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'rule' 2>&1 | Out-Null
+        (Invoke-StatusOk $repo -Extra @('-Name', 'diff')).diffTouchesRuleFiles | Should -BeTrue
+        $repo2 = New-TestRepo
+        New-FeatureAtStage -Repo $repo2 -Name 'diff2' -Stage 'design'
+        & git -C $repo2 switch 'feature/diff2' 2>&1 | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo2 'other.txt') -Value 'o' -NoNewline
+        & git -C $repo2 add other.txt 2>&1 | Out-Null
+        & git -C $repo2 commit -m 'other' 2>&1 | Out-Null
+        (Invoke-StatusOk $repo2 -Extra @('-Name', 'diff2')).diffTouchesRuleFiles | Should -BeFalse
+    }
+
+    It 'returns the last three committed decision lines' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'ld' -Stage 'design'
+        1..5 | ForEach-Object {
+            Assert-FeatureOk (Invoke-Feature @('decision', '-Kind', 'decision', '-Text', "n$_", '-Repo', $repo, '-Name', 'ld') -WorkingDirectory $repo)
+        }
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'ld')
+        @($j.lastDecisions).Count | Should -Be 3
+        $j.lastDecisions[0] | Should -Match '\[decision\] n3'
+        $j.lastDecisions[2] | Should -Match '\[decision\] n5'
+    }
+
+    It 'is read-only on main with -Name and does not add lock or state' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'ro' -Stage 'design'
+        & git -C $repo switch main 2>&1 | Out-Null
+        $head = & git -C $repo rev-parse HEAD
+        $porc = @(& git -C $repo status --porcelain)
+        Invoke-StatusOk $repo -Extra @('-Name', 'ro') | Out-Null
+        & git -C $repo rev-parse HEAD | Should -Be $head
+        @(& git -C $repo status --porcelain) | Should -Be $porc
+        Test-Path (Join-Path $repo '.xagent/features/ro/state.json') | Should -BeFalse
+        Test-Path (Join-Path $repo '.xagent/features/ro/.lock') | Should -BeFalse
+    }
+
+    It 'fails for unknown and invalid feature names' {
+        $repo = New-TestRepo
+        $r1 = Invoke-Feature @('status', '-Repo', $repo, '-Name', 'nope') -WorkingDirectory $repo
+        $r1.ExitCode | Should -Be 1
+        $r1.Json.error | Should -Match 'no feature'
+        $r2 = Invoke-Feature @('status', '-Repo', $repo, '-Name', 'Bad_Name') -WorkingDirectory $repo
+        $r2.ExitCode | Should -Be 1
+        $r2.Json.error | Should -Match 'invalid feature name'
+    }
+
+    It 'reports signoff review run, gate, and next actions' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'sig' -Stage 'signoff'
+        $models = Get-Content -Raw (Join-Path $PSScriptRoot '../../delegate/models.json') | ConvertFrom-Json
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'sig')
+        @($j.reviewRuns).Count | Should -Be 1
+        $j.reviewRuns[0].id | Should -Be 'sig-s1-dr'
+        $j.reviewRuns[0].persona | Should -Be 'drift_report'
+        $j.reviewRuns[0].model | Should -Be ([string]$models.seats.judgement[0])
+        $j.reviewRuns[0].standard | Should -BeNullOrEmpty
+        $j.reviewRuns[0].done | Should -BeFalse
+        $j.waitingOn.gate | Should -Be 'signed-off'
+        $j.nextAction | Should -Match 'sign off'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ok', '-Repo', $repo, '-Name', 'sig') -WorkingDirectory $repo)
+        (Invoke-StatusOk $repo -Extra @('-Name', 'sig')).nextAction | Should -Match 'Run finish'
+    }
+
+    It 'reports abandoned and done features' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'abn' -Stage 'design'
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'abandoned', '-Repo', $repo, '-Name', 'abn') -WorkingDirectory $repo)
+        $ja = Invoke-StatusOk $repo -Extra @('-Name', 'abn')
+        $ja.waitingOn | Should -BeNullOrEmpty
+        $ja.nextAction | Should -Match 'abandoned'
+        New-FeatureAtStage -Repo $repo -Name 'donef' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ship', '-Repo', $repo, '-Name', 'donef') -WorkingDirectory $repo)
+        & git -C $repo switch main 2>&1 | Out-Null
+        & git -C $repo merge --no-ff 'feature/donef' -m 'merge donef' 2>&1 | Out-Null
+        $jd = Invoke-StatusOk $repo -Extra @('-Name', 'donef')
+        $jd.stage | Should -Be 'signoff'
+        ($jd.warnings -join ' ') | Should -Match 'is done'
+        $jd.waitingOn | Should -BeNullOrEmpty
+        @($jd.reviewRuns).Count | Should -Be 0
+        $jd.nextAction | Should -Match 'done and merged'
+        $jn = Invoke-StatusOk $repo
+        ($jn.features | Where-Object { $_.name -eq 'donef' }).stage | Should -Be 'done'
+    }
+}
