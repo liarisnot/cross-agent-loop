@@ -39,7 +39,17 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Repo D:/pa
 | `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes every read-only worktree `<TaskId>-<label>`, restoring rule files first. Pass `-Repo` |
 | `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a failed attempt), saving its diff as a patch in the run logs first |
 
-To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId` (or the same id with different `-Seat`s for read-only runs). Set the Bash tool `timeout` above `-TimeoutSec`. Use `run_in_background` for long tasks.
+To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId` (or the same id with different `-Seat`s for read-only runs). Set the Bash tool `timeout` above `-TimeoutSec`. Short runs (preflights, reviews) can stay in the foreground.
+
+**Long runs (workers): launch detached.** Claude Code can stop its own background tasks when the machine is low on memory, and that kills `delegate.ps1` and the worker with it: no `finally`, no session id, a stale pid file (D16 in the cross-agent-loop test plan). A process started with `Start-Process` is not part of that task tree, so it survives. With the PowerShell tool:
+
+```powershell
+$runs = '<repo>/.xagent/runs/<taskId>'; New-Item -ItemType Directory -Force $runs | Out-Null
+$a = @('-NoProfile','-File','<skill dir>/scripts/delegate.ps1','-Agent','cursor','-Repo','<repo>','-TaskId','<taskId>','-TaskFile','<task.md>','-TimeoutSec','3000')
+$p = Start-Process pwsh -ArgumentList $a -WindowStyle Hidden -RedirectStandardOutput "$runs/summary.json" -RedirectStandardError "$runs/launcher.err.txt" -PassThru; $p.Id
+```
+
+Then watch with the Monitor tool: a loop that prints the summary and exits once `summary.json` is non-empty, or prints a failure line once the launcher pid is gone without one (poll every 20 s; re-arm after the 30-minute expiry). The summary file holds the same JSON line as a foreground run. A detached worker keeps running if Claude Code exits; stop it early with the pid in `<logs>.pid`. Use a new summary file name per round so an old one isn't read as the new result.
 
 The script prints **one compact JSON line**: `ok, violation, profile, model, usage, agent, seat, feature, taskId, worktree, branch, baseSha, exitCode, timedOut, seconds, cliStatus, sessionId, result, reviewFile, changes, diffStat, stderrTail, logs`. `baseSha` is the commit the worktree was created from (diff against it). Full logs are in `<repo>/.xagent/runs/<taskId>/`. While a run is live, `<logs>.pid` holds `{pid, startTime, childPid, childStartTime, feature}`.
 
