@@ -362,6 +362,51 @@ function Remove-TaskWorktree {
     & git -C $Repo worktree prune 2>&1 | Out-Null
 }
 
+function New-FeatureBranchByHand {
+    param(
+        [string]$Repo,
+        [string]$Name
+    )
+    & git -C $Repo switch -c "feature/$Name" main 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'branch create failed' }
+    $featDir = Join-Path $Repo "docs/features/$Name"
+    New-Item -ItemType Directory -Force $featDir | Out-Null
+    $designDoc = "docs/designs/$Name.md"
+    $feature = [ordered]@{
+        name      = $Name
+        stage     = 'design'
+        checkin   = 'on-problems'
+        designDoc = $designDoc
+        gates     = @{}
+    }
+    $tplPath = Join-Path $PSScriptRoot '../templates/decisions.md'
+    $tpl = [IO.File]::ReadAllText($tplPath, [Text.UTF8Encoding]::new($false))
+    $tpl = $tpl -replace '<name>', $Name
+    Write-FeatureJsonFileLocal (Join-Path $featDir 'feature.json') $feature
+    $decPath = Join-Path $featDir 'decisions.md'
+    $norm = $tpl -replace "`r`n", "`n" -replace "`r", "`n"
+    if (-not $norm.EndsWith("`n")) { $norm += "`n" }
+    [IO.File]::WriteAllText($decPath, $norm, [Text.UTF8Encoding]::new($false))
+    & git -C $Repo add "docs/features/$Name" 2>&1 | Out-Null
+    & git -C $Repo commit -m "feature($Name): start" 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'commit failed' }
+    & git -C $Repo switch main 2>&1 | Out-Null
+}
+
+function Invoke-StatusOk {
+    param(
+        [string]$Repo,
+        [string[]]$Extra = @()
+    )
+    $args = @('status', '-Repo', $Repo) + $Extra
+    $r = Invoke-Feature $args -WorkingDirectory $Repo
+    if ($r.ExitCode -ne 0 -or -not $r.Json -or -not $r.Json.ok) {
+        throw "status failed: $($r.Raw)"
+    }
+    Test-Schema -Json $r.Raw -SchemaName 'status' | Should -BeTrue
+    return $r.Json
+}
+
 function New-OverlapTestPlan {
     param(
         [string]$FileA,

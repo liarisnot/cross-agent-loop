@@ -232,7 +232,7 @@ function Get-InProgressFeatures([string]$Repository) {
     return @(Get-FeatureList $Repository | Where-Object { $_.stage -ne 'done' -and $_.stage -ne 'abandoned' })
 }
 
-function Resolve-FeatureName {
+function Select-FeatureName {
     param([string]$Repository)
     if ($Name) {
         if (-not (Test-FeatureName $Name)) { throw 'invalid feature name' }
@@ -250,7 +250,550 @@ function Resolve-FeatureName {
     }
     $inProg = @(Get-InProgressFeatures $Repository)
     if ($inProg.Count -eq 1) { return $inProg[0].name }
-    throw 'no feature selected; name one with -Name'
+    return $null
+}
+
+function Resolve-FeatureName {
+    param([string]$Repository)
+    $picked = Select-FeatureName $Repository
+    if ($null -eq $picked) { throw 'no feature selected; name one with -Name' }
+    return $picked
+}
+
+function Get-ReviewNumber {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [ValidateSet('design', 'plan')]
+        [string]$Kind
+    )
+    $pattern = if ($Kind -eq 'design') { 'design-' } else { 'plan-' }
+    $branch = "feature/$FeatureName"
+    $treeLines = @(Invoke-GitRepo $Repository 'ls-tree' '-r' '--name-only' $branch "--" "docs/features/$FeatureName/reviews/")
+    $count = @($treeLines | Where-Object { $_ -notmatch '/reviews/raw/' -and $_ -match "/reviews/$pattern.*\.md$" }).Count
+    return 1 + $count
+}
+
+function Assert-FeatureExists {
+    param([string]$Repository, [string]$FeatureName)
+    & git -C $Repository show-ref --verify --quiet "refs/heads/feature/$FeatureName" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "no feature $FeatureName" }
+    $feat = Get-FeatureJsonFromRef $Repository "feature/$FeatureName" $FeatureName
+    if (-not $feat) { throw "no feature $FeatureName" }
+}
+
+function Get-StatusModelsRoot {
+    $text = [IO.File]::ReadAllText($script:ModelsPath, [Text.UTF8Encoding]::new($false))
+    return $text | ConvertFrom-Json
+}
+
+function Get-StatusStandardsMap {
+    $path = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate/personas/standards.json'))
+    $text = [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false))
+    $obj = $text | ConvertFrom-Json
+    $map = @{}
+    foreach ($prop in $obj.PSObject.Properties) {
+        $map[$prop.Name] = if ($null -eq $prop.Value) { $null } else { [string]$prop.Value }
+    }
+    return $map
+}
+
+function Get-StatusPersonaModel {
+    param([string]$Persona, $ModelsRoot)
+    $grok = [string]$ModelsRoot.seats.judgement[0]
+    $glm = [string]$ModelsRoot.seats.judgement[1]
+    $deepseek = [string]$ModelsRoot.seats.readiness
+    $composer = [string]$ModelsRoot.profiles.review.model
+    switch ($Persona) {
+        'zoom_out' { return $grok }
+        'inventive_catalyst' { return $glm }
+        'comprehension' { return $composer }
+        'design_critic' { return $glm }
+        'structural' { return $grok }
+        'style' { return $glm }
+        'implementation_readiness' { return $deepseek }
+        'codebase_details' { return $grok }
+        'drift_report' { return $grok }
+        default { throw "unknown review persona $Persona" }
+    }
+}
+
+function Get-StatusReviewBaseDefinitions {
+    param([ValidateSet('design', 'plan', 'signoff')][string]$Kind)
+    if ($Kind -eq 'signoff') {
+        return ,@(
+            @{ phase = $null; persona = 'drift_report'; code = 'dr' }
+        )
+    }
+    if ($Kind -eq 'plan') {
+        return ,@(
+            @{ phase = $null; persona = 'comprehension'; code = 'cm' },
+            @{ phase = $null; persona = 'implementation_readiness'; code = 'ir' }
+        )
+    }
+    return ,@(
+        @{ phase = 5; persona = 'zoom_out'; code = 'zo' },
+        @{ phase = 5; persona = 'inventive_catalyst'; code = 'ic' },
+        @{ phase = 6; persona = 'comprehension'; code = 'cm' },
+        @{ phase = 7; persona = 'design_critic'; code = 'dc' },
+        @{ phase = 7; persona = 'structural'; code = 'st' },
+        @{ phase = 7; persona = 'style'; code = 'sy' },
+        @{ phase = 8; persona = 'zoom_out'; code = 'zo' },
+        @{ phase = 9; persona = 'implementation_readiness'; code = 'ir' },
+        @{ phase = 9; persona = 'codebase_details'; code = 'cd' },
+        @{ phase = 9; persona = 'style'; code = 'sy' }
+    )
+}
+
+function Test-StatusReviewRawDone {
+    param([string]$Repository, [string]$FeatureName, [string]$RunId)
+    $ref = "feature/${FeatureName}:docs/features/$FeatureName/reviews/raw/$RunId.md"
+    & git -C $Repository cat-file -e $ref 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function New-StatusReviewRunRow {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$Prefix,
+        [string]$KindLetter,
+        [int]$ReviewN,
+        $Def,
+        $ModelsRoot,
+        $StandardsMap
+    )
+    $phase = $Def.phase
+    $code = [string]$Def.code
+    $persona = [string]$Def.persona
+  $id = if ($KindLetter -eq 's') {
+        "${Prefix}-s1-$code"
+    }
+    elseif ($null -eq $phase) {
+        "${Prefix}-${KindLetter}${ReviewN}-$code"
+    }
+    else {
+        "${Prefix}-${KindLetter}${ReviewN}-$code-p$phase"
+    }
+    $standard = if ($StandardsMap.ContainsKey($persona)) { $StandardsMap[$persona] } else { $null }
+    return [ordered]@{
+        id       = $id
+        phase    = $phase
+        persona  = $persona
+        model    = Get-StatusPersonaModel $persona $ModelsRoot
+        standard = $standard
+        done     = (Test-StatusReviewRawDone $Repository $FeatureName $id)
+    }
+}
+
+function Add-StatusReviewRunsForDefs {
+    param(
+        [System.Collections.Generic.List[object]]$Runs,
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$Prefix,
+        [string]$KindLetter,
+        [int]$ReviewN,
+        [object[]]$Defs,
+        $ModelsRoot,
+        $StandardsMap,
+        [string]$Suffix = ''
+    )
+    foreach ($def in $Defs) {
+        $row = New-StatusReviewRunRow $Repository $FeatureName $Prefix $KindLetter $ReviewN $def $ModelsRoot $StandardsMap
+        if ($Suffix) { $row.id = [string]$row.id + $Suffix }
+        if ($null -eq $row.phase) { $row.phase = $null }
+        $Runs.Add([pscustomobject]$row) | Out-Null
+    }
+}
+
+function Get-StatusReviewRuns {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$Stage,
+        [string]$DecisionsText
+    )
+    $runs = [System.Collections.Generic.List[object]]::new()
+    $stage = [string]$Stage
+    if ($stage -notin @('design-review', 'plan', 'signoff')) { return ,@() }
+
+    $prefix = Get-DelegateNamePrefix $FeatureName
+    $modelsRoot = Get-StatusModelsRoot
+    $standardsMap = Get-StatusStandardsMap
+
+    if ($stage -eq 'signoff') {
+        $defs = Get-StatusReviewBaseDefinitions 'signoff'
+        Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix 's' 1 $defs $modelsRoot $standardsMap | Out-Null
+        return ,@($runs)
+    }
+
+    $kind = if ($stage -eq 'design-review') { 'design' } else { 'plan' }
+    $letter = if ($stage -eq 'design-review') { 'd' } else { 'p' }
+    $reviewN = Get-ReviewNumber $Repository $FeatureName $kind
+    $baseDefs = Get-StatusReviewBaseDefinitions $kind
+    Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap | Out-Null
+
+    $reauditCounts = @{}
+    foreach ($line in ($DecisionsText -split "`n")) {
+        if ($line -notmatch '^- \S+ \[reaudit\] (.+)$') { continue }
+        $body = $Matches[1]
+        if ($stage -eq 'design-review') {
+            if ($body -notmatch "^d${reviewN}: phase (\d+)$") { continue }
+            $phaseN = [int]$Matches[1]
+            $key = "${reviewN}:$phaseN"
+            $reauditCounts[$key] = 1 + $(if ($reauditCounts.ContainsKey($key)) { $reauditCounts[$key] } else { 0 })
+            $k = $reauditCounts[$key]
+            $phaseDefs = @($baseDefs | Where-Object { $_.phase -eq $phaseN })
+            Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $phaseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
+        }
+        else {
+            if ($body -notmatch "^p${reviewN}: phase \d+$") { continue }
+            $key = "$reviewN"
+            $reauditCounts[$key] = 1 + $(if ($reauditCounts.ContainsKey($key)) { $reauditCounts[$key] } else { 0 })
+            $k = $reauditCounts[$key]
+            Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
+        }
+    }
+
+    return ,@($runs)
+}
+
+function Get-TaskDecisionCounts {
+    param([string]$DecisionsText, [string]$TaskId)
+    $lines = @($DecisionsText -split "`n")
+    $escaped = [Regex]::Escape($TaskId)
+    $lastCouncilIdx = -1
+    $councils = 0
+    $rounds = 0
+    for ($i = 0; $i -lt @($lines).Count; $i++) {
+        $ln = $lines[$i]
+        if ($ln -match "^- \S+ \[council\] ${escaped}:") {
+            $councils++
+            $lastCouncilIdx = $i
+        }
+    }
+    for ($i = 0; $i -lt @($lines).Count; $i++) {
+        $ln = $lines[$i]
+        if ($ln -match "^- \S+ \[round\] ${escaped}:") {
+            if ($i -gt $lastCouncilIdx) { $rounds++ }
+        }
+    }
+    return @{ councils = $councils; rounds = $rounds }
+}
+
+function Get-StatusOpenStopText([string]$DecisionsText) {
+    if (-not (Test-StopOpen $DecisionsText)) { return $null }
+    $text = $null
+    foreach ($line in ($DecisionsText -split "`n")) {
+        if ($line -match '^- \S+ \[stop\] (.+)$') { $text = $Matches[1] }
+    }
+    return $text
+}
+
+function Get-StatusLastDecisions([string]$DecisionsText) {
+    $hits = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($DecisionsText -split "`n")) {
+        if ($line.StartsWith('- ')) { $hits.Add($line) | Out-Null }
+    }
+    $all = @($hits)
+    if (@($all).Count -eq 0) { return ,@() }
+    $take = [Math]::Min(3, @($all).Count)
+    return ,@($all[(@($all).Count - $take)..(@($all).Count - 1)])
+}
+
+function Get-StatusTaskStatusMap {
+    param([string]$Repository, [string]$FeatureName, $StateObj)
+    $merged = @{}
+    foreach ($mid in @(Get-XagentMergedTaskIds $Repository $FeatureName)) { $merged[$mid] = $true }
+    $map = @{}
+    foreach ($key in $StateObj.tasks.Keys) {
+        if ($merged.ContainsKey($key)) {
+            $map[$key] = 'merged'
+        }
+        else {
+            $rec = $StateObj.tasks[$key]
+            $st = 'pending'
+            if ($rec -is [System.Collections.IDictionary]) {
+                if ($rec.Contains('status') -and $null -ne $rec['status']) { $st = [string]$rec['status'] }
+            }
+            elseif ($null -ne $rec.PSObject.Properties['status'] -and $null -ne $rec.status) {
+                $st = [string]$rec.status
+            }
+            $map[$key] = $st
+        }
+    }
+    foreach ($mid in $merged.Keys) {
+        if (-not $map.ContainsKey($mid)) { $map[$mid] = 'merged' }
+    }
+    return $map
+}
+
+function Get-StatusPhaseInfo {
+    param($Feature, $StatusMap)
+    if ($null -eq $Feature.PSObject.Properties['phases'] -or $null -eq $Feature.phases -or @($Feature.phases).Count -eq 0) {
+        return $null
+    }
+    $phases = @($Feature.phases | Sort-Object { [int]$_.n })
+    $total = @($phases).Count
+    $current = $total
+    foreach ($phase in $phases) {
+        $open = $false
+        foreach ($task in @($phase.tasks)) {
+            $tid = [string]$task.id
+            $st = if ($StatusMap.ContainsKey($tid)) { $StatusMap[$tid] } else { 'pending' }
+            if ($st -ne 'merged') { $open = $true; break }
+        }
+        if ($open) {
+            $current = [int]$phase.n
+            break
+        }
+    }
+    return @{ current = $current; total = $total }
+}
+
+function Get-StatusTasksList {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        $Feature,
+        $StateObj,
+        [string]$DecisionsText
+    )
+    $statusMap = Get-StatusTaskStatusMap $Repository $FeatureName $StateObj
+    $tasksOut = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $Feature.PSObject.Properties['phases'] -or $null -eq $Feature.phases) { return ,@() }
+    foreach ($phase in @($Feature.phases | Sort-Object { [int]$_.n })) {
+        foreach ($task in @($phase.tasks)) {
+            $tid = [string]$task.id
+            $counts = Get-TaskDecisionCounts $DecisionsText $tid
+            $failures = 0
+            if ($StateObj.tasks.ContainsKey($tid)) {
+                $tr = $StateObj.tasks[$tid]
+                if ($tr -is [System.Collections.IDictionary] -and $tr.Contains('failures') -and $null -ne $tr['failures']) {
+                    $failures = [int]$tr['failures']
+                }
+                elseif ($null -ne $tr.PSObject.Properties['failures'] -and $null -ne $tr.failures) {
+                    $failures = [int]$tr.failures
+                }
+            }
+            $st = if ($statusMap.ContainsKey($tid)) { $statusMap[$tid] } else { 'pending' }
+            $tasksOut.Add([ordered]@{
+                    id             = $tid
+                    delegateTaskId = [string]$task.delegateTaskId
+                    status         = $st
+                    rounds         = $counts.rounds
+                    councils       = $counts.councils
+                    failures       = $failures
+                }) | Out-Null
+        }
+    }
+    return ,@($tasksOut)
+}
+
+function Get-StatusWaitingOn {
+    param(
+        $Feature,
+        [string]$DecisionsText,
+        $TasksList,
+        [string]$Stage
+    )
+    $stopText = Get-StatusOpenStopText $DecisionsText
+    if ($null -ne $stopText) { return @{ stop = $stopText } }
+    $running = [System.Collections.Generic.List[string]]::new()
+    $block = @('preflight', 'running', 'in-review')
+    foreach ($t in @($TasksList)) {
+        if ($block -contains [string]$t.status) {
+            $running.Add([string]$t.delegateTaskId) | Out-Null
+        }
+    }
+    if (@($running).Count -gt 0) { return @{ running = [string[]]@($running) } }
+    if ($Stage -in @('design-review', 'plan', 'signoff')) {
+        $gate = $script:StageExitGate[$Stage]
+        $hasGate = $null -ne $Feature.gates -and $null -ne $Feature.gates.PSObject.Properties[$gate]
+        if (-not $hasGate) { return @{ gate = $gate } }
+    }
+    return $null
+}
+
+function Test-StatusAllTasksMerged {
+    param($TasksList)
+    if (@($TasksList).Count -eq 0) { return $false }
+    foreach ($t in @($TasksList)) {
+        if ([string]$t.status -ne 'merged') { return $false }
+    }
+    return $true
+}
+
+function Get-StatusNextAction {
+    param(
+        [string]$Stage,
+        $WaitingOn,
+        $Feature,
+        $TasksList,
+        [bool]$IsDone
+    )
+    if ($IsDone) { return 'Nothing to do: the feature is done and merged into main.' }
+    if ($null -ne $WaitingOn -and $WaitingOn.ContainsKey('stop')) {
+        return 'Resolve the problem stop with the user, then record a resume decision.'
+    }
+    if ($null -ne $WaitingOn -and $WaitingOn.ContainsKey('running')) {
+        return 'Wait for the running tasks to finish, then reconcile.'
+    }
+    $hasPhases = $null -ne $Feature.PSObject.Properties['phases'] -and $null -ne $Feature.phases -and @($Feature.phases).Count -gt 0
+    switch ($Stage) {
+        'design' { return 'Draft the next design section and get it approved.' }
+        'design-review' {
+            if ($null -eq $Feature.gates -or $null -eq $Feature.gates.PSObject.Properties['design-locked']) {
+                return 'Run the review lenses, write the synthesis, then ask the user to lock the design.'
+            }
+            return 'Move to the plan stage.'
+        }
+        'plan' {
+            if (-not $hasPhases) { return 'Write the plan and import it with plan.' }
+            if ($null -eq $Feature.gates -or $null -eq $Feature.gates.PSObject.Properties['plan-approved']) {
+                return 'Run the plan review, then ask the user to approve the plan.'
+            }
+            return 'Move to the build stage.'
+        }
+        'build' {
+            if (Test-StatusAllTasksMerged $TasksList) {
+                return 'Run the phase tests, then move to signoff.'
+            }
+            return 'Run the next ready tasks from schedule.'
+        }
+        'signoff' {
+            if ($null -eq $Feature.gates -or $null -eq $Feature.gates.PSObject.Properties['signed-off']) {
+                return 'Run the full tests and the drift check, then ask the user to sign off.'
+            }
+            return 'Run finish to merge into main.'
+        }
+        'abandoned' { return 'Nothing to do: the feature is abandoned.' }
+        default { return 'Run the next ready tasks from schedule.' }
+    }
+}
+
+function Get-StatusDiffTouchesRuleFiles {
+    param([string]$Repository, [string]$FeatureName)
+    & git -C $Repository show-ref --verify --quiet 'refs/heads/main' 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $paths = @(Invoke-GitRepo $Repository 'diff' '--name-only' "main...feature/$FeatureName")
+    foreach ($p in $paths) {
+        if ($p -match '(^|/)(AGENTS\.md|CLAUDE\.md|GEMINI\.md|\.cursorrules)$') { return $true }
+        if ($p -match '(^|/)(\.cursor|\.agents)/') { return $true }
+    }
+    return $false
+}
+
+function Get-StatusTokens {
+    param(
+        [string]$FeatureName,
+        [System.Collections.Generic.List[string]]$Warnings
+    )
+    $folder = if ($env:XAGENT_LOG_DIR) { $env:XAGENT_LOG_DIR } else { Join-Path $env:LOCALAPPDATA 'xagent' }
+    try {
+        $folder = [IO.Path]::GetFullPath($folder)
+    }
+    catch {
+        $Warnings.Add("usage log not readable: $folder") | Out-Null
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $folder)) {
+        $Warnings.Add("usage log not readable: $folder") | Out-Null
+        return $null
+    }
+    $file = Join-Path $folder 'runs.jsonl'
+    if (-not (Test-Path -LiteralPath $file)) {
+        return @{ input = 0; output = 0; reasoning = 0; cacheRead = 0; total = 0 }
+    }
+    [long]$inTok = 0
+    [long]$outTok = 0
+    [long]$reaTok = 0
+    [long]$cacheTok = 0
+    try {
+        foreach ($line in [IO.File]::ReadAllLines($file, [Text.UTF8Encoding]::new($false))) {
+            if (-not $line.Trim()) { continue }
+            try {
+                $obj = $line | ConvertFrom-Json
+            }
+            catch { continue }
+            if ($null -eq $obj.PSObject.Properties['feature'] -or [string]$obj.feature -cne $FeatureName) { continue }
+            if ($null -eq $obj.PSObject.Properties['usage'] -or $null -eq $obj.usage) { continue }
+            $u = $obj.usage
+            if ($null -ne $u.PSObject.Properties['input']) { $inTok += [long]$u.input }
+            if ($null -ne $u.PSObject.Properties['output']) { $outTok += [long]$u.output }
+            if ($null -ne $u.PSObject.Properties['reasoning']) { $reaTok += [long]$u.reasoning }
+            if ($null -ne $u.PSObject.Properties['cacheRead']) { $cacheTok += [long]$u.cacheRead }
+        }
+    }
+    catch {
+        $Warnings.Add("usage log not readable: $folder") | Out-Null
+        return $null
+    }
+    $total = $inTok + $outTok + $reaTok + $cacheTok
+    return @{ input = $inTok; output = $outTok; reasoning = $reaTok; cacheRead = $cacheTok; total = $total }
+}
+
+function Invoke-StatusFeature {
+    param([string]$Repository)
+    $selected = Select-FeatureName $Repository
+    if ($null -eq $selected) {
+        $list = @(Get-FeatureList $Repository)
+        $features = @($list | ForEach-Object { @{ name = $_.name; stage = [string]$_.stage } })
+        Out-FeatureOk @{ selected = $null; features = $features }
+        return
+    }
+
+    if ($Name) { Assert-FeatureExists $Repository $selected }
+    else {
+        & git -C $Repository show-ref --verify --quiet "refs/heads/feature/$selected" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "no feature $selected" }
+    }
+
+    $branchRef = "feature/$selected"
+    $feat = Get-FeatureJsonFromRef $Repository $branchRef $selected
+    if (-not $feat) { throw "no feature $selected" }
+    $decPath = "docs/features/$selected/decisions.md"
+    $decText = (Invoke-GitRepo $Repository 'show' "${branchRef}:$decPath") -join "`n"
+    if (-not $decText.EndsWith("`n")) { $decText += "`n" }
+
+    $effStage = Get-EffectiveStage $Repository $selected $feat
+    $isDone = ($effStage -eq 'done')
+    $storedStage = [string]$feat.stage
+    $warnings = [System.Collections.Generic.List[string]]::new()
+
+    if ($isDone) { $warnings.Add("feature $selected is done") | Out-Null }
+
+    $stateObj = Get-FeatureStateObject -Repository $Repository -FeatureName $selected
+    $tasksList = Get-StatusTasksList $Repository $selected $feat $stateObj $decText
+    $waitingOn = if ($isDone) { $null } else { Get-StatusWaitingOn $feat $decText $tasksList $storedStage }
+    $phaseInfo = Get-StatusPhaseInfo $feat (Get-StatusTaskStatusMap $Repository $selected $stateObj)
+    $reviewRuns = if ($isDone) { ,@() } else { Get-StatusReviewRuns $Repository $selected $storedStage $decText }
+    $tokens = Get-StatusTokens $selected $warnings
+    $lastDecisions = Get-StatusLastDecisions $decText
+    $nextAction = Get-StatusNextAction $storedStage $waitingOn $feat $tasksList $isDone
+    $branchLines = @(Invoke-GitRepo $Repository 'branch' '--show-current')
+    $currentBranch = ''
+    if (@($branchLines).Count -gt 0 -and $branchLines[0]) { $currentBranch = [string]$branchLines[0] }
+
+    $out = @{
+        selected              = $selected
+        stage                 = $storedStage
+        phase                 = $phaseInfo
+        checkin               = [string]$feat.checkin
+        branch                = [string]$currentBranch
+        treeClean             = (Test-TreeClean $Repository)
+        tasks                 = $tasksList
+        waitingOn             = $waitingOn
+        reviewRuns            = $reviewRuns
+        diffTouchesRuleFiles  = (Get-StatusDiffTouchesRuleFiles $Repository $selected)
+        tokens                = $tokens
+        lastDecisions         = $lastDecisions
+        nextAction            = $nextAction
+        warnings              = [string[]]@($warnings)
+        features              = @()
+    }
+    Out-FeatureOk $out
 }
 
 function Test-TreeClean([string]$Repository) {
@@ -582,11 +1125,8 @@ function Invoke-ReauditFeature {
         if ($stage -notin @('design-review', 'plan')) { throw "reaudit not allowed in stage $stage" }
 
         $prefix = if ($stage -eq 'design-review') { 'd' } else { 'p' }
-        $pattern = if ($stage -eq 'design-review') { 'design-' } else { 'plan-' }
-        $branch = "feature/$FeatureName"
-        $treeLines = @(Invoke-GitRepo $Repository 'ls-tree' '-r' '--name-only' $branch "--" "docs/features/$FeatureName/reviews/")
-        $count = @($treeLines | Where-Object { $_ -match "/reviews/$pattern.*\.md$" }).Count
-        $n = 1 + $count
+        $kind = if ($stage -eq 'design-review') { 'design' } else { 'plan' }
+        $n = Get-ReviewNumber $Repository $FeatureName $kind
         $body = "${prefix}${n}: phase $parsed"
         $line = Format-DecisionLine -Kind 'reaudit' -Body $body
         Append-TextLf $state.DecPath $line.TrimEnd("`n")
@@ -1674,6 +2214,9 @@ try {
         'merge' {
             $fname = Resolve-FeatureName $repoRoot
             Invoke-MergeFeature $repoRoot $fname
+        }
+        'status' {
+            Invoke-StatusFeature $repoRoot
         }
         default { throw "unknown subcommand $Subcommand" }
     }
