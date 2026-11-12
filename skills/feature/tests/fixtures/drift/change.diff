@@ -1,0 +1,49 @@
+diff --git a/calc.py b/calc.py
+index 3581473..e60cd14 100644
+--- a/calc.py
++++ b/calc.py
+@@ -4,3 +4,13 @@ def add(a, b):
+ 
+ def multiply(a, b):
+     return a * b
++
++
++def subtract(a, b):
++    return a - b
++
++
++def divide(a, b):
++    if b == 0:
++        return None
++    return a / b
+\ No newline at end of file
+diff --git a/test_calc.py b/test_calc.py
+index 6b82360..50f8894 100644
+--- a/test_calc.py
++++ b/test_calc.py
+@@ -1,6 +1,6 @@
+ import unittest
+ 
+-from calc import add, multiply
++from calc import add, divide, multiply, subtract
+ 
+ 
+ class TestCalc(unittest.TestCase):
+@@ -10,6 +10,15 @@ class TestCalc(unittest.TestCase):
+     def test_multiply(self):
+         self.assertEqual(multiply(4, 5), 20)
+ 
++    def test_subtract(self):
++        self.assertEqual(subtract(7, 3), 4)
++
++    def test_divide(self):
++        self.assertEqual(divide(8, 2), 4.0)
++
++    def test_divide_by_zero(self):
++        self.assertIsNone(divide(1, 0))
++
+ 
+ if __name__ == "__main__":
+-    unittest.main()
++    unittest.main()
+\ No newline at end of file

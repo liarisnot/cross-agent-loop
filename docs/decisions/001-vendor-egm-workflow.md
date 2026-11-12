@@ -19,7 +19,7 @@ Options considered:
 
 Vendor the EGM files that `feature` needs (workflow skill text, personas, standards) into this repo. Treat it as **vendor and track**, not a hard fork:
 
-- **Pin.** `THIRD_PARTY_NOTICES.md` records the upstream commit for every vendored file, as already done for the four `delegate` personas.
+- **Pin.** `THIRD_PARTY_NOTICES.md` records the upstream commit for every vendored file and lists all vendored personas and standards.
 - **Mark modifications.** Files we change carry a header saying so (Apache-2.0 §4(b)) and are listed as modified in `THIRD_PARTY_NOTICES.md`. Files we don't change stay byte-identical, so diffing against upstream stays easy.
 - **Keep our changes in our own files where possible.** Plain-language routing, `state.json`, cross-vendor reviewers and gates go in our own files that wrap the vendored text, not inside it. That keeps upstream merges mostly copy-over.
 - **Sync step.** Run it when the EGM plugin updates, or at least monthly while the project is active:
@@ -42,3 +42,9 @@ Declare a fork (stop syncing, rename the vendored workflow, note it here) if any
 - `feature` can run every design stage from plain language, and goldfish reviewers can be routed through our cross-vendor `review` profile instead of Claude subagents.
 - We take on keeping the copy in sync. The pin, the modification markers and the sync script keep that cheap.
 - Licensing: attribution and the license text are already in place (`THIRD_PARTY_NOTICES.md`, `skills/delegate/personas/LICENSE-egm`). Extend the file list as files are vendored.
+
+## Final layout (2026-11-11)
+
+- **EGM workflow (unmodified upstream text):** `skills/feature/egm/` — draft, review, resolve, review-loop skills, synthesizer agent, execution instructions, and `LICENSE-egm`.
+- **Personas and standards (vendored into `delegate`):** `skills/delegate/personas/` — goldfish lenses, council-related files, `standards.json`, and standards markdown. **`drift_report.md` is adapted** for the sign-off diff check (three-list output, single design plus diff inputs).
+- **Upstream tracking:** each month, compare `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` with the pinned commit `b7d9e27` recorded in `THIRD_PARTY_NOTICES.md`. When HEAD moves, run the sync workflow (diff vendored paths, copy or hand-merge, re-run smoke tests, bump the pin). The helper script `scripts/egm-sync.ps1` is deferred until the first upstream change after v1.

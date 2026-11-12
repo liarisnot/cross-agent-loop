@@ -200,3 +200,103 @@ From build step 2 on, every build step goes through the `delegate` skill, loaded
 | D16 | 2026-11-11 | **A worker run was killed from outside:** `fb-tvm` (step 2.4) ran as a background Bash task; after about 45 minutes Claude Code stopped it because the machine was low on memory. `delegate.ps1` and the Cursor CLI both died without running `finally`: a **stale pid file** stayed in `.xagent/runs/fb-tvm/` (its processes gone), `stdout.json` was empty, so no session id and no usage line. The worker's uncommitted work (+1106 lines in the 3 files) survived in the worktree. Same recovery as D13 applies (fresh session on the same `-TaskId`). | **Fixed:** SKILL.md now launches long workers detached (`Start-Process`, summary to a file, watched with Monitor). Round 2 ran that way: 1098 s, 91k tokens, session id captured. `reconcile` (step 2.5) must still treat a pid file whose processes are gone as not live, as the design says |
 | D17 | 2026-11-11 | **`fb-tvm` (step 2.4) recap.** Preflights: comprehension 43 s / 36k, readiness 136 s / 159k; readiness found a real blocker (empty-string rule vs validation) and a design flaw in my task (holding the lock for the whole test run). Round 1 was killed (D16) with 19/27 new tests passing; two code bugs were the D14 family again: `return ,$arr` **plus** `@()` at the call site nests the array (two paths became one joined string, none became `[""]`), and `.Count` on an empty `Where-Object` result. The D15 preflight on the round-2 file (37 s / 24k) asked for a failure-to-fix map and a definition of done; both added. Round 2 (fresh session, detached): 1098 s / 91k, 138/138. Lead probes passed (non-ASCII and spaced names, 4 changes, quotes in the merge message, failures count). Lead fix-up: ordinal `StartsWith` in the scope and overlap helpers. **The full suite now takes 635 s** (was 300 s): size `-TimeoutSec` and the filtered-test advice for it. | Recorded; the next task files give the 635 s figure |
 | D18 | 2026-11-11 | **Test cost, measured and cut (`fb-speed`).** The user asked whether a skill needs that many tests. Profile: each `feature.ps1` child call costs about 0.7 s (200 ms `pwsh` start, about 26 ms per git call, 70 ms `Test-Json`); stage setup made 3-5 such calls per test; one `verify` test built 7 repos and worktrees to check 7 path patterns (50 s). Fix, delegated: setup helpers call the script in-process (commands under test stay child processes), pure path and overlap rules get in-process unit cases taken from the script's own function definitions, 27 tests tagged `Slow`. Full suite 628 s to 366 s (164 tests), fast tier 225 s (137). Preflights: readiness caught that my `Slow` rule would tag nearly every test, and that one "overlap" test I meant to delete checks status gating. Worker 910 s / 53k. Also a lead slip: a Python edit script turned `\a` into a BEL byte in the task file; caught by a byte check before launch. | Design item 19's test list is long because the zero-decision rule enumerates every case; step 2.5's lists were trimmed (about 17 `status` tests) before delegating |
+
+## The feature skill
+
+### Automated tests
+
+Install Pester for the current user (once):
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -SkipPublisherCheck
+```
+
+Full suite (194+ tests; measured 2026-11-12, about **9 minutes** on the build machine):
+
+```powershell
+pwsh -NoProfile -c 'Import-Module Pester -MinimumVersion 5.5; $r = Invoke-Pester skills/feature/tests -PassThru -Output Normal; exit $r.FailedCount'
+```
+
+Fast tier (excludes tests tagged `Slow`; about **6 minutes**):
+
+```powershell
+pwsh -NoProfile -c 'Import-Module Pester -MinimumVersion 5.5; $c = New-PesterConfiguration; $c.Run.Path = "skills/feature/tests"; $c.Filter.ExcludeTag = "Slow"; $c.Output.Verbosity = "Normal"; Invoke-Pester -Configuration $c'
+```
+
+Quick sandbox checks (from `<repo>`):
+
+```powershell
+pwsh -NoProfile -c '$d = (pwsh -NoProfile -File scripts/new-sandbox.ps1); if ($LASTEXITCODE) { exit 1 }; Push-Location $d; python -m unittest -q; $c = $LASTEXITCODE; $n = (git log --oneline | Measure-Object).Count; Pop-Location; Remove-Item -Recurse -Force $d; if ($c -ne 0 -or $n -ne 1) { exit 1 }; "sandbox ok"'
+```
+
+```powershell
+pwsh -NoProfile -c '$r = (Get-Location).Path; $d = (pwsh -NoProfile -File scripts/new-sandbox.ps1); Push-Location $d; git apply (Join-Path $r "skills/feature/tests/fixtures/drift/change.diff"); $a = $LASTEXITCODE; python -m unittest -q; $t = $LASTEXITCODE; Pop-Location; Remove-Item -Recurse -Force $d; if ($a -ne 0 -or $t -ne 0) { exit 1 }; "drift diff ok"'
+```
+
+### Machine setup
+
+Outside the repo (not committed):
+
+1. Junction the skills into Claude Code's skill folder (or copy them — see the design's Installation section if the feature will edit `skills/`):
+   - `New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\feature" -Target "<repo>\skills\feature"`
+   - `New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\delegate" -Target "<repo>\skills\delegate"`
+2. Install Pester 5.5+ for the current user (command above).
+3. Run `pwsh -NoProfile -File <repo>/skills/feature/scripts/feature.ps1 doctor` and add **both** permission rules it prints to `~\.claude\settings.json` (one allowing `feature.ps1`, one allowing `delegate.ps1`). Use the junction path Claude Code reports as each skill's base directory, with forward slashes.
+
+Prerequisite for the manual sandbox below: a real `python` on `PATH` (disable the Windows Store alias if it intercepts `python`).
+
+### Manual checklist (CUJ 1–7, G1, drift)
+
+Run in **fresh Claude Code sessions** with the `feature` and `delegate` skills loaded from their installed locations (junctions). The target repo is a throwaway git repo created by `scripts/new-sandbox.ps1`; start each session in that folder. Do not use this project's checkout as the feature target unless you intend to build `feature` itself.
+
+**Order**
+
+1. **Sandbox A:** CUJ 1–7 in sequence (one feature name, e.g. `export`).
+2. **Sandbox A (same session or a new one):** G1 routing and "must not fire" checks that change no files.
+3. **Sandbox B:** a new sandbox and a fresh feature; run only the backward/end phrases (`go back to the design`, `go back to the plan`, `abandon this feature`).
+4. **Drift fixture check** from `<repo>` (command below).
+5. Delete any leftover sandbox folders under `%TEMP%`.
+
+| # | Type | Say (plain language) | Must happen | Goal |
+|---|---|---|---|---|
+| 1 | CUJ 1 | "Let's design an export-to-PDF feature: users need to …" (confirm the proposed name) | One-line statement naming the feature and `design`; branch `feature/<name>`; `docs/designs/<name>.md` drafted section by section; stage moves to `design-review` when drafting finishes | G1, G2 |
+| 2 | CUJ 2 | After pausing mid-build (including a killed worker): `/clear`, then "where are we?" | Answer from disk only: stage, phase, task states (killed run → `failed`), waiting-on, token use, next action on "continue" — no reliance on chat history | G2 |
+| 3 | CUJ 3 | "review the design" → resolve findings → clear yes to lock | Goldfish reports committed; synthesis with Blocker/Major/Nit; **design-locked** recorded with quote; stage → `plan` | G3, G7 (if council offered) |
+| 4 | CUJ 4 | "plan it" → readiness fixes → clear yes to approve (note check-in mode) | `plan.md` and phases/tasks with files, tests, profiles; **plan-approved** recorded; stage → `build` | G3, G5 |
+| 5 | CUJ 5 | "build it" through at least one phase; trigger a council if a task fails review twice on `code` | Parallel non-overlapping tasks; merges on `feature/<name>` with `Xagent-Task` trailers; `[council]` line on escalation; consensus → retry, disagreement → stop | G4, G5, G7 |
+| 6 | CUJ 6 | "test and sign off" → review drift lists → clear yes to sign off | Full suite on `feature/<name>`; drift report (missing / added / **changed**) shown; **signed-off** recorded; `feature.ps1 finish` merges to `main`; feature marked `done` | G6 |
+| 7 | CUJ 7 | At plan-approval gate, reply "ok, looks fine I guess" | One confirming question naming the gate; **plan-approved** not recorded until a clear yes | G3 |
+| 8 | G1 | "design a feature for X" / "let's design X" | Router step 4 one-liner, then `new` + design stage | G1 |
+| 9 | G1 | "review the design" | `design-review` stage | G1 |
+| 10 | G1 | "lock the design" (only after review resolved) | **design-locked** recorded | G1 |
+| 11 | G1 | "plan it" / "plan the feature" | `plan` stage (not Claude plan mode) | G1 |
+| 12 | G1 | "approve the plan" | **plan-approved** recorded | G1 |
+| 13 | G1 | "build it" / "continue" | `build` or resume current stage | G1 |
+| 14 | G1 | "test and sign off" | `signoff` stage | G1 |
+| 15 | G1 | "sign off" (after final check shown) | merge via `finish` | G1 |
+| 16 | G1 | "where are we?" / "status" | read-only status report | G1 |
+| 17 | G1 | "convene a council" / "get a second opinion on …" | council path per router | G1, G7 |
+| 18 | G1 | "this feature is slow" | skill does **not** invoke; no feature files change | G1 |
+| 19 | G1 | "what features does X have?" | skill does **not** invoke | G1 |
+| 20 | G1 | "add a feature flag" | skill does **not** invoke | G1 |
+| 21 | G1 | "plan it" while in Claude Code plan mode (Shift+Tab on) | read-only status; asks to leave plan mode before writing stages | G1 |
+| 22 | Back | "go back to the design" (sandbox B, feature at `build` or later) | `stage` → `design-review`; design-locked and later gates cleared | G3 |
+| 23 | Back | "go back to the plan" | `stage` → `plan`; plan-approved cleared | G3 |
+| 24 | Back | "abandon this feature" (confirm yes) | stage `abandoned`; checkout → `main` if tree clean | G1 |
+
+**Drift persona (planted deviation)**
+
+The fixture diff implements `skills/feature/tests/fixtures/drift/design.md` except **`divide` returns `None` on a zero divisor instead of raising `ValueError`** (tests expect `None`). The reviewer should list that under **Changed**.
+
+From `<repo>`:
+
+1. Write `.xagent/tasks/drift-check.md`: "Compare the design `.xagent/design.md` with the change `.xagent/change.diff` and report behaviour missing, added or changed."
+2. Run:
+
+```powershell
+pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona drift_report -Model grok-4.7-medium -Repo <repo> -TaskId drift-check -TaskFile .xagent/tasks/drift-check.md -TargetFile skills/feature/tests/fixtures/drift/design.md,skills/feature/tests/fixtures/drift/change.diff
+```
+
+3. **Pass:** the report's **Changed** list names the zero-divisor behaviour (`ValueError` vs returning `None`).
+4. `pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1 -Agent cursor -Cleanup -Profile review -Repo <repo> -TaskId drift-check`
+5. Delete the sandbox folder(s) under `%TEMP%` when finished.
