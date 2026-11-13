@@ -52,7 +52,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
 - **Worker sandboxing** (a restricted account or a VM) is the **high-priority first item after v1**. Workers run with `--force` and can read the machine's files.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
-- **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`.
+- **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
 - **Delete the local backup bundle** that still contains the pre-rewrite history with the email, once confident.
 - **Before making the repo public,** delete and recreate the GitHub repo, so old commits aren't reachable by SHA.
 - **First trial on a real repo** (for example MyApp), using `feature` once it's built.
