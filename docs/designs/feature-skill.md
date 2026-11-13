@@ -3,6 +3,7 @@
 *   **Author:** Eugene Chin
 *   **Status:** Approved (locked 2026-11-11)
 *   **Date:** 2026-11-09 (revised 2026-11-11 after review stages 5–9)
+*   **Amended:** 2026-11-13, after the build. The build's task files settled details this design left open or got wrong, and they are written back here: `reconcile`'s output and finished-run rule, the second-failure stop off the feature branch, the entry rows the router handles itself, and on-request council ids. No goal, gate or stage changed.
 
 --------------------------------------------------------------------------------
 
@@ -199,7 +200,7 @@ delegate.ps1 (existing, modified by v1) --> Cursor CLI
     2.  Run `feature.ps1 status -Cwd <current folder>`. This picks the active feature (see [Active feature selection](#active-feature-selection)).
     3.  Run `feature.ps1 reconcile` for that feature. On contradictions, show them and stop. If either script call fails, show its error and stop, and never guess the stage.
     4.  State in one line the feature, the stage and the action about to be taken.
-    5.  Read the matching stage file and follow it.
+    5.  Read the matching stage file and follow it. The entry rows with no stage file of their own are handled by the router itself (see [Rows the router handles](#rows-the-router-handles)).
 *   **Stage files (`skills/feature/stages/*.md`).** Instructions for one stage each: `design.md`, `design-review.md`, `plan.md`, `build.md`, `signoff.md`, and `status.md` for "where are we?". The design and review stage files tell the lead to follow the vendored EGM workflow, and list where our flow differs from it (see [EGM integration](#egm-integration)).
 *   **State script (`skills/feature/scripts/feature.ps1`).** All reads and writes of feature state go through this script, so the rules can be tested. It prints compact JSON, like `delegate.ps1`. Its subcommands are listed in [item 8](#8-skillsfeaturescriptsfeatureps1-create).
 *   **Vendored EGM (`skills/feature/egm/`).** A copy of the EGM skill text and standards our stages use, pinned per [decision 001](../decisions/001-vendor-egm-workflow.md). The goldfish personas live with the other personas in `skills/delegate/personas/`.
@@ -260,6 +261,18 @@ The phrases are examples. The router also accepts close paraphrases.
 | "abandon this feature" | `abandoned`, switch back to `main` if clean | — |
 | **Must not fire:** "this feature is slow", "what features does X have?", "add a feature flag" | nothing | — |
 
+#### Rows the router handles
+
+These rows have no stage file. The router handles them after its steps 1–4:
+
+*   **"lock the design".** Only in `design-review` once the review is resolved, using the lock steps in `design-review.md`. In any other stage, the router says what stage the feature is in and what is needed first.
+*   **"approve the plan".** Only in `plan` with a plan imported, using the approve steps in `plan.md`.
+*   **"sign off".** Only in `signoff` after the final check was shown, using the sign-off step in `signoff.md`.
+*   **Check-in mode.** `feature.ps1 checkin`, in any stage, confirmed in one line.
+*   **"go back to the design / plan".** `feature.ps1 stage -To design-review` or `-To plan` with the user's words as the reason, then that stage's file.
+*   **"abandon this feature".** One plain confirmation (the branch and records are kept), then `feature.ps1 stage -To abandoned`, and a report of whether the checkout switched to `main`.
+*   **Council.** In `build`, about a task: the build council in `build.md`. Otherwise an [on-request council](#council-g7).
+
 ### Active feature selection
 
 The skill checks these in order:
@@ -315,18 +328,21 @@ Derived, not stored:
 
 | Fact | Source | Rule |
 |---|---|---|
-| Feature branch exists | git | Missing while the stage is not `done` or `abandoned` → **contradiction, ask** |
+| Feature branch exists | git | Missing while the local `state.json` exists → **contradiction `branch-missing`, ask**, whatever the stage (it can't be read once the branch is gone). Nothing else is checked. With no local file either, `no feature <name>` |
 | Feature branch checked out | `git branch --show-current` | Another branch checked out while the feature is active → **ask the user to switch back** (nothing changes) |
 | Merge in progress on `main` | git (`MERGE_HEAD` while on `main`) | **Ask** the user to finish or abort the merge |
 | Task merged | a merge commit on `feature/<name>` with the trailer `Xagent-Task: <id>` | Counts as `merged`. This absorbs manual merges that carry the trailer. |
 | Task merged per local state, no trailer commit | — | **contradiction, ask** |
-| Task in `preflight`, `running` or `in-review` | the newest run under `.xagent/runs/` for the task's own ids (`<delegate task id>`, `-pc`, `-pr`, `-c<k>`), and the process list | A finished run (`.stdout.json` plus `result.json` or `.review.md`) → `in-review`. No live `delegate.ps1` or worker process and no finished run → `failed`, and the slot is freed. A live process whose `delegate.ps1` parent still runs → left alone, never launched twice. A live worker whose parent is gone → killed and marked `failed`. A `failed` task is not scheduled again until the user resumes it ("continue" asks first). A second failure of the same task is a problem stop. |
+| Task in `preflight` or `running` | every pid file and the newest run under `.xagent/runs/` for the task's own ids (`<delegate task id>`, `-pc`, `-pr`, `-c<k>`), and the process list | A live `delegate.ps1` (pid and start time match) → left alone, never launched twice. A live worker whose parent is gone → killed and marked `failed`. Otherwise, if the newest run has a non-empty `stdout.json` → `in-review`. Else → `failed`, and the slot is freed. A `failed` task is not scheduled again until the user resumes it ("continue" asks first). A second failure of the same task is a problem stop: a `[stop]` line is committed if `feature/<name>` is checked out; otherwise nothing is committed and the contradiction `stop-not-recorded` asks the user to check it out (a later reconcile won't retry, so the lead records that stop with `decision -Kind stop`). |
+| Task in `in-review` | — | Unchanged. The lead sets `running` before starting a round, so the round is checked then. |
 | `signed-off` recorded, feature not yet in `main` | git | `finish` is pending |
 | Feature merged into `main` | `feature/<name>` is an ancestor of `main` | Counts as `done` if `signed-off` is recorded (derived, not stored). Without that gate → **contradiction, ask** |
 | Gates, stage, plan, stops, rounds, councils | committed `feature.json` and `decisions.md` | Always taken from the committed copy |
 | Session ids | local only | Kept. If the local file is missing, the losses are reported and the affected tasks resume from their last committed state |
 
 All worker merges into the feature branch use `git merge --no-ff` with the trailers, so a task's completion can be proven from history after `delegate -Cleanup` deletes the task branch.
+
+**Finished run.** A run is finished when its `stdout.json` is non-empty. `delegate.ps1` creates that file at launch and fills it when the run ends, for every kind of run; a run killed from outside leaves it empty. `result.json` can't be the test (it lives in the worker's worktree, which cleanup removes), and neither can `.review.md` (only read-only runs write it).
 
 ### Build scheduling
 
@@ -398,6 +414,7 @@ This applies to the build's task preflights only. The design and plan reviews fo
     *   **Disagreement.** The seats disagree on the fix, and the lead cannot settle it from verified facts. That's a problem stop, with `delegate`'s escalation brief.
     *   **Cap.** A task gets at most 2 councils. If the retry after the second council fails review, that's a problem stop.
 *   **On request.** At any stage, the user can ask for a council.
+*   **Ids for design, plan and on-request councils.** These use the same procedure and seats. The run id is `<name12>-dc<k>` in `design` and `design-review`, and `<name12>-pc<k>` otherwise. `<name12>` is the name cut to 12 characters, without a trailing `-`. `<k>` is 1 plus the number of `[council]` lines starting `design:` (or `plan:`). The question file is `.xagent/features/<name>/council-<run id>.md`. The outcome is logged as `[council] design: …` or `plan: …`.
 
 ### Goldfish review routing
 
@@ -862,7 +879,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
     | `doctor` | — | Check the prerequisites listed in Installation, and print what's missing plus the permission rules to add. |
     | `new` | `-Name` | Fail if the tree isn't clean, the branch exists, or the feature list has a feature in progress. Run `git switch -c feature/<name> main`. Write `feature.json` (`{name, stage: "design", checkin: "on-problems", designDoc: "docs/designs/<name>.md", gates: {}}`) and `decisions.md` from the template, and commit `feature(<name>): start`. |
     | `status` | `[-Name]`, `[-Cwd]` | Selection rules, then print an object matching `status.schema.json`. With no feature, print `{selected:null, features:[…]}`. Read-only, and takes no lock. |
-    | `reconcile` | `-Name` | Apply the reconcile table, including checking pid files for in-flight tasks. When a task becomes `failed`, add 1 to its local `failures`. A second failure appends a `[stop]`. Print `{changes:[], contradictions:[], lost:[]}`. Contradictions change nothing. |
+    | `reconcile` | `-Name` | Apply the reconcile table, including checking pid files for in-flight tasks. When a task becomes `failed`, add 1 to its local `failures`. A second failure appends and commits a `[stop]` (only when `feature/<name>` is checked out; otherwise the contradiction `stop-not-recorded`). Print `{name, changes:[], contradictions:[], lost:[]}`. Contradiction kinds: `branch-missing`, `wrong-branch`, `merge-in-progress`, `merged-without-trailer`, `merged-without-signoff`, `stop-not-recorded`. Contradictions change nothing. |
     | `stage` | `-Name`, `-To`, `[-Reason]` (default `<from> -> <to>`, the decision text) | Forward moves one step at a time. Where the stage table lists a gate to leave the current stage, only with that gate recorded. Backward moves to any earlier stage clear that stage's exit gate and every later gate. `abandoned` is allowed from any stage, and switches to `main` if the tree is clean. Append a decision and commit. |
     | `gate` | `-Name`, `-Gate`, `-Quote`, `[-Checkin]` | The gate must match the stage (`design-review` → `design-locked`, `plan` → `plan-approved`, `signoff` → `signed-off`). Record `{at, quote, sha}`, where `sha` is `git rev-parse feature/<name>`. For `design-locked`, also record `designBlob`, the blob of `designDoc` at that SHA. Append a decision and commit. `-Checkin` is allowed only with `plan-approved`, and sets the mode through the same code as `checkin`. |
     | `plan` | `-Name`, `-PlanFile` | Allowed only in stage `plan`. Validate against `plan.schema.json`, then check: unique ids of at most 20 characters, existing `dependsOn`, no cycles, a dependency's phase ≤ the task's phase, and non-empty `files`. Compute the `delegateTaskId`s, keeping the earlier one for any task already in `feature.json`. A re-plan must still contain every task that has an `Xagent-Task` trailer on `feature/<name>`, with every field equal (judged from git, not from `state.json`). Write the plan into `feature.json`, generate `plan.md`, delete the input file and commit. |
@@ -1117,7 +1134,7 @@ Names used below: `<repo>` is the user's checkout of the target repo, where `fea
         *   a finished run becomes `in-review`;
         *   a task in `preflight` whose live run is `<delegateTaskId>-pr` stays in `preflight`;
         *   a pid file whose `pid` is gone and whose `childPid` is live (a sleeping test process) has that process killed and the task marked `failed`. A `childPid` whose start time differs is left alone;
-        *   a `failed` task is not scheduled until set back to `pending`, and a second failure opens a `[stop]`;
+        *   a `failed` task is not scheduled until set back to `pending`, and a second failure opens a `[stop]`; with another branch checked out, it reports `stop-not-recorded` and commits nothing;
         *   a feature merged to `main` without `signed-off` is a contradiction;
         *   a missing local file is rebuilt and the losses are reported.
     *   **Committed state**:
