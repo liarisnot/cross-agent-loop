@@ -16,7 +16,7 @@ Use each run's `model` as `status` gives it. Do not swap models except in [Faile
 
 ### Reviewer runs
 
-Run `feature.ps1 status -Repo <repo> -Name <name>` and read `reviewRuns`. Each run has `id`, `phase`, `persona`, `model`, `standard` and `done`. Do not invent runs. On resume, the runs with `done: false` are still to do. Continue from the first of them.
+Run `feature.ps1 status -Repo <repo> -Name <name>` and read `reviewRuns`. Each run has `id`, `phase`, `persona`, `model`, `standard` and `done`. Do not invent runs. On resume, the runs with `done: false` are still to do, except the runs of a round the user declined: read the decisions (`git -C <repo> show feature/<name>:docs/features/<name>/decisions.md`) and skip every run of round `<n>` when a line contains `review design-<n>: declined by the user`. Continue from the first run left.
 
 For each run that is not done, follow the cap rule in SKILL.md. Start as many of those runs as that rule allows, in one message. For each:
 
@@ -92,6 +92,8 @@ If that fails too, the lens is recorded as **not run**, never as "no findings". 
 ```text
 feature.ps1 decision -Repo <repo> -Name <name> -Kind dismiss -Text "<run id>: not run — <reason>"
 ```
+
+**Declining another round.** When the user declines another review round, log it once: `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "review design-<n>: declined by the user"`, where `<n>` is the number of the round they declined (the `d<n>` in its run ids, counted from 1). It is `-Kind decision`, not `dismiss`: it is neither a waiver nor a stop. Do not log that round's lens runs one by one as not run: they never started. `status.reviewRuns` still lists them with `done: false`; after this decision, skip them. The not-run rule above applies only to a lens that started and ended without a report.
 
 ### Checkpoints
 

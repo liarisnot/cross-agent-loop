@@ -124,7 +124,18 @@ function Get-DecisionCommitSuffix([string]$line) {
 
 function Limit-CommitMessage([string]$msg) {
     if ($msg.Length -le 72) { return $msg }
-    return $msg.Substring(0, 72)
+    $head72 = $msg.Substring(0, 72)
+    $lastSpace = -1
+    for ($i = 40; $i -lt 72; $i++) {
+        if ($head72[$i] -eq ' ') { $lastSpace = $i }
+    }
+    if ($lastSpace -ge 40) {
+        $result = $head72.Substring(0, $lastSpace)
+    } else {
+        $result = $msg.Substring(0, 71)
+    }
+    $result = $result -replace '[ ,;:\-\u2013]+$', ''
+    return $result + [char]0x2026
 }
 
 function Write-TextLf {
@@ -978,7 +989,7 @@ function Invoke-StageFeature {
         if ($To -eq $from) { throw 'already at that stage' }
 
         if ($To -eq 'abandoned') {
-            $body = if ($Reason) { $Reason } else { "$from -> abandoned" }
+            $body = if ($Reason) { "$from -> abandoned: $Reason" } else { "$from -> abandoned" }
             $line = Format-DecisionLine -Kind 'stage' -Body $body
             $feat.stage = 'abandoned'
             Write-FeatureJsonFile $state.FeatPath $feat
@@ -1011,7 +1022,7 @@ function Invoke-StageFeature {
             throw 'invalid stage transition'
         }
 
-        $body = if ($Reason) { $Reason } else { "$from -> $To" }
+        $body = if ($Reason) { "$from -> $To`: $Reason" } else { "$from -> $To" }
         $line = Format-DecisionLine -Kind 'stage' -Body $body
         $feat.stage = $To
         Write-FeatureJsonFile $state.FeatPath $feat
@@ -2177,6 +2188,37 @@ function Test-PathInScope {
     return $false
 }
 
+function Test-CachePath([string]$Path) {
+    $norm = ([string]$Path) -replace '\\', '/'
+    $segments = $norm -split '/'
+    $cacheSegs = @('__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache')
+    foreach ($seg in $segments) {
+        if ($cacheSegs -ccontains $seg) { return $true }
+    }
+    $leaf = $segments[$segments.Count - 1]
+    if ($leaf.EndsWith('.pyc', [StringComparison]::Ordinal)) { return $true }
+    return $false
+}
+
+function Get-IgnoredCachePaths {
+    param([string]$WorktreePath)
+    $gitBase = @('-c', 'core.quotepath=off', '-C', $WorktreePath)
+    $untracked = @(& git @gitBase 'ls-files' '--others' '--exclude-standard' 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'git ls-files --others failed' }
+    $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($p in @($untracked)) {
+        $line = ([string]$p).Trim()
+        if (-not $line) { continue }
+        if ($line.StartsWith('.xagent/', [StringComparison]::Ordinal)) { continue }
+        if (-not (Test-CachePath $line)) { continue }
+        [void]$set.Add($line)
+    }
+    $arr = [string[]]::new($set.Count)
+    $set.CopyTo($arr)
+    [Array]::Sort($arr, [StringComparer]::Ordinal)
+    return ,[string[]]$arr
+}
+
 function Get-ChangedPaths {
     param([string]$WorktreePath, [string]$BaseSha)
     $gitBase = @('-c', 'core.quotepath=off', '-C', $WorktreePath)
@@ -2185,16 +2227,37 @@ function Get-ChangedPaths {
     $untracked = @(& git @gitBase 'ls-files' '--others' '--exclude-standard' 2>$null)
     if ($LASTEXITCODE -ne 0) { throw 'git ls-files --others failed' }
     $set = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($p in (@($diffOut) + @($untracked))) {
+    foreach ($p in @($diffOut)) {
         $line = ([string]$p).Trim()
         if (-not $line) { continue }
         if ($line.StartsWith('.xagent/', [StringComparison]::Ordinal)) { continue }
+        [void]$set.Add($line)
+    }
+    foreach ($p in @($untracked)) {
+        $line = ([string]$p).Trim()
+        if (-not $line) { continue }
+        if ($line.StartsWith('.xagent/', [StringComparison]::Ordinal)) { continue }
+        if (Test-CachePath $line) { continue }
         [void]$set.Add($line)
     }
     $arr = [string[]]::new($set.Count)
     $set.CopyTo($arr)
     [Array]::Sort($arr, [StringComparer]::Ordinal)
     return ,[string[]]$arr
+}
+
+function Test-MergeBlockingPorcelainLine([string]$Line) {
+    $line = ([string]$Line).TrimEnd("`r")
+    if (-not $line) { return $false }
+    if ($line.StartsWith('?? ')) {
+        $path = $line.Substring(3).Trim()
+        if ($path.StartsWith('"') -and $path.EndsWith('"')) {
+            $path = $path.Substring(1, $path.Length - 2)
+        }
+        $path = $path -replace '\\', '/'
+        if (Test-CachePath $path) { return $false }
+    }
+    return $true
 }
 
 function Invoke-TaskTestCommand {
@@ -2352,6 +2415,7 @@ function Invoke-VerifyFeature {
         throw "worktree not found: $wt"
     }
 
+    $ignoredCaches = Get-IgnoredCachePaths -WorktreePath $wt
     $changed = Get-ChangedPaths -WorktreePath $wt -BaseSha $base
     $scopeFiles = Get-JsonPropertyStringArray $planTask 'files'
     $outOfScope = [System.Collections.Generic.List[string]]::new()
@@ -2366,11 +2430,12 @@ function Invoke-VerifyFeature {
     $testResult = Invoke-TaskTestCommand -WorktreePath $wt -TestCommand $testCmd -TimeoutSec $timeout
 
     $verifyRec = [ordered]@{
-        at          = Get-UtcDecisionTime
-        inScope     = $inScope
-        changed     = [string[]]@($changed)
-        outOfScope  = [string[]]@($outArr)
-        test        = $testResult
+        at            = Get-UtcDecisionTime
+        inScope       = $inScope
+        changed       = [string[]]@($changed)
+        outOfScope    = [string[]]@($outArr)
+        ignoredCaches = [string[]]@($ignoredCaches)
+        test          = $testResult
     }
 
     Enter-FeatureLock $Repository $FeatureName
@@ -2384,12 +2449,13 @@ function Invoke-VerifyFeature {
     }
 
     Out-FeatureOk @{
-        name       = $FeatureName
-        task       = $Task
-        inScope    = $inScope
-        changed    = [string[]]@($changed)
-        outOfScope = [string[]]@($outArr)
-        test       = $testResult
+        name          = $FeatureName
+        task          = $Task
+        inScope       = $inScope
+        changed       = [string[]]@($changed)
+        outOfScope    = [string[]]@($outArr)
+        ignoredCaches = [string[]]@($ignoredCaches)
+        test          = $testResult
     }
 }
 
@@ -2423,9 +2489,10 @@ function Invoke-MergeFeature {
         if ($stateObj.tasks.ContainsKey($Task)) {
             $wt = $stateObj.tasks[$Task].worktree
             if ($null -ne $wt -and (Test-Path -LiteralPath $wt)) {
-                $porcelain = & git -C $wt 'status' '--porcelain' '--untracked-files=all' 2>&1
-                if ($LASTEXITCODE -ne 0) { throw "git status in worktree: $porcelain" }
-                if ((@(@($porcelain) | Where-Object { $_ })).Count -gt 0) {
+                $porcelain = @(& git '-c' 'core.quotepath=off' '-C' $wt 'status' '--porcelain' '--untracked-files=all' 2>&1)
+                if ($LASTEXITCODE -ne 0) { throw "git status in worktree: $($porcelain -join "`n")" }
+                $blocking = @($porcelain | Where-Object { $_ -and (Test-MergeBlockingPorcelainLine $_) })
+                if ($blocking.Count -gt 0) {
                     throw "worktree has uncommitted changes; commit them on $agentBranch first"
                 }
             }
