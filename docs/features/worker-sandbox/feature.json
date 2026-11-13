@@ -1,0 +1,7 @@
+{
+  "name": "worker-sandbox",
+  "stage": "design",
+  "checkin": "on-problems",
+  "designDoc": "docs/designs/worker-sandbox.md",
+  "gates": {}
+}
