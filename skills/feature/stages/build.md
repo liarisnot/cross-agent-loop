@@ -111,7 +111,13 @@ Run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status running` befo
 
 ## Fix-ups
 
-**Before the merge.** First stage the worker's work (`git -C <worktree> add -A`). Then make the edit in the worktree, and take the counts from `git -C <worktree> diff --shortstat`, which now shows only your unstaged edit. The merge step's commit includes both. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind fix-up -Text "<id>: <files> files, <lines> lines — <what>"`. Then run `feature.ps1 verify -Repo <repo> -Name <name> -Task <id>` again.
+**Before the merge.** First stage the worker's work:
+
+```text
+git -C <worktree> add -A -- . ":(exclude,glob)**/__pycache__/**" ":(exclude,glob)**/.pytest_cache/**" ":(exclude,glob)**/.mypy_cache/**" ":(exclude,glob)**/.ruff_cache/**" ":(exclude,glob)**/*.pyc"
+```
+
+This leaves out the Python cache files that `verify` reports as `ignoredCaches`; they are never part of a task. Then make the edit in the worktree, and take the counts from `git -C <worktree> diff --shortstat`, which now shows only your unstaged edit. The merge step's commit includes both. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind fix-up -Text "<id>: <files> files, <lines> lines — <what>"`. Then run `feature.ps1 verify -Repo <repo> -Name <name> -Task <id>` again.
 
 **After the merge** (a phase test failing on `feature/<name>`). Edit in `<repo>`, commit with the message `fix-up: <what>`, and log the same way, with `phase <n>` in place of the task id: `feature.ps1 decision -Repo <repo> -Name <name> -Kind fix-up -Text "phase <n>: <files> files, <lines> lines — <what>"`. The phase test is the check.
 
@@ -119,7 +125,7 @@ Run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status running` befo
 
 `merge` refuses unless the tree is clean and `HEAD` is `feature/<name>`. On accept:
 
-1. Commit everything in the worker worktree so a fix-up is included: `git -C <worktree> add -A`, then commit with the message `task(<id>): <title>`. If cleanup later reports tracked changes, stop rather than discard them.
+1. Commit everything in the worker worktree so a fix-up is included: `git -C <worktree> add -A -- . ":(exclude,glob)**/__pycache__/**" ":(exclude,glob)**/.pytest_cache/**" ":(exclude,glob)**/.mypy_cache/**" ":(exclude,glob)**/.ruff_cache/**" ":(exclude,glob)**/*.pyc"`, then commit with the message `task(<id>): <title>`. If cleanup later reports tracked changes, stop rather than discard them.
 2. Run `feature.ps1 merge -Repo <repo> -Name <name> -Task <id> -Message "<title>"`. Read `mergeSha`. `-Message` is `<title>`. The script merges with `--no-ff` and the trailer `Xagent-Task: <id>`. If it fails with `merge conflict in …`, the merge was aborted. Show `error` and the files, and stop for the user. Do not discard the worker branch.
 3. Run `delegate.ps1 -Cleanup -Repo <repo> -TaskId <delegateTaskId>`.
 

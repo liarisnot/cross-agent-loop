@@ -196,6 +196,71 @@ Describe 'path rules (unit)' {
     }
 }
 
+Describe 'commit message (unit)' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @('Limit-CommitMessage'))
+    }
+
+    It 'leaves a 72-character message unchanged' {
+        $msg = 'a' * 72
+        Limit-CommitMessage $msg | Should -Be $msg
+        (Limit-CommitMessage $msg).Length | Should -Be 72
+    }
+
+    It 'word-breaks a long design commit subject' {
+        $msg = "feature(subtract-divide): design $([char]0x2013) Overview, Problem, Goals, Non-Goals, Open Questions"
+        $got = Limit-CommitMessage $msg
+        $want = "feature(subtract-divide): design $([char]0x2013) Overview, Problem, Goals, Non-Goals$([char]0x2026)"
+        $got | Should -Be $want
+        $got.Length | Should -BeLessOrEqual 72
+    }
+
+    It 'uses 71 characters plus ellipsis when no break space' {
+        $msg = ('x' * 100)
+        $got = Limit-CommitMessage $msg
+        $got | Should -Be (('x' * 71) + [char]0x2026)
+        $got.Length | Should -Be 72
+    }
+
+    It 'never returns more than 72 characters' {
+        $cases = @(
+            'a' * 72
+            "feature(subtract-divide): design $([char]0x2013) Overview, Problem, Goals, Non-Goals, Open Questions"
+            ('x' * 100)
+            ('word ' * 30)
+        )
+        foreach ($msg in $cases) {
+            (Limit-CommitMessage $msg).Length | Should -BeLessOrEqual 72
+        }
+    }
+}
+
+Describe 'cache path (unit)' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @('Test-CachePath'))
+    }
+
+    $trueCases = @(
+        'src/__pycache__/m.cpython-314.pyc'
+        'stray.pyc'
+        '.pytest_cache/v/x'
+        '.mypy_cache/x'
+        '.ruff_cache/x'
+    )
+    It 'Test-CachePath returns true for <_>' -ForEach $trueCases {
+        Test-CachePath $_ | Should -BeTrue
+    }
+
+    $falseCases = @(
+        'pycache.py'
+        'my__pycache__x/a.py'
+        'src/a.py'
+    )
+    It 'Test-CachePath returns false for <_>' -ForEach $falseCases {
+        Test-CachePath $_ | Should -BeFalse
+    }
+}
+
 Describe 'feature.ps1 new' {
     It 'refuses a dirty tree' {
         $repo = New-TestRepo
@@ -317,6 +382,34 @@ Describe 'feature.ps1 stage and gate' {
         $r = Invoke-Feature @('stage', '-To', 'abandoned', '-Repo', $repo, '-Name', 'ab2') -WorkingDirectory $repo
         $r.Json.ok | Should -BeTrue
         & git -C $repo rev-parse --abbrev-ref HEAD | Should -Be 'feature/ab2'
+    }
+
+    It 'records go-back stage line as from -> to: reason' -Tag 'Slow' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'st6' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @(
+                'stage', '-To', 'plan', '-Reason', 'go back to the plan', '-Repo', $repo, '-Name', 'st6'
+            ) -WorkingDirectory $repo)
+        $dec = (& git -C $repo show 'HEAD:docs/features/st6/decisions.md') -join "`n"
+        $dec | Should -Match '\[stage\] signoff -> plan: go back to the plan'
+    }
+
+    It 'records abandon with reason as from -> abandoned: reason' -Tag 'Slow' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'st6a' -Stage 'design'
+        Assert-FeatureOk (Invoke-Feature @(
+                'stage', '-To', 'abandoned', '-Reason', 'abandon this feature', '-Repo', $repo, '-Name', 'st6a'
+            ) -WorkingDirectory $repo)
+        $dec = (& git -C $repo show 'feature/st6a:docs/features/st6a/decisions.md') -join "`n"
+        $dec | Should -Match '\[stage\] design -> abandoned: abandon this feature'
+    }
+
+    It 'records stage move without reason as from -> to' -Tag 'Slow' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'st6b' -Stage 'design'
+        Assert-FeatureOk (Invoke-Feature @('stage', '-To', 'design-review', '-Repo', $repo, '-Name', 'st6b') -WorkingDirectory $repo)
+        $dec = (& git -C $repo show 'HEAD:docs/features/st6b/decisions.md') -join "`n"
+        $dec | Should -Match '\[stage\] design -> design-review'
     }
 }
 
@@ -1245,6 +1338,56 @@ Describe 'feature.ps1 verify' {
         }
     }
 
+    It 'puts untracked cache in ignoredCaches not changed' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vigc' -Files @('calc.py')
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            Set-Content (Join-Path $wt 'calc.py') -Value 'x' -NoNewline
+            & git -C $wt add calc.py 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            New-Item -ItemType Directory -Force (Join-Path $wt '__pycache__') | Out-Null
+            Set-Content (Join-Path $wt '__pycache__/calc.cpython-314.pyc') -Value 'z'
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vigc', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.inScope | Should -BeTrue
+            $r.Json.changed | Should -Contain 'calc.py'
+            $r.Json.changed | Should -Not -Contain '__pycache__/calc.cpython-314.pyc'
+            $r.Json.outOfScope | Should -Not -Contain '__pycache__/calc.cpython-314.pyc'
+            $r.Json.ignoredCaches | Should -Contain '__pycache__/calc.cpython-314.pyc'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'still lists tracked modified pyc in changed and outOfScope' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            Import-TestPlan -Repo $repo -Name 'vtrp' -Plan (New-OneTaskPlan -Files @('calc.py')) | Out-Null
+            New-Item -ItemType Directory -Force (Join-Path $repo 'bin') | Out-Null
+            Set-Content (Join-Path $repo 'bin/legacy.pyc') -Value 'v1' -NoNewline
+            & git -C $repo add bin/legacy.pyc 2>&1 | Out-Null
+            & git -C $repo commit -m 'track pyc' 2>&1 | Out-Null
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vtrp' -Files @('calc.py') -NoRecord -SkipPlanImport
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            Assert-FeatureOk (Invoke-Feature @(
+                    'task', '-Repo', $repo, '-Name', 'vtrp', '-Task', 't1',
+                    '-Worktree', $wt, '-BaseSha', $ctx.BaseSha
+                ) -WorkingDirectory $repo)
+            Set-Content (Join-Path $wt 'calc.py') -Value 'ok' -NoNewline
+            & git -C $wt add calc.py 2>&1 | Out-Null
+            & git -C $wt commit -m c 2>&1 | Out-Null
+            Set-Content (Join-Path $wt 'bin/legacy.pyc') -Value 'v2' -NoNewline
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtrp', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.changed | Should -Contain 'bin/legacy.pyc'
+            $r.Json.outOfScope | Should -Contain 'bin/legacy.pyc'
+            $r.Json.inScope | Should -BeFalse
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
     It 'counts untracked, ignores __pycache__ and .xagent' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
@@ -1566,6 +1709,30 @@ Describe 'feature.ps1 merge' {
             Set-Content (Join-Path $wt 'untracked.txt') -Value 'u'
             & git -C $repo switch 'feature/mgun' 2>&1 | Out-Null
             (Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgun', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo).Json.error | Should -Match 'uncommitted changes'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'allows merge with untracked cache left in worktree' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $ctx = New-TaskWorktree -Repo $repo -Name 'mgcache' -NoRecord
+        $wt = (Get-TaskWorktreeRoot $ctx)
+        try {
+            $base = $ctx.BaseSha
+            Assert-FeatureOk (Invoke-Feature @(
+                    'task', '-Repo', $repo, '-Name', 'mgcache', '-Task', 't1',
+                    '-Worktree', $wt, '-BaseSha', $base
+                ) -WorkingDirectory $repo)
+            New-Item -ItemType Directory -Force (Join-Path $wt 'src') | Out-Null
+            Set-Content (Join-Path $wt 'src/a.ts') -Value 'x' -NoNewline
+            & git -C $wt add src/a.ts 2>&1 | Out-Null
+            & git -C $wt commit -m 'agent work' 2>&1 | Out-Null
+            New-Item -ItemType Directory -Force (Join-Path $wt '__pycache__') | Out-Null
+            Set-Content (Join-Path $wt '__pycache__/x.pyc') -Value 'c'
+            & git -C $repo switch 'feature/mgcache' 2>&1 | Out-Null
+            $r = Invoke-Feature @('merge', '-Repo', $repo, '-Name', 'mgcache', '-Task', 't1', '-Message', 'm') -WorkingDirectory $repo
+            $r.Json.ok | Should -BeTrue
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
