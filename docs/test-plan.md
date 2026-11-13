@@ -302,3 +302,35 @@ pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1 -Agent cursor -Profile
 3. **Pass:** the report's **Changed** list names the zero-divisor behaviour (`ValueError` vs returning `None`).
 4. `pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1 -Agent cursor -Cleanup -Profile review -Repo <repo> -TaskId drift-check`
 5. Delete the sandbox folder(s) under `%TEMP%` when finished.
+
+### Results, 2026-11-12: manual checklist (step 6)
+
+Run by the user in fresh Claude Code sessions, with the lead checking every result on disk (git log, `feature.json`, `decisions.md`, `state.json`, `feature.ps1 status`) from a separate session. Sandbox A: feature `subtract-divide`, CUJ 1-7 in order, then the G1 phrases. Sandbox B: feature `power-and-mean` (two independent tasks), a killed worker, then the backward phrases.
+
+| # | Result | Evidence |
+|---|---|---|
+| 1 CUJ 1 | Pass | Name proposed and confirmed; one design commit per approved section; requested change (ValueError) applied; `[stage] design -> design-review` |
+| 2 CUJ 2 | Partial | Interrupted session resumed from disk with the stop and the finished run. Killed worker (sandbox B, killed by a watcher 3 s in: pid file left, empty `stdout.json`): the session relaunched it once without counting a failure, as `build.md` says, before any `/clear`, so "where are we?" with a killed run on disk was not seen live (reconcile's orphan handling is covered by Pester) |
+| 3 CUJ 3 | Pass | Consolidated review: one raw report per lens committed, synthesis `design-1`; on-request council (Grok, GLM) reached consensus in round 1, `[council]` recorded, the author's earlier choice changed only after asking; round 2 waived; `design-locked` with quote and design blob; stage `plan` |
+| 4 CUJ 4 | Pass | `plan.md` with phases, tasks, files, tests, profiles, check-in mode; two plan review rounds; `plan-approved` with quote; stage `build` |
+| 5 CUJ 5 | Pass (no council-on-failure) | Sandbox B: two tasks launched 1 s apart in separate worktrees; both merged `--no-ff` with `Xagent-Task`; no task failed review twice, so the escalation council was not exercised |
+| 6 CUJ 6 | Pass | Full suite; `drift_report` listed the `.gitignore` fix-up as Added; `signed-off` with quote; `finish` merged into `main`; `status` derives `done` |
+| 7 CUJ 7 | Pass | "ok, looks fine I guess" at plan approval (and "ok I guess it's fine" at the lock) got one confirming question naming the gate; nothing recorded until a clear yes |
+| 16, 21 | Pass | "where are we?" and "plan it" in plan mode invoked the skill read-only |
+| 18-20 | Pass | "this feature is slow", "what features does calc have?", "add a feature flag" did not invoke it; sandbox unchanged |
+| 22-24 | Pass | Back to the plan (from signoff) cleared `plan-approved`; back to the design cleared `design-locked`; abandon recorded `abandoned` and switched to `main`. Neither move started a review by itself |
+| Drift | Pass | `drift_report` on the fixture (Grok 4.7 medium, 72 s): Changed lists `divide` returning `None` instead of raising `ValueError`, and the matching test |
+
+Rows 8-15 and 17 were exercised by the CUJ runs.
+
+**Findings**
+
+| # | Finding | Status |
+|---|---|---|
+| S1 | Commit subjects are cut at 72 characters mid-list (`design – Overview, Problem, Goals, Non-Goals,`) | Open: cut at a word boundary or move the list to the body |
+| S2 | Paths inside the vendored EGM files (`resources/execution_instructions.md`, `resources/document_standards/`, `${CLAUDE_PLUGIN_ROOT}/docs/claude.md`) did not resolve from the skill | Fixed in `a034b3c`: the router maps them |
+| S3 | Waiving a review round writes one `[dismiss]` commit per planned lens run (ten for a design round) | Open: one record for the whole round |
+| S4 | `verify` flags `__pycache__/*.pyc` written by the test run as out of scope, so every Python repo without a `.gitignore` stops at its first task (both sandboxes; the plan saying the bytecode was expected did not help) | Open: needs a decision (ignore well-known caches in `verify`, run tests with `PYTHONDONTWRITEBYTECODE`, or add a `.gitignore` task in the plan) |
+| S5 | A foreground review run's summary line reached the session without `reviewFile`; the session found the report in the log folder | Note: likely Headroom compressing the tool output in that session; not reproduced |
+| S6 | `feature.ps1 stage -Reason` writes only the reason (`[stage] go back to the plan`), losing which stage it left | Open: write `<from> -> <to>: <reason>` |
+| S7 | The lint `fb-stages-check.ps1` fails on the main checkout because `core.autocrlf` gives CRLF files | Open: the lint should accept CRLF in the working copy |
