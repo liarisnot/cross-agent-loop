@@ -213,7 +213,7 @@ Install Pester for the current user (once):
 Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser -SkipPublisherCheck
 ```
 
-Full suite (194+ tests; measured 2026-11-12, about **9 minutes** on the build machine):
+Full suite (218 tests; measured 2026-11-12 after the step 6 fixes, **11 min 35 s** on the build machine; was about 9 minutes at 194 tests):
 
 ```powershell
 pwsh -NoProfile -c 'Import-Module Pester -MinimumVersion 5.5; $r = Invoke-Pester skills/feature/tests -PassThru -Output Normal; exit $r.FailedCount'
@@ -332,5 +332,6 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
 | S3 | Waiving a review round writes one `[dismiss]` commit per planned lens run (ten for a design round) | Fixed in `10c5656`: the stage files log one `review <design|plan>-<n>: declined by the user` decision, and a resumed session skips that round |
 | S4 | `verify` flags `__pycache__/*.pyc` written by the test run as out of scope, so every Python repo without a `.gitignore` stops at its first task (both sandboxes; the plan saying the bytecode was expected did not help) | Fixed in `10c5656` (the user chose the first option): untracked `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache` and `*.pyc` are reported as `ignoredCaches`, not changes; `build.md` stages without them; `merge` ignores them |
 | S5 | A foreground review run's summary line reached the session without `reviewFile`; the session found the report in the log folder | Note: likely Headroom compressing the tool output in that session; not reproduced |
+| S8 | Killing a worker for CUJ 2: workers launch detached (`Start-Process -WindowStyle Hidden`), so Esc in the sandbox session stops only the session's monitor, never the worker | Procedure note for the next run: kill it from outside with a watcher that waits for the run's `<logs>.pid` file and runs `taskkill /T /F /PID <pid>` (step 6 used this, 3 s after launch). To see "where are we?" explain a killed run live, `/clear` right after the kill, before the session's monitor notices and relaunches |
 | S6 | `feature.ps1 stage -Reason` writes only the reason (`[stage] go back to the plan`), losing which stage it left | Fixed in `10c5656`: `<from> -> <to>: <reason>`, also for abandon |
 | S7 | The lint `fb-stages-check.ps1` fails on the main checkout because `core.autocrlf` gives CRLF files | Fixed (lead's lint in the git-excluded `.xagent/tasks/`): it checks committed line endings with `git ls-files --eol` |
