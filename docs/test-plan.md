@@ -327,10 +327,10 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
 
 | # | Finding | Status |
 |---|---|---|
-| S1 | Commit subjects are cut at 72 characters mid-list (`design – Overview, Problem, Goals, Non-Goals,`) | Open: cut at a word boundary or move the list to the body |
+| S1 | Commit subjects are cut at 72 characters mid-list (`design – Overview, Problem, Goals, Non-Goals,`) | Fixed in `10c5656`: cut at the last space from index 40 in the first 72 characters, trailing punctuation trimmed, `…` appended |
 | S2 | Paths inside the vendored EGM files (`resources/execution_instructions.md`, `resources/document_standards/`, `${CLAUDE_PLUGIN_ROOT}/docs/claude.md`) did not resolve from the skill | Fixed in `a034b3c`: the router maps them |
-| S3 | Waiving a review round writes one `[dismiss]` commit per planned lens run (ten for a design round) | Open: one record for the whole round |
-| S4 | `verify` flags `__pycache__/*.pyc` written by the test run as out of scope, so every Python repo without a `.gitignore` stops at its first task (both sandboxes; the plan saying the bytecode was expected did not help) | Open: needs a decision (ignore well-known caches in `verify`, run tests with `PYTHONDONTWRITEBYTECODE`, or add a `.gitignore` task in the plan) |
+| S3 | Waiving a review round writes one `[dismiss]` commit per planned lens run (ten for a design round) | Fixed in `10c5656`: the stage files log one `review <design|plan>-<n>: declined by the user` decision, and a resumed session skips that round |
+| S4 | `verify` flags `__pycache__/*.pyc` written by the test run as out of scope, so every Python repo without a `.gitignore` stops at its first task (both sandboxes; the plan saying the bytecode was expected did not help) | Fixed in `10c5656` (the user chose the first option): untracked `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache` and `*.pyc` are reported as `ignoredCaches`, not changes; `build.md` stages without them; `merge` ignores them |
 | S5 | A foreground review run's summary line reached the session without `reviewFile`; the session found the report in the log folder | Note: likely Headroom compressing the tool output in that session; not reproduced |
-| S6 | `feature.ps1 stage -Reason` writes only the reason (`[stage] go back to the plan`), losing which stage it left | Open: write `<from> -> <to>: <reason>` |
-| S7 | The lint `fb-stages-check.ps1` fails on the main checkout because `core.autocrlf` gives CRLF files | Open: the lint should accept CRLF in the working copy |
+| S6 | `feature.ps1 stage -Reason` writes only the reason (`[stage] go back to the plan`), losing which stage it left | Fixed in `10c5656`: `<from> -> <to>: <reason>`, also for abandon |
+| S7 | The lint `fb-stages-check.ps1` fails on the main checkout because `core.autocrlf` gives CRLF files | Fixed (lead's lint in the git-excluded `.xagent/tasks/`): it checks committed line endings with `git ls-files --eol` |
