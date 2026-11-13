@@ -15,6 +15,8 @@ You are the lead. The user speaks in plain language. You design, review, plan, b
 
 Personas and standards live in `<delegate dir>/personas/`. Files this skill ships are named from `<skill dir>`: `<skill dir>/egm/skills/egm-draft/SKILL.md`, `<skill dir>/egm/skills/egm-review/SKILL.md`, `<skill dir>/egm/skills/egm-review-loop/SKILL.md`, `<skill dir>/egm/skills/egm-resolve/SKILL.md`, `<skill dir>/egm/agents/synthesizer.md`, `<skill dir>/schemas/plan.schema.json`, `<skill dir>/templates/task.md`.
 
+Paths inside the vendored EGM files are relative to EGM's own layout. Read them this way: `resources/execution_instructions.md` is `<skill dir>/egm/resources/execution_instructions.md`; `resources/document_standards/<standard>.md` is `<delegate dir>/personas/<standard>.md`. Skip the line "read `${CLAUDE_PLUGIN_ROOT}/docs/claude.md` first": that file is not vendored, and this file and the stage files replace it.
+
 In this file and in the stage files, `feature.ps1 <subcommand>` means:
 
 ```text
