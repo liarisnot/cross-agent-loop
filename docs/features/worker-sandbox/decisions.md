@@ -11,3 +11,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:06:56Z [decision] design-1 D6: freeze by junction swap to D:/cross-agent-loop.frozen; skillDir field
 - 2026-11-14T21:06:57Z [decision] design-1 D7: G3 restated (network on); permanent per-slot containers; host-localhost exemption proven by probe 2026-11-14, not granted
 - 2026-11-14T21:06:57Z [decision] design-1 D8: token refresh measured first; read-only token if login breaks
+- 2026-11-14T21:06:58Z [decision] design-1 D9: taskkill in target repos is a documented limit
