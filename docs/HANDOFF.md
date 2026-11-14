@@ -45,7 +45,9 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
    - **Key facts:** Cursor's bundled Node (libuv 1.52.1) hangs in an AppContainer on any piped child spawn. The fix is a one-string patch on a copy of `node.exe`, until libuv 1.53 ships in Node (nodejs/node#66374). Worktrees and the run home are exposed as `subst` drive letters, because Node `lstat`s the drive root. `taskkill.exe` hangs inside the container. Windows 11 build 26300 or later is required.
    - **G3 was amended:** network access is on or off per run, not a host allow-list.
    - **Review round 1 done (2026-11-14, consolidated preset, all 10 lenses first try in 24 min):** synthesis `docs/features/worker-sandbox/reviews/design-1.md` (8 Blockers, 30 Majors, Nits). Several items are author decisions (B3, B4, B5, B6, M1, M5, M8, M13, M31).
-   - **Next:** resolve design-1 with the user (egm-resolve), then lock, then plan. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
+   - **Round 2 (re-audit of phases 7 and 9) done and resolved** (`design-2.md`, `resolution-2.md`). The design changed after round 1: one permanent AppContainer per reserved slot letter, a slot ledger, and per-run grants.
+   - **Design locked 2026-11-14** at `6ca02a1`, the commit to freeze from (G6). The feature is in stage `plan`.
+   - **Next:** "plan it". Before phase 1, with the user's OK: `git worktree add --detach D:\cross-agent-loop.frozen 6ca02a1`, then point both skill junctions there. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
    - **Machine change made:** Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules` (the user ran it as admin).
 
 ## How to run a review lens
