@@ -24,3 +24,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:41:24Z [dismiss] design-2 R31 (readiness N5): contested - probe 6 loaded Pester from C:/Program Files with no grant
 - 2026-11-14T21:41:24Z [dismiss] design-2 R28 (style p7 S6), R34 wording parts: declined - measured fact / wording only
 - 2026-11-14T21:44:56Z [gate] design-locked: "lock the design"
+- 2026-11-14T21:44:57Z [stage] design-review -> plan
