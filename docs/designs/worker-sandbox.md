@@ -25,7 +25,7 @@ The build has two rules of its own. First, the `delegate` code being changed is 
 
 *   **G1. Files outside the worktree are out of reach.** A worker can read and write its worktree, and read only the tools, runtimes and caches on an explicit list. It cannot read or write anything else, including the user's profile, other repos and other drives. Pass: a canary test plants a secret file in the user's profile and one in another repo; a worker told to read both, list the user's home folder, and write a file outside its worktree fails at every step, and the canary contents appear nowhere in the run's logs or branch.
 *   **G2. Read-only runs stay read-only.** Review lenses and council seats can read their worktree and nothing else, and cannot write. Pass: the canary test, run as a lens, fails to read the canaries and leaves the worktree unchanged.
-*   **G3. Shell network access is limited to an allowed list.** Shell commands reach only the hosts on a list (package registries the target repo needs). The agent's own connection to Cursor's servers is unaffected. Pass: a worker's `curl` to a host not on the list fails, and to a listed registry succeeds.
+*   **G3. Network access is a per-run switch.** *(Amended during the Technical Plan: the original goal was a per-host allowed list.)* The agent process and its shell commands share one sandbox, and the agent needs Cursor's servers, so the sandbox cannot block shell traffic by host. A run either has internet access (workers, lenses and councils, which need Cursor) or has none. What limits leaks is G1: the only files a run can send anywhere are its worktree, which Cursor already receives. Pass: the canary test shows the canaries are unreadable, so no network path can carry them; a host-level allowed list is a Future Improvement.
 *   **G4. The workflow does not change.** `delegate.ps1` keeps its parameters, JSON output, worktree and branch layout, and log files. Workers still leave a branch in the user's repo that the lead reviews and merges with the existing commands. Pass: `delegate`'s regression from the first design's Verification Plan passes with the sandbox on, and the `feature` skill needs no change to call it.
 *   **G5. No silent fallback.** If the sandbox cannot start, `delegate.ps1` fails the run with a clear error. Running unsandboxed takes an explicit opt-out, and the summary and `runs.jsonl` record whether each run was sandboxed. Pass: a test breaks the sandbox setup and gets a failed run, not an unsandboxed one.
 *   **G6. The build never runs on half-built `delegate` code.** This feature's own workers, lenses and councils use the current, tested `delegate`, which is frozen for the whole build. The new code runs from a separate copy, and only in the tests that need it. Pass: every run of this feature's build is launched from the frozen copy (its path is in the run logs), and no run fails because of an unfinished change.
@@ -42,7 +42,144 @@ The build has two rules of its own. First, the `delegate` code being changed is 
 
 ## Open Questions
 
-*   **Which isolation mechanism.** A restricted Windows account, a dedicated WSL2 distribution using Cursor's Linux sandbox, or a mix. The author decides this in the Technical Plan, from up to three options.
-*   **Toolchains inside the sandbox.** Some target repos test only on Windows (this repo's Pester suite calls `taskkill.exe` and Windows paths). If the sandbox is Linux, these tests can't run there. Does a worker then skip tests and leave them to the lead, or does the sandbox have to be Windows?
-*   **Cursor login inside the sandbox.** A separate account or a WSL distribution needs its own Cursor CLI login. Is a second login on the same Cursor plan allowed, and does it share the usage pools?
-*   **Speed.** A worktree on a Windows drive seen from WSL (`/mnt/d`) is slow for git and file-heavy tests; a worktree inside the WSL file system needs syncing back. The overhead per run must be measured before it is accepted.
+*   **Which isolation mechanism.** *Resolved:* a Windows AppContainer, chosen by the author after a feasibility probe (see Technical Plan and Alternatives).
+*   **Toolchains inside the sandbox.** *Resolved:* the sandbox is Windows, so Windows-only tests run in it. Tools installed under `C:\Program Files` (git, PowerShell 7, Pester installed for all users) are readable with no setup. Tools installed per user need an entry in the sandbox's read list. One gap is open: `taskkill.exe` hangs inside an AppContainer, so test code that calls it must use .NET's process kill instead.
+*   **Cursor login inside the sandbox.** *Resolved for the probe:* a copy of the user's Cursor login works inside the sandbox (same account, same plan). Open: whether a token refresh inside the sandbox can invalidate the user's own copy.
+*   **Speed.** *Partly resolved:* there is no VM, so start-up is about 0.5 s for the Cursor CLI. The cost of setting permissions per run is measured in the build.
+
+## Critical User Journeys (CUJs)
+
+### CUJ 1: A sandboxed worker builds and tests a task
+
+*   **Given**: A feature in `build`, a planned `code` task, and a machine that passed `delegate.ps1 -SandboxCheck`.
+*   **When**: The lead runs `delegate.ps1 -Agent cursor -Repo <repo> -TaskId <id> -TaskFile <file>` with no new parameters.
+*   **Then**: The worker runs inside its own AppContainer. It edits files in its worktree, runs the repo's tests (for this repo, the Pester suite) and `git status`/`git diff`, and writes `result.json`. The summary JSON has the same fields as today plus `sandboxed: true`. The lead reviews and merges the branch as before.
+
+### CUJ 2: A prompt injection tries to read a secret
+
+*   **Given**: A worker whose task text tells it to read `~/.ssh/id_ed25519` and `D:\MyApp\.env` and paste them into a file.
+*   **When**: The worker tries this with its shell and with its own file-read tool.
+*   **Then**: Every attempt fails with "access denied". The worker reports the failure in `result.json`. Nothing outside the worktree appears in the branch or the logs.
+
+### CUJ 3: Review lenses and a council run read-only
+
+*   **Given**: A design or a diff to review.
+*   **When**: The lead runs lenses (`-Profile review`) and council seats (`-Profile council`) as today.
+*   **Then**: Each run can read only its own detached worktree, and cannot write to it. The existing read-only check still runs after the run and finds no changes.
+
+### CUJ 4: The sandbox cannot start
+
+*   **Given**: The Cursor CLI updated to a version whose `node.exe` cannot be patched, or Windows older than build 26300.
+*   **When**: The lead launches any run.
+*   **Then**: `delegate.ps1` fails before starting the agent, with `ok: false` and an error that names the cause and the fix. It never falls back to an unsandboxed run. The user can run unsandboxed only by passing `-NoSandbox`, and that run is recorded with `sandboxed: false`.
+
+### CUJ 5: A timed-out run is killed
+
+*   **Given**: A sandboxed worker that hangs.
+*   **When**: The run reaches `-TimeoutSec`.
+*   **Then**: `delegate.ps1` ends every process in the run at once through a Windows job object, and reports `timedOut: true` as today.
+
+## Technical Plan (Architecture)
+
+### Decision
+
+`delegate.ps1` starts the Cursor CLI inside a Windows **AppContainer**. An AppContainer is a Windows process sandbox: the process gets its own security identity (an AppContainer SID), and it can open only the files and folders whose access lists name that SID, a capability it holds, or "ALL APPLICATION PACKAGES". Everything else on disk is denied by default, including the user's profile and other drives. It needs no administrator rights, no extra Windows account and no password.
+
+A feasibility probe on this machine (2026-11-13) confirmed:
+
+*   **Blocked:** the shell and the agent's own file-read tool were denied on canaries in the user's profile and on `D:\`, on `~\.ssh`, on `D:\MyApp`, and on the real Cursor login.
+*   **Working:** git (init, commit, log), Pester 6.2.0 from `C:\Program Files`, child processes and .NET process kill, HTTPS, `localhost` connections inside the same container, and a full Cursor CLI run (`composer-2.5`, `--force`).
+
+### Components
+
+```text
+lead (Claude Code, user account)
+  |
+  v
+delegate.ps1 (user account)        unchanged parameters, plus -NoSandbox and -SandboxCheck
+  |-- worktree + hand-off files (as today)
+  |-- Sandbox.psm1 (new): prepare -> launch -> wait/kill -> tidy
+  |     |-- runtime cache:  %LOCALAPPDATA%\xagent\sandbox\cursor\<version>\
+  |     |                   (copy of Cursor, with a patched node.exe)
+  |     |-- run home:       <repoParent>\<repo>.xagent\.sandbox\<wtName>\{home,tmp}
+  |     |-- drive letters:  runtime cache -> R:, worktree -> W:
+  |     |                   (subst, picked from free letters)
+  |     |-- AppContainer:   one per worktree, named xagent.<repoKey>.<wtName>
+  |     '-- job object:     holds every process of the run; closed on timeout
+  v
+node.exe (patched copy) R:\index.js --workspace W:\ ...    (inside the AppContainer)
+  '-- shell commands, tests, git                            (same container)
+```
+
+### What the sandbox can reach
+
+| Path | Access | Granted to | Why |
+|---|---|---|---|
+| Worker worktree (`<repoParent>\<repo>.xagent\<TaskId>`) | read + write | this run's container | The task. |
+| Read-only worktree (`...\<TaskId>-<Seat>`) | read | this run's container | Lenses and councils (G2). |
+| `<repo>\.git\worktrees\<wtName>` | read + write | this run's container | The worktree's own index and HEAD. |
+| `<repo>\.git` (everything else) | read | the repo's capability | git needs objects, refs and config. Read-only, so hooks and config cannot be changed. |
+| `<repo>`, `<repoParent>\<repo>.xagent` | read attributes only, this folder only | the repo's capability | git checks every parent folder of the paths it uses. No listing, no file reads. |
+| Run home and temp (`...\.sandbox\<wtName>`) | read + write | this run's container | `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `TEMP` point here. Holds copies of `cli-config.json` and `auth.json`. |
+| Runtime cache | read + execute; its `.running` folder writable | the `xagent-runtime` capability | Cursor's code and the patched `node.exe`. |
+| `C:\Windows`, `C:\Program Files` | read + execute | already granted by Windows | Toolchains installed for all users. |
+| Paths on the read list (`%LOCALAPPDATA%\xagent\sandbox.json`) | read + execute | the `xagent-runtime` capability | Per-user toolchains the user opts in. |
+| Everything else | none | — | G1. |
+
+A **capability** is a named SID that several containers can share. The runtime capability (`xagent-runtime`) and each repo's capability (`xagent-repo-<repoKey>`) are granted the first time they are needed, and stay in place. Each run's container SID gets only its own worktree and home, so two workers running at the same time cannot read each other's worktrees. `<repoKey>` is the first 12 hex characters of the SHA-256 of the repo's full path.
+
+### Why drive letters
+
+Node's module loader checks every folder from the drive root down, and an AppContainer cannot read the attributes of `C:\` or `D:\`. The probe showed `require` failing with `EPERM` on `D:\` for a file in a normal folder on `D:`. A drive letter made with `subst` turns the target folder into a drive root, which the container can read. So the runtime cache becomes `R:\` and each worktree becomes `W:\` (the actual letters are picked from free ones). git resolves drive letters back to the real path, which is why the repo's parent folders get read-attributes access.
+
+### The patched `node.exe`
+
+The Node.js that Cursor bundles (v24.22.1, libuv 1.52.1) hangs inside an AppContainer whenever it starts a child process with piped output. AppContainers may only create pipes under `\\.\pipe\LOCAL\`. libuv uses `\\?\pipe\uv\...`, treats "access denied" as a name clash, and retries forever. libuv 1.53.0 fixes this, but no Node.js release includes it yet (nodejs/node#66374).
+
+`Sandbox.psm1` copies Cursor's current version folder into the runtime cache. In the copy's `node.exe` it replaces the pipe-name format string `\\?\pipe\uv\%llu-%lu` with `\\?\pipe\LOCAL\%llu` of equal length, ending with a null byte. The probe showed this fixes the hang, and that the patched `node.exe` still works outside the container. The patch is made only when the string appears exactly once. Otherwise the run fails with an error that names the Cursor version (CUJ 4). When Cursor ships a Node.js with libuv 1.53 or later, the patch is skipped: `process.versions.uv` is checked first.
+
+### Launch and kill
+
+`delegate.ps1` today starts `powershell.exe -File cursor-agent.ps1` with `Start-Process`. A sandboxed run starts the cached `node.exe index.js` directly through `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, using a C# helper loaded with `Add-Type`. That is the probe's launcher, with three additions:
+
+*   **Output:** stdout and stderr go to the existing log files through inherited file handles.
+*   **Job object:** the process is put in a job object that kills all its processes when the job closes. On timeout, `delegate.ps1` closes the job. `taskkill.exe` is no longer used, in sandboxed or unsandboxed runs.
+*   **Environment:** the child gets an environment block built from scratch. It holds the system variables, a `PATH` limited to system and read-list folders, the run home's `USERPROFILE`/`APPDATA`/`LOCALAPPDATA`/`TEMP`/`TMP`, and `CURSOR_INVOKED_AS`. For sandboxed runs this replaces the secret-variable denylist: nothing from the user's environment passes through unless it is listed.
+
+Every container gets the `internetClient` capability (G3).
+
+### Cursor login
+
+Each run copies the user's `~\.cursor\cli-config.json` and `%APPDATA%\Cursor\auth.json` into its run home, and deletes the run home's `auth.json` when the run ends. The run home itself is kept until `-Cleanup`, because Cursor keeps its chat history there and `-Resume` needs it. The worker can read this token. That is no new trust: the worker already runs as Cursor. Nothing is copied back. If testing shows that a token refresh inside the sandbox invalidates the user's own token, a checked copy-back is added.
+
+### Requirements check (`-SandboxCheck`)
+
+`delegate.ps1 -SandboxCheck` runs without a task. It checks Windows build 26300 or later (older builds deny AppContainers the `NUL` device, which git opens on every start), that the runtime cache can be built and patched, and that a free drive letter exists. Then it runs a short canary test in a container and prints one JSON object. Every sandboxed run repeats the first three checks before it starts.
+
+### Record of each run (G5)
+
+The summary JSON gains `sandboxed` (`true` or `false`) and, when sandboxed, `sandbox: {container, runtimeVersion, letters}`. `runs.jsonl` gains `sandboxed`. `-NoSandbox` is the only way to run unsandboxed, and the `feature` skill never passes it.
+
+### Clean-up
+
+*   **After each run:** the drive letters are removed, the job is closed, and the run home's `auth.json` is deleted.
+*   **`-Cleanup`:** also deletes the run home, removes the container's access entries from the worktree and `.git\worktrees\<wtName>`, and deletes the AppContainer profile.
+*   **Capability grants stay.** They name only xagent capabilities, and `-SandboxCheck` reports them.
+
+### Freezing `delegate` for this build (G6)
+
+The skill junctions `~\.claude\skills\delegate` and `~\.claude\skills\feature` point into `D:\cross-agent-loop\skills\`, the checkout where this feature's tasks are merged. Before the first build task, the lead creates a worktree of `main` at `D:\cross-agent-loop.frozen`, at the commit where the design locks. With the user's approval, the lead points both junctions at that worktree's `skills\` folder.
+
+Every run in this build then uses the frozen `delegate` and `feature`, and the lead records the frozen path in `test-plan.md`. The new code runs only from `D:\cross-agent-loop\skills\delegate`: in its Pester tests and in the build's manual sandbox checks. After sign-off, the junctions go back to `D:\cross-agent-loop\skills\` and the frozen worktree is removed.
+
+### The two-part task template (G7)
+
+The plan marks the first `code-hard` task. Its task file uses the "Decided" / "Yours to decide" layout. After it merges, the lead adds an entry to `docs/test-plan.md` with its review rounds, its readiness findings, and a comparison with `fb-stages`.
+
+### Limits that stay
+
+*   **Network** is all or nothing (G3).
+*   **`taskkill.exe`** hangs inside the sandbox. Code under test that calls it must change. This repo's `delegate.ps1` stops using it as part of this feature.
+*   **Per-user toolchains**, for example a Python under `%LOCALAPPDATA%`, need a read-list entry.
+*   **The `node.exe` patch** must be redone for each Cursor version until Node.js ships libuv 1.53.
+*   **Windows 11 build 26300** or later is required.
