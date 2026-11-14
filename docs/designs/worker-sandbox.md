@@ -183,3 +183,108 @@ The plan marks the first `code-hard` task. Its task file uses the "Decided" / "Y
 *   **Per-user toolchains**, for example a Python under `%LOCALAPPDATA%`, need a read-list entry.
 *   **The `node.exe` patch** must be redone for each Cursor version until Node.js ships libuv 1.53.
 *   **Windows 11 build 26300** or later is required.
+
+## Alternatives Considered
+
+### Alternative A: A restricted local Windows account
+
+Run each agent as a separate standard Windows account (for example `xagent-worker`) through `CreateProcessWithLogonW`, with access lists that deny it the user's profile and other repos.
+
+*   **For:** a normal account has none of the AppContainer gaps. git, Node, `taskkill` and the Cursor CLI work unpatched, and drive roots are readable.
+*   **Against:**
+    *   An administrator must create the account, and its password must be stored where `delegate.ps1` can read it.
+    *   `D:\` gives "Authenticated Users" modify access on every folder (checked on this machine), so the account can read and write `D:\MyApp` until deny entries are added to every folder that matters. New folders are open by default.
+    *   The worktree's `.git` lives in the user's repo, where a writable hooks folder runs code as the user. Avoiding that needs a per-run clone instead of a worktree.
+    *   Windows Firewall cannot reliably filter by local user, so G3 gains nothing.
+    *   Every new public user repeats the account setup.
+
+Rejected by author: AppContainer reaches the same isolation by default, with no account, no password and no admin step.
+
+### Alternative B: A dedicated WSL2 distribution with Cursor's Linux sandbox
+
+Run the Cursor CLI inside its own WSL2 distribution, with Windows drives not mounted and Windows interop off, and use Cursor's `--sandbox` (Landlock and seccomp) inside it.
+
+*   **For:** Cursor's sandbox is documented and maintained for Linux, with per-host network filtering, so G3 as first written would hold. The isolation from Windows files is strong.
+*   **Against:**
+    *   Windows-only tests cannot run there. This repo's Pester suite calls `taskkill.exe` and uses Windows paths. A worker that cannot run its tests hands that job to the lead, which defeats the skill's purpose (the author's main objection).
+    *   Each repo needs setup in the distribution: toolchain installs and a second Cursor login.
+    *   A worktree on `/mnt/d` is slow, and one inside the Linux file system must be synced back.
+    *   All WSL distributions share one VM, whose memory competes with ComfyUI for MyApp.
+
+Rejected by author: workers must run their own tests, and most target repos here are Windows-first.
+
+### Alternative C: Both A and B, chosen per repo
+
+*   **For:** each repo gets the sandbox that fits its tests.
+*   **Against:** two mechanisms to build, test and keep working, each with the setup costs above.
+
+Rejected by author: AppContainer covers both cases with one mechanism.
+
+### Alternative D: Cursor's own `--sandbox` on native Windows
+
+*   **For:** no new code.
+*   **Against:** Cursor documents its sandbox for macOS and Linux only. On Windows it gives no file-system isolation. It also covers only shell commands: the agent's own file reads follow a separate "Read Access" setting that allows the whole disk by default.
+
+Rejected by author: it does not meet G1 or G2 on this machine.
+
+### Alternative E: Windows Sandbox, Hyper-V or Docker
+
+*   **For:** VM-level isolation.
+*   **Against:**
+    *   Windows Sandbox and Hyper-V need Windows Pro; this machine runs Home.
+    *   Docker Desktop on Home runs Linux containers on WSL2, which is Alternative B with more layers.
+    *   Windows containers need Hyper-V.
+
+Rejected by author: not available on Windows 11 Home.
+
+### Alternative F: Worker in WSL, tests run by a separate Windows "tester"
+
+A worker in WSL writes the code, and a second agent on Windows runs the tests with read-only access.
+
+*   **Against:** a read-only tester is not safe. Tests run the worker's code with the tester's permissions, so the worker's code gets everything the tester has. It also adds a round trip to every test run.
+
+Rejected by author: it moves the risk instead of removing it.
+
+### Alternative G: A per-run clone instead of a worktree
+
+Give the container a `git clone --shared` of the repo instead of a worktree, so it never touches the user's `.git`.
+
+*   **For:** the container cannot see the user's `.git` at all.
+*   **Against:**
+    *   Changes `delegate`'s worktree and branch layout, and the `feature` skill's merge steps (G4).
+    *   The lead would review and merge from a clone, which needs a fetch step after every run.
+
+Rejected by author: read-only access to `.git` already prevents hooks and config changes, and keeps the layout.
+
+### Alternative H: One container per repo instead of one per worktree
+
+*   **For:** fewer profiles and fewer permission changes per run.
+*   **Against:** workers running at the same time could read and write each other's worktrees. The reason to share one would have been an admin loopback exemption, and the probe showed that `localhost` inside one container works without it.
+
+Rejected by author: per-worktree containers isolate concurrent tasks at small cost.
+
+### Alternative I: Admin-granted access to drive roots instead of drive letters
+
+Have an administrator give the containers read-attributes access to `C:\` and `D:\`, so git and Node can walk normal paths.
+
+*   **For:** no `subst` drive letters, and paths stay the same inside and outside the sandbox.
+*   **Against:** it needs an administrator on every machine, and it changes access on the system drive root for every AppContainer app when granted to "ALL APPLICATION PACKAGES". phantombot moved from this design to drive letters for the same reason.
+
+Rejected by author: drive letters need no admin step.
+
+### Alternative J: Wait for a Node.js release with libuv 1.53 instead of patching `node.exe`
+
+*   **For:** no binary patch to maintain.
+*   **Against:** as of 2026-11-12, no Node.js release line bundles libuv 1.53; the v24 backport request (nodejs/node#66374) is open. Cursor would then also need to ship it. Until both happen, the Cursor CLI cannot run in an AppContainer at all.
+
+Rejected by author: the patch is one equal-length string, checked before it is applied, and is skipped once the bundled libuv has the fix.
+
+### Alternative K: A filtering proxy for network access (G3 as first written)
+
+Give the container no internet capability and let it reach the network only through a local proxy that allows listed hosts.
+
+*   **Against:**
+    *   The agent itself needs Cursor's servers, so the proxy would have to carry Cursor's own traffic, including streaming connections. That is untested.
+    *   An AppContainer cannot connect to a proxy that runs outside it, on the host's `localhost`, without an admin loopback exemption per container SID. A new SID per worktree would need admin on every run.
+
+Rejected by author: G3 is amended to a per-run switch. A host allowed list is a Future Improvement.
