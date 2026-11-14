@@ -316,7 +316,7 @@ Rejected by author: G3 is amended to a per-run switch. A host allowed list is a 
 ### Additional Resources
 
 *   `docs/designs/feature-skill.md`: the Risks row "workers can read the whole machine", and the Verification Plan regression used for G4.
-*   Probe scripts (not committed): the session scratchpad `ac-probe\probe*.ps1`, `inner*.ps1`, `trace.js` and `stack.ps1`. The results are summarized in the Technical Plan.
+*   Probe scripts and debugging findings: `docs/designs/worker-sandbox-probe/` (README lists findings not repeated here, e.g. Windows PowerShell 5.1 and `cscript` failing inside the container).
 *   Related work:
     *   KPO-Tech/seshat-runtime PR #816 (git inside AppContainer);
     *   phantomyard/phantombot PR #787 (drive letters instead of admin grants);

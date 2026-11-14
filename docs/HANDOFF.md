@@ -41,6 +41,11 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Machine setup done (2026-11-12):** junction `~/.claude/skills/feature` to `skills/feature`, and the `feature.ps1` allow rule (junction path) in `~/.claude/settings.json`. `doctor` reports ready through the junction.
 4. **Design write-back done (2026-11-13, approved by the user):** the D19 decisions (reconcile `name`, `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, `in-review` not checked, `branch-missing` at any stage, router-handled entry rows, council ids `<name12>-dc<k>`/`-pc<k>`) are folded into `docs/designs/feature-skill.md` as a post-lock amendment.
    - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
+5. **`worker-sandbox` feature, in `design-review` (2026-11-14).** Design `docs/designs/worker-sandbox.md`, all sections approved by the user, on branch `feature/worker-sandbox` (not pushed). Mechanism: a Windows **AppContainer** per worktree, chosen by the user over a restricted account, WSL2, or both. A feasibility probe on this machine passed: isolation, git, Pester, a full Cursor run. Probe scripts and debugging findings are in `docs/designs/worker-sandbox-probe/`.
+   - **Key facts:** Cursor's bundled Node (libuv 1.52.1) hangs in an AppContainer on any piped child spawn. The fix is a one-string patch on a copy of `node.exe`, until libuv 1.53 ships in Node (nodejs/node#66374). Worktrees and the run home are exposed as `subst` drive letters, because Node `lstat`s the drive root. `taskkill.exe` hangs inside the container. Windows 11 build 26300 or later is required.
+   - **G3 was amended:** network access is on or off per run, not a host allow-list.
+   - **Next:** goldfish review ("review the design"), then lock, then plan. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
+   - **Machine change made:** Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules` (the user ran it as admin).
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
@@ -50,7 +55,8 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 
 ## Open items
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
-- **Worker sandboxing** (a restricted account or a VM) is the **high-priority first item after v1**. Workers run with `--force` and can read the machine's files.
+- **Worker sandboxing** is now the `worker-sandbox` feature (Next item 5). Until it ships, workers still run with `--force` and can read the machine's files.
+- **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
 - **Delete the local backup bundle** that still contains the pre-rewrite history with the email, once confident.
