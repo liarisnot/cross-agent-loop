@@ -7,3 +7,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:06:53Z [decision] design-1 D2: per-run grants only, no shared capabilities
 - 2026-11-14T21:06:53Z [decision] design-1 D3: three reserved drive letters (runtime + 2 slots), per-slot mutex, -Release
 - 2026-11-14T21:06:54Z [decision] design-1 D4: read list kept, fully specified (MyApp/ComfyUI per-user Python)
+- 2026-11-14T21:06:55Z [decision] design-1 D5: G7 two-part template moves to the phase-3 code-hard task
