@@ -1,7 +1,7 @@
 # `worker-sandbox`: confine `delegate`'s agents to their worktree
 
 *   **Author:** Eugene Chin
-*   **Status:** Draft
+*   **Status:** Approved (locked 2026-11-14)
 *   **Date:** 2026-11-13 (revised 2026-11-14 after design review round 1, `docs/features/worker-sandbox/reviews/design-1.md`)
 
 --------------------------------------------------------------------------------
