@@ -19,3 +19,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:10:27Z [dismiss] worker-sandb-d2-zo-p5: not run - the user chose a re-audit of phases 7 and 9 only after round 1
 - 2026-11-14T21:10:28Z [dismiss] worker-sandb-d2-ic-p5: not run - the user chose a re-audit of phases 7 and 9 only after round 1
 - 2026-11-14T21:10:28Z [dismiss] worker-sandb-d2-cm-p6: not run - the user chose a re-audit of phases 7 and 9 only after round 1
+- 2026-11-14T21:10:29Z [dismiss] worker-sandb-d2-zo-p8: not run - the user chose a re-audit of phases 7 and 9 only after round 1
