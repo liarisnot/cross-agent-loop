@@ -25,3 +25,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:41:24Z [dismiss] design-2 R28 (style p7 S6), R34 wording parts: declined - measured fact / wording only
 - 2026-11-14T21:44:56Z [gate] design-locked: "lock the design"
 - 2026-11-14T21:44:57Z [stage] design-review -> plan
+- 2026-11-14T21:58:01Z [dismiss] comprehension cm1: check-in mode on-problems undefined in plan.md - generated line; defined in the feature skill, which is the reader's context for plan approval
