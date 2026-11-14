@@ -101,7 +101,7 @@ delegate.ps1 (user account)        unchanged parameters, plus -NoSandbox and -Sa
   |-- Sandbox.psm1 (new): prepare -> launch -> wait/kill -> tidy
   |     |-- runtime cache:  %LOCALAPPDATA%\xagent\sandbox\cursor\<version>\
   |     |                   (copy of Cursor, with a patched node.exe)
-  |     |-- run home:       <repoParent>\<repo>.xagent\.sandbox\<wtName>\{home,tmp}
+  |     |-- run home:       <worktree>\.xagent\sandbox\{home,tmp}  (seen as W:\.xagent\sandbox)
   |     |-- drive letters:  runtime cache -> R:, worktree -> W:
   |     |                   (subst, picked from free letters)
   |     |-- AppContainer:   one per worktree, named xagent.<repoKey>.<wtName>
@@ -120,7 +120,7 @@ node.exe (patched copy) R:\index.js --workspace W:\ ...    (inside the AppContai
 | `<repo>\.git\worktrees\<wtName>` | read + write | this run's container | The worktree's own index and HEAD. |
 | `<repo>\.git` (everything else) | read | the repo's capability | git needs objects, refs and config. Read-only, so hooks and config cannot be changed. |
 | `<repo>`, `<repoParent>\<repo>.xagent` | read attributes only, this folder only | the repo's capability | git checks every parent folder of the paths it uses. No listing, no file reads. |
-| Run home and temp (`...\.sandbox\<wtName>`) | read + write | this run's container | `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `TEMP` point here. Holds copies of `cli-config.json` and `auth.json`. |
+| Run home and temp (`<worktree>\.xagent\sandbox`) | read + write, also in read-only runs | this run's container | `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and `TEMP` point here, through the worktree's drive letter, so Node tools can reach them too. `.xagent/` is already in the repo's `info/exclude`. Holds copies of `cli-config.json` and `auth.json`. |
 | Runtime cache | read + execute; its `.running` folder writable | the `xagent-runtime` capability | Cursor's code and the patched `node.exe`. |
 | `C:\Windows`, `C:\Program Files` | read + execute | already granted by Windows | Toolchains installed for all users. |
 | Paths on the read list (`%LOCALAPPDATA%\xagent\sandbox.json`) | read + execute | the `xagent-runtime` capability | Per-user toolchains the user opts in. |
@@ -163,7 +163,7 @@ The summary JSON gains `sandboxed` (`true` or `false`) and, when sandboxed, `san
 ### Clean-up
 
 *   **After each run:** the drive letters are removed, the job is closed, and the run home's `auth.json` is deleted.
-*   **`-Cleanup`:** also deletes the run home, removes the container's access entries from the worktree and `.git\worktrees\<wtName>`, and deletes the AppContainer profile.
+*   **`-Cleanup`:** removes the worktree (and with it the run home) as today, removes the container's access entries from the worktree and `.git\worktrees\<wtName>`, and deletes the AppContainer profile.
 *   **Capability grants stay.** They name only xagent capabilities, and `-SandboxCheck` reports them.
 
 ### Freezing `delegate` for this build (G6)
@@ -288,3 +288,255 @@ Give the container no internet capability and let it reach the network only thro
     *   An AppContainer cannot connect to a proxy that runs outside it, on the host's `localhost`, without an admin loopback exemption per container SID. A new SID per worktree would need admin on every run.
 
 Rejected by author: G3 is amended to a per-run switch. A host allowed list is a Future Improvement.
+
+## Non-Functional Requirements
+
+### Security
+
+| Risk | Handling |
+|---|---|
+| The worker reads the Cursor token copied into its run home and sends it elsewhere. | Accepted. The worker already acts with that token; the sandbox does not widen this. The copy is deleted after each run. |
+| The worker edits files in the user's repo through `.git`. | `.git` is read-only to the sandbox, apart from the worktree's own folder under `.git\worktrees`. Hooks, config and refs cannot change. |
+| A worker on one task tampers with another task's worktree. | Each worktree has its own container SID. Shared capabilities grant read access only. |
+| A drive letter made by `subst` is visible to the user's other programs while a run is active. | It points only into the worktree and the runtime cache. It is removed after the run, and `-SandboxCheck` lists stale ones. |
+| The patched `node.exe` does something other than what the patch intends. | The patch changes one string of equal length, only when it appears exactly once. The patched file is stored with its source version and SHA-256 in `patch.json`, next to the copy. |
+| Capability grants outlive the feature. | They name only `xagent-*` capabilities. `-SandboxCheck -Remove` removes them all (see `Sandbox.psm1`). |
+
+### Performance
+
+*   **Per run:** target 5 s or less added before the agent starts, after the first run of a Cursor version. That covers the container profile, the worktree grants, the drive letters and the run home. Measured in phase 5.
+*   **First run of each Cursor version:** copying about 256 MB into the runtime cache and patching it. The cache keeps the current and previous version and deletes older ones.
+*   **Memory:** no VM, so there is no fixed memory cost. A sandboxed run uses the same memory as an unsandboxed one.
+
+### Rollout and rollback
+
+*   **Rollout:** sandboxing is on by default as soon as the change merges. A machine that fails the requirements check gets `ok: false` with the reason (G5).
+*   **Rollback:** `-NoSandbox` runs one task unsandboxed, recorded in the summary and `runs.jsonl`. A full rollback reverts the merge. Capability grants left behind have no effect without the code.
+
+### Additional Resources
+
+*   `docs/designs/feature-skill.md`: the Risks row "workers can read the whole machine", and the Verification Plan regression used for G4.
+*   Probe scripts (not committed): the session scratchpad `ac-probe\probe*.ps1`, `inner*.ps1`, `trace.js` and `stack.ps1`. The results are summarized in the Technical Plan.
+*   Related work:
+    *   KPO-Tech/seshat-runtime PR #816 (git inside AppContainer);
+    *   phantomyard/phantombot PR #787 (drive letters instead of admin grants);
+    *   libuv/libuv#5178 and nodejs/node#66374 (pipe names);
+    *   openclaw/openclaw PR #161128 (the same hang, handled by refusing to spawn).
+
+### Future Improvements
+
+*   **Host allowed list for network access:** a proxy that carries Cursor's own traffic too, once loopback rules and Cursor's streaming connections are tested (Alternative K).
+*   **Drop the `node.exe` patch** once Cursor bundles libuv 1.53 or later. The version check already skips it then; the code can be removed after one Cursor release.
+*   **Per-repo read lists** in addition to the one user-wide list.
+*   **Run the lead's own test runs in the sandbox,** so a test that runs worker code is also confined.
+
+## Detailed Implementation Plan
+
+### Machine setup (outside the repo, not committed)
+
+*   **Pester 6.2.0 for all users:** done on 2026-11-13, at `C:\Program Files\PowerShell\Modules\Pester\6.2.0`.
+*   **Freeze (G6), before phase 1:**
+    *   `git worktree add --detach D:\cross-agent-loop.frozen <commit where the design locks>`.
+    *   With the user's approval, point `~\.claude\skills\delegate` and `~\.claude\skills\feature` at `D:\cross-agent-loop.frozen\skills\delegate` and `...\skills\feature` (`cmd /c rmdir` on each junction, then `New-Item -ItemType Junction`).
+    *   Record the frozen path and commit in `docs/test-plan.md`.
+*   **After sign-off:** point both junctions back at `D:\cross-agent-loop\skills\...`, then `git worktree remove D:\cross-agent-loop.frozen`.
+
+### Target Files to Create/Modify
+
+#### 1. `skills/delegate/scripts/SandboxNative.cs` (Create)
+
+*   **Type / Scope:** C# source, loaded by `Sandbox.psm1` with `Add-Type -Path`.
+*   **Proposed Changes:** one static class `XagentSandbox` with:
+    *   `string EnsureProfile(string name)`: `CreateAppContainerProfile`, or `DeriveAppContainerSidFromAppContainerName` when it already exists; returns the SID string.
+    *   `void DeleteProfile(string name)`.
+    *   `string CapabilitySid(string name)`: `DeriveCapabilitySidsFromName`; returns the capability SID (not the group SID).
+    *   `RunHandle Start(string containerSid, string[] capabilitySids, string exePath, string commandLine, string cwd, string[] environment, string stdoutPath, string stderrPath)`:
+        *   creates a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`;
+        *   opens the two log files as inheritable handles;
+        *   builds `STARTUPINFOEX` with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` and `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (only the two log handles and a `NUL` stdin are inherited);
+        *   calls `CreateProcessW` with `CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`;
+        *   assigns the process to the job, then resumes it.
+
+        `RunHandle` holds the process id, the process handle and the job handle.
+    *   `bool Wait(RunHandle h, int ms)`, `int ExitCode(RunHandle h)`, and `void Kill(RunHandle h)`. `Kill` uses `TerminateJobObject`, then closes the job.
+    *   `bool IsAppContainer()`: reads `TokenIsAppContainer` for the current process. Tests use it to skip what cannot run nested.
+
+    The code takes its signatures from the probe's `AC` class, which ran on this machine.
+
+#### 2. `skills/delegate/scripts/Sandbox.psm1` (Create)
+
+*   **Type / Scope:** PowerShell module, imported by `delegate.ps1`.
+*   **Proposed Changes:** exported functions, each returning a hashtable or throwing with a message that names the cause and the fix.
+    *   `Test-SandboxSupport`:
+        *   checks the Windows build (`[Environment]::OSVersion.Version.Build -ge 26300`), the Cursor install (`%LOCALAPPDATA%\cursor-agent\versions\<latest>\node.exe` and `index.js`), and at least two free drive letters;
+        *   returns `{ok, build, cursorVersion, freeLetters, problems[]}`.
+    *   `Get-SandboxRuntime`:
+        *   ensures `%LOCALAPPDATA%\xagent\sandbox\cursor\<version>\` exists. If not, it copies the version folder to `<version>.partial` and renames it when complete.
+        *   Then it runs the patch:
+            *   it reads `node.exe` as bytes and runs the copy with `-p process.versions.uv`. At 1.53 or later it writes `patch.json` with `{patched:false, uv}` and stops.
+            *   Otherwise it counts the ASCII occurrences of `\\?\pipe\uv\%llu-%lu`. If the count is not exactly 1, it throws `"Cursor <version>: node.exe pipe-name pattern found <n> times; sandboxed runs need an update to Sandbox.psm1. Use -NoSandbox to run unsandboxed."`.
+            *   On exactly 1, it writes `\\?\pipe\LOCAL\%llu` plus a 0 byte at that offset, and writes `patch.json` with `{patched:true, offset, uv, sourceSha256, patchedSha256}`.
+        *   It grants the runtime capability `(OI)(CI)RX` on the version folder, and `(OI)(CI)M` on `.running\` inside it.
+        *   It deletes cache versions other than this one and the one before.
+        *   Returns `{root, version, uv, patched}`.
+    *   `Get-RepoKey -Repo`: the first 12 hex characters of the SHA-256 of the lower-cased full path.
+    *   `Grant-RepoAccess -Repo`:
+        *   is idempotent: it checks with `Get-Acl` before calling `icacls`.
+        *   gives `xagent-repo-<key>` `(OI)(CI)RX` on `<repo>\.git`, and `RA` with no inheritance on `<repo>` and `<repoParent>\<repo>.xagent`.
+    *   `Get-FreeDriveLetter`:
+        *   picks the highest free letter from `Z` down to `H`, skipping letters in use (`Get-PSDrive -PSProvider FileSystem` plus `subst` output).
+        *   The choice is protected by a named mutex `Global\xagent-subst`, so two runs starting together do not take the same letter.
+    *   `New-SandboxRun -Repo -Worktree -WtName -ReadOnly`:
+        *   creates the profile `xagent.<key>.<WtName>` (names over 64 characters are cut and a 6-character hash added).
+        *   It grants the container `(OI)(CI)M` on the worktree for workers, or `(OI)(CI)RX` for read-only runs. It also grants `(OI)(CI)M` on `<worktree>\.xagent\sandbox` and on `<repo>\.git\worktrees\<WtName>`.
+        *   It creates `home\.cursor`, `home\AppData\Roaming\Cursor`, `home\AppData\Local` and `tmp`, and copies `cli-config.json` and `auth.json`.
+        *   It maps the worktree and the runtime cache to drive letters with `subst`. The runtime letter is reused if a mapping to the same cache already exists.
+        *   Returns `{container, sid, capabilities, worktreeLetter, runtimeLetter, home, env}`.
+        *   `env` is the environment array:
+            *   `SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE` and `OS`;
+            *   `PATH` (`C:\Windows\System32`, `C:\Windows`, `C:\Windows\System32\WindowsPowerShell\v1.0`, `C:\Program Files\PowerShell\7`, `C:\Program Files\Git\cmd`, then the read list's `path` entries);
+            *   `USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`, `TEMP` and `TMP` (under `<W>:\.xagent\sandbox`);
+            *   `PSModulePath` (`C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules`);
+            *   `CURSOR_INVOKED_AS=agent.cmd`.
+    *   `Start-SandboxProcess -Run -CliArgs -StdoutPath -StderrPath`: builds the command line `"<R>:\node.exe" "<R>:\index.js" <args>` with the existing `Quote` rules, starts it through `XagentSandbox.Start`, and returns the handle.
+    *   `Stop-SandboxRun -Run` (after every run): removes both `subst` letters (the runtime letter only when no other live run uses it, tracked by `.running` files in `%LOCALAPPDATA%\xagent\sandbox\letters\`), and deletes the run home's `auth.json`.
+    *   `Remove-SandboxRun -Repo -WtName` (at `-Cleanup`): `icacls /remove` on the worktree's `.git\worktrees\<WtName>` folder (the worktree folder itself is deleted by the existing cleanup), and `DeleteProfile`.
+    *   `Invoke-SandboxCanary`:
+        *   creates a temporary repo under `<TEMP>\xagent-canary-<rand>` and plants canaries in `%USERPROFILE%` and next to the repo's parent.
+        *   It runs `pwsh -NoProfile -File` on a fixed in-container script, which tries to read both canaries and list `%USERPROFILE%`, then runs `git init`/`commit` and `node -e` with a piped child.
+        *   It returns `{ok, results[]}` and always cleans up, as the probe did.
+    *   `Remove-SandboxGrants`: removes every `xagent-*` capability entry from the runtime cache, from every repo listed in `%LOCALAPPDATA%\xagent\sandbox\repos.json` (written by `Grant-RepoAccess`), and from read-list paths.
+    *   **Read list:** `%LOCALAPPDATA%\xagent\sandbox.json` (optional) is `{ "read": [ {"path": "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python312", "addToPath": true} ] }`. Each entry gets the runtime capability `(OI)(CI)RX`. An entry under `%USERPROFILE%` is refused if it is the profile root, `.ssh`, `.aws`, `.cursor` or `AppData\Roaming` as a whole.
+
+#### 3. `skills/delegate/scripts/delegate.ps1` (Modify)
+
+*   **Type / Scope:** the launch script.
+*   **Proposed Changes:**
+    *   **Parameters:** add `[switch]$NoSandbox`, `[switch]$SandboxCheck` and `[switch]$Remove` (valid only with `-SandboxCheck`).
+        *   `-SandboxCheck` makes `-Repo` and `-TaskId` optional: the `Mandatory` attributes move into a parameter set, with the default set unchanged for every existing call.
+        *   It prints `{ok, support, runtime, canary, grants, staleLetters}` and exits. With `-Remove` it runs `Remove-SandboxGrants` instead.
+    *   **Launch, `cursor` agent:**
+        *   Unless `-NoSandbox`, call `Test-SandboxSupport` (`Fail` with its problems), `Get-SandboxRuntime`, `Grant-RepoAccess` and `New-SandboxRun`.
+        *   `--workspace` becomes `<W>:\` instead of `$wt`.
+        *   Start through `Start-SandboxProcess`. The pid file keeps its format, with `childPid` as the sandboxed `node.exe`.
+        *   Wait with `XagentSandbox.Wait`, and on timeout call `Kill`.
+        *   `Stop-SandboxRun` runs in the existing `finally`.
+    *   **Unsandboxed path (`-NoSandbox`):** keep `Start-Process` and the secret denylist. Replace `taskkill.exe` with `$proc.Kill($true)`, wrapped in try/catch.
+    *   **Summary and `runs.jsonl`:** add `sandboxed` and, when sandboxed, `sandbox = {container, runtimeVersion, patched, worktreeLetter, runtimeLetter}`. `worktree` stays the real path (G4).
+    *   **`-Cleanup`:** call `Remove-SandboxRun` before the worktree is removed. A failure there is reported in the cleanup JSON but does not stop the cleanup.
+    *   **`agy`:** unchanged (still disabled). If it is ever enabled, it runs only with `-NoSandbox`.
+    *   **Help comment:** add the sandbox guardrail and the new layout lines.
+
+#### 4. `skills/feature/scripts/feature.ps1` (Modify)
+
+*   **Type / Scope:** the feature state script.
+*   **Proposed Changes:**
+    *   Replace the three `taskkill.exe` calls (orphan kill in reconcile, the `verify` timeout, and the generic timeout helper) with one helper, `Stop-ProcessTree -ProcessId`. It calls `[Diagnostics.Process]::GetProcessById($id).Kill($true)`, ignores "process has exited", and waits up to 10 s. This makes the suite runnable inside the sandbox, where `taskkill.exe` hangs.
+    *   `doctor` gains a `sandbox` entry: it runs `delegate.ps1 -SandboxCheck` and shows `ok` and `problems`.
+
+#### 5. `skills/delegate/tests/Sandbox.Tests.ps1` (Create)
+
+*   **Type / Scope:** Pester 6 tests.
+*   **Proposed Changes:**
+    *   **Unit tests (no container):**
+        *   the patch on synthetic `node.exe` byte files: pattern once (patched, `patch.json` correct), zero times (throws the named error), twice (throws), and libuv ≥ 1.53 (skipped; `process.versions.uv` is mocked);
+        *   `Get-RepoKey` is stable and case-insensitive;
+        *   `Get-FreeDriveLetter` skips letters in use;
+        *   the environment array has no variable outside the listed set, even when the test sets `GH_TOKEN` and `AWS_SECRET_ACCESS_KEY`;
+        *   read-list entries for `~\.ssh` and the profile root are refused;
+        *   the profile name is shortened past 64 characters.
+    *   **Container tests** (tag `Sandbox`, skipped when `IsAppContainer()` is true or the build is below 26300):
+        *   `New-SandboxRun` plus a `pwsh` canary script, covering CUJ 2 without Cursor;
+        *   a read-only run cannot write its worktree but can write its run home (G2);
+        *   two runs at the same time cannot read each other's worktrees;
+        *   a timed-out sleeper tree dies on `Kill` (CUJ 5);
+        *   `Stop-SandboxRun` removes the letters and `auth.json`, and `Remove-SandboxRun` removes the access entries and the profile.
+    *   **Live test** (tag `Live`, excluded by default): `delegate.ps1` with a real Cursor worker (`composer-2.5`) on a temporary repo, told to read the canaries. It passes when no canary text appears in the logs, summary or branch, and `sandboxed` is `true`.
+
+#### 6. `skills/delegate/tests/DelegateLaunch.Tests.ps1` (Create)
+
+*   **Type / Scope:** Pester 6 tests for the `delegate.ps1` changes.
+*   **Proposed Changes:**
+    *   `-NoSandbox` gives `sandboxed: false` in the summary and `runs.jsonl` (with `XAGENT_LOG_DIR` pointed at `TestDrive`).
+    *   A failing `Test-SandboxSupport` (mocked through a `XAGENT_SANDBOX_FORCE_FAIL` test variable that only the module reads) gives `ok: false` with the reason, and no agent starts (G5).
+    *   `-SandboxCheck` without `-Repo` and `-TaskId` is accepted.
+    *   Existing calls without the new switches still bind (G4).
+
+#### 7. `scripts/test.ps1` (Create)
+
+*   **Type / Scope:** the repo's one test command, for workers and the lead.
+*   **Proposed Changes:**
+    *   Imports Pester 6.2.0 or later and runs `skills/feature/tests` and `skills/delegate/tests`.
+    *   Sets `TestRegistry.Enabled = $false`, because Pester's test registry writes under `HKCU\Software\Pester`, which an AppContainer cannot write. Excludes the `Live` tag, and `Slow` with `-Fast`.
+    *   Exits with the failed count.
+    *   `docs/test-plan.md` and the task template's test line point to it.
+
+#### 8. `skills/delegate/SKILL.md` (Modify)
+
+*   **Type / Scope:** skill instructions.
+*   **Proposed Changes:**
+    *   A "Sandbox" section: what a run can reach (the table in short), `-SandboxCheck` as a setup step, and `-NoSandbox` only when the user asks.
+    *   The read list file, and the limits (no `taskkill`, per-user tools need the read list, all-or-nothing network).
+    *   A line in "Failed runs": a sandbox start failure is not retried and is reported to the user.
+
+#### 9. `skills/feature/templates/task.md` (Modify)
+
+*   **Type / Scope:** worker task template.
+*   **Proposed Changes:**
+    *   The test instruction names `pwsh -NoProfile -File scripts/test.ps1` when the repo has it.
+    *   One sentence: "You run in a sandbox: only this worktree, your home and temp folders, and installed tools are readable; do not try to work around access errors, report them."
+
+    The two-part G7 layout is not added to the template. The G7 task file is written by hand in the plan stage, and the template changes only after the comparison.
+
+#### 10. `README.md` (Modify)
+
+*   **Type / Scope:** user-facing requirements.
+*   **Proposed Changes:**
+    *   Requirements: Windows 11 build 26300 or later, and Pester installed for all users for sandboxed test runs.
+    *   Setup: run `delegate.ps1 -SandboxCheck` once.
+    *   A short note on what the sandbox blocks.
+
+#### 11. `docs/designs/feature-skill.md` (Modify)
+
+*   **Type / Scope:** the first design's Risks table.
+*   **Proposed Changes:** the "workers can read the whole machine" row changes from "unmitigated in v1" to "mitigated by `worker-sandbox` (see `docs/designs/worker-sandbox.md`)". This is a post-lock amendment line, in the same style as D19.
+
+#### 12. `docs/test-plan.md` (Modify)
+
+*   **Type / Scope:** test log.
+*   **Proposed Changes:** new entries for:
+    *   the frozen `delegate` path and commit (G6);
+    *   the canary run results (G1, G2);
+    *   the overhead per run;
+    *   the token-refresh check;
+    *   the G7 comparison.
+
+#### 13. `docs/HANDOFF.md` (Modify)
+
+*   **Type / Scope:** session hand-off.
+*   **Proposed Changes:** the status of `worker-sandbox`, and the Node.js libuv 1.53 watch item, linking nodejs/node#66374.
+
+### Build order
+
+| Phase | Tasks | Profile | Depends on |
+|---|---|---|---|
+| 1 | `Stop-ProcessTree` in `feature.ps1`; `scripts/test.ps1`; `taskkill` removal in the unsandboxed `delegate.ps1` path | `code` | — |
+| 2 | `SandboxNative.cs`; `Sandbox.psm1` support check, runtime cache and patch, repo key, drive letters; unit tests (file 5, unit part) | `code-hard` (first one: G7 template) | — |
+| 3 | `Sandbox.psm1` run setup, launch, stop, remove, canary, grants removal; container tests | `code-hard` | 2 |
+| 4 | `delegate.ps1` wiring, `-SandboxCheck`, `-NoSandbox`, summary fields, cleanup; file 6; `feature.ps1 doctor` entry | `code` | 1, 3 |
+| 5 | Docs (files 8–13); live canary, regression, overhead and token-refresh checks | lead, with one `code` task for docs | 4 |
+
+Phases 1 and 2 have no shared files and can run at the same time. Workers in this build are not sandboxed: they use the frozen `delegate` (G6).
+
+### Verification Plan
+
+*   **Unit and container tests:** `pwsh -NoProfile -File scripts/test.ps1`. All tests pass: the 218 existing ones and the new ones.
+*   **The suite inside the sandbox (G1 with real work, CUJ 1):** after phase 4, the lead runs one sandboxed worker from `D:\cross-agent-loop\skills\delegate` (not the frozen copy) on a small task in this repo. The worker runs `scripts/test.ps1 -Fast` and reports the results in `result.json`. Pass: the suite passes inside the sandbox, apart from tests tagged `Sandbox`, which skip themselves.
+*   **Canary (G1, G2, CUJ 2, CUJ 3):** the `Live` test as a worker, then the same canaries as a `review` lens and a `council` seat. Pass: every attempt is denied, no canary text appears anywhere, and the read-only worktrees are unchanged.
+*   **Regression (G4):** the `delegate` regression from `docs/designs/feature-skill.md`'s Verification Plan, with the sandbox on. Pass: the same results as the last unsandboxed run recorded in `test-plan.md`.
+*   **Failure (G5, CUJ 4):** a copy of the runtime cache with the pattern removed, plus `XAGENT_SANDBOX_FORCE_FAIL`. Pass: `ok: false` with the named error, no agent process started, and nothing written to `runs.jsonl` as sandboxed.
+*   **Timeout (CUJ 5):** a worker task that runs `Start-Sleep 600` with `-TimeoutSec 30`. Pass: `timedOut: true` within 45 s, and no `node.exe` or `pwsh.exe` left from the run.
+*   **Overhead:** the time from `delegate.ps1` start to agent start, sandboxed and unsandboxed, over 5 runs each. Target: 5 s or less extra (median), after the first run of a Cursor version.
+*   **Token refresh:** after 3 sandboxed runs over at least one day, `cursor-agent status` outside the sandbox still shows the user logged in.
+*   **G6:** every `runs.jsonl` line of this feature's build shows the frozen skill path in the lead's `test-plan.md` record. No build run fails because of unfinished sandbox code.
+*   **G7:** the `test-plan.md` entry for the first `code-hard` task exists, with its review rounds, readiness findings and the comparison with `fb-stages`.
