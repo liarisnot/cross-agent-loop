@@ -23,3 +23,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:41:23Z [dismiss] design-2 R30 (style p9 S4): contested - the read-only worktree is granted read (row 2), not read+write
 - 2026-11-14T21:41:24Z [dismiss] design-2 R31 (readiness N5): contested - probe 6 loaded Pester from C:/Program Files with no grant
 - 2026-11-14T21:41:24Z [dismiss] design-2 R28 (style p7 S6), R34 wording parts: declined - measured fact / wording only
+- 2026-11-14T21:44:56Z [gate] design-locked: "lock the design"

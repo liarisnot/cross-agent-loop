@@ -3,5 +3,12 @@
   "stage": "design-review",
   "checkin": "on-problems",
   "designDoc": "docs/designs/worker-sandbox.md",
-  "gates": {}
+  "gates": {
+    "design-locked": {
+      "at": "2026-11-14T21:44:56Z",
+      "quote": "lock the design",
+      "sha": "6ca02a12a551c98e55f418d59398d705155827db",
+      "designBlob": "379f46602b94102bc5dad226c18d9e27bd7c67a9"
+    }
+  }
 }
