@@ -14,3 +14,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:06:58Z [decision] design-1 D9: taskkill in target repos is a documented limit
 - 2026-11-14T21:06:59Z [dismiss] codebase_details #8 (M20): pipe-name bytes claimed single-backslash 19 bytes - contested, lead read node.exe at 0x55df524: double backslash, 20 bytes; version-compare half fixed
 - 2026-11-14T21:07:00Z [dismiss] style p7 n2,n3 (N22): two phrasings kept, the lens itself marked them acceptable
+- 2026-11-14T21:09:39Z [reaudit] d3: phase 7
