@@ -32,3 +32,9 @@ Throwaway scripts behind the `worker-sandbox` design decision (`../worker-sandbo
 *   **Pester's TestRegistry** has to be off inside the container (`TestRegistry.Enabled = $false`).
 *   **Pester under `OneDrive\Documents` is unreadable** to the container. Installing Pester for all users (`Install-Module Pester -RequiredVersion 6.2.0 -Scope AllUsers -SkipPublisherCheck`, admin) puts it in `C:\Program Files\PowerShell\Modules`, which containers can read with no grant. `-SkipPublisherCheck` is needed because Windows ships Pester 3.4.0 signed by a different certificate.
 *   **`localhost` works inside one container,** both in-process and to a child server process. No loopback exemption is needed for that.
+*   **The host's `localhost` is blocked from a container, and an admin loopback exemption opens it** (`loopback.ps1`, run 2026-11-14).
+    *   The probe started a node HTTP server on the host at `127.0.0.1:47614`.
+    *   From the container, requests to `127.0.0.1` and to `localhost` timed out.
+    *   The user then ran `CheckNetIsolation LoopbackExempt -a -p=<container SID>` (admin, printed "OK."). Both requests then succeeded.
+    *   After `CheckNetIsolation LoopbackExempt -d -p=<SID>`, both were blocked again.
+    *   The exemption belongs to one container identity and opens every host port, so it is how ComfyUI or Ollama on the host can be reached. `ac-native.ps1` holds the `AC` launcher class that `loopback.ps1` loads.
