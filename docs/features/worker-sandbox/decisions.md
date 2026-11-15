@@ -56,3 +56,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T07:47:13Z [dismiss] comprehension (sandbox-readlist preflight): acceptance runs all of skills/delegate/tests — that folder runs in ~3 s; settled in plan review 3
 - 2026-11-15T08:10:26Z [stop] sandbox-grants: preflight size gate says split, borderline (480-620 lines, 20-28 min; limit 20 min / 600 lines); readiness: no Blockers, fixes pinned in the task file
 - 2026-11-15T08:15:01Z [resume] user override: run sandbox-grants as one task (borderline split verdict; 'yeah borderline go with 1')
+- 2026-11-15T16:12:11Z [stop] sandbox-lifecycle: preflight size gate says split (comprehension, composer-2.5: 500-700 lines, 28-42 worker min); proposed: sandbox-run (3 functions + harness + worker-run test) and sandbox-run-checks (read-only, kill, unremovable-grant tests); readiness found 1 Blocker (Stop-SandboxRun with no run) and 6 Majors to pin
