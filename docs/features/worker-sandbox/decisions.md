@@ -40,3 +40,5 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T06:01:43Z [dismiss] comprehension: TEST REPOS rule missing from sandbox-access — it creates no repo or worktree; its refusal test checks paths only
 - 2026-11-15T06:01:44Z [dismiss] comprehension: no per-task Describe filter for iterating — skills/delegate/tests runs in seconds, so the narrowed command is the iteration command
 - 2026-11-15T06:05:08Z [decision] plan review: no fourth round; the user approved the plan revised after plan-3
+- 2026-11-15T06:05:09Z [gate] plan-approved: "approve the plan"
+- 2026-11-15T06:05:09Z [decision] checkin: on-problems
