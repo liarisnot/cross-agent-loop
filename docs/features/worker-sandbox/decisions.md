@@ -70,3 +70,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T20:57:29Z [stage] plan -> build
 - 2026-11-15T21:01:47Z [dismiss] implementation_readiness (sandbox-run-fns preflight): login-copy test now — the copies are verified by sandbox-run-harness's container test; keeps this task inside its size estimate
 - 2026-11-15T22:26:20Z [fix-up] sandbox-run-fns: 1 files, 7 lines — rename $home to $runHome in New-SandboxRun ($HOME is read-only; every real run threw after writing the ledger)
+- 2026-11-15T22:38:48Z [stop] sandbox-run-harness preflight: size split verdict (22-35 worker min, 260-380 lines); lead recommends no split (the proposed harness-only half has no test; recent actuals land at or below the low end: run-fns est 22-32, actual 17); acceptance-scope Major also flagged; readiness gaps pinned in the task file
