@@ -2492,6 +2492,41 @@ Describe 'run lifecycle' -Tag Sandbox {
             }
         }
 
+        # script=/child=/grandchild= lines. Ready only when both child= values agree and the three PIDs differ.
+        function Read-SleeperPids([string]$Text) {
+            $scriptPid = $null
+            $grandchildPid = $null
+            $childValues = New-Object System.Collections.Generic.List[int]
+            foreach ($line in @($Text -split '\r?\n')) {
+                if ($line -match '^script=(\d+)$') {
+                    $scriptPid = [int]$Matches[1]
+                } elseif ($line -match '^child=(\d+)$') {
+                    $childValues.Add([int]$Matches[1])
+                } elseif ($line -match '^grandchild=(\d+)$') {
+                    $grandchildPid = [int]$Matches[1]
+                }
+            }
+            $childPid = $null
+            $ready = $false
+            if ($null -ne $scriptPid -and $null -ne $grandchildPid -and $childValues.Count -gt 0) {
+                $childPid = $childValues[0]
+                $sameChild = $true
+                foreach ($value in $childValues) {
+                    if ($value -ne $childPid) { $sameChild = $false; break }
+                }
+                if ($sameChild) {
+                    $distinct = @($scriptPid, $childPid, $grandchildPid) | Select-Object -Unique
+                    $ready = @($distinct).Count -eq 3
+                }
+            }
+            return [pscustomobject]@{
+                Ready = $ready
+                ScriptPid = $scriptPid
+                ChildPid = $childPid
+                GrandchildPid = $grandchildPid
+            }
+        }
+
         function Invoke-RunScript {
             param(
                 [Parameter(Mandatory)][string]$Name,
@@ -2636,5 +2671,297 @@ Describe 'run lifecycle' -Tag Sandbox {
         $map = Get-TestSubstMap
         (Test-SameLetterTarget $map[$letter] $idle) | Should -BeTrue -Because $because
         (Get-IcaclsText $script:RunWorktree) | Should -Not -Match ([regex]::Escape([string]$r.run.sid)) -Because $because
+    }
+
+    It 'a read-only run writes only its run home' -Skip:$script:RunSkip {
+        $roOk = Join-Path $script:RunWorktree '.xagent\sandbox\home\ro-ok.txt'
+        try {
+            $bodyLines = @(
+                'try {'
+                '    [IO.File]::WriteAllText((Join-Path $env:USERPROFILE ''ro-ok.txt''), ''ok'')'
+                '    Write-Output ''home=ok'''
+                '} catch {'
+                '    Write-Output ''home=denied'''
+                '}'
+                '$root = (Get-Location).Path.TrimEnd(''\'')'
+                'try {'
+                '    [IO.File]::WriteAllText(($root + ''\ro-new.txt''), ''new'')'
+                '    Write-Output ''create=ok'''
+                '} catch {'
+                '    Write-Output ''create=denied'''
+                '}'
+                'try {'
+                '    [IO.File]::AppendAllText(($root + ''\README.txt''), ''x'')'
+                '    Write-Output ''modify=ok'''
+                '} catch {'
+                '    Write-Output ''modify=denied'''
+                '}'
+                '$status = (git status --porcelain --untracked-files=no) -join '';'''
+                'Write-Output "status=[$status]"'
+                'exit 0'
+            )
+            $r = Invoke-RunScript -Name 'readonly' -Body ($bodyLines -join "`n") -ReadOnly
+            $because = "stderr: $($r.stderr)`nstdout: $($r.stdout)"
+            $r.timedOut | Should -BeFalse -Because $because
+            $r.exitCode | Should -Be 0 -Because $because
+            $lines = @($r.stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+            $lines | Should -Be @('home=ok', 'create=denied', 'modify=denied', 'status=[]') -Because $because
+            $r.notes -is [array] | Should -BeTrue -Because $because
+            @($r.notes).Count | Should -Be 0 -Because $because
+            Test-Path -LiteralPath (Join-Path $script:RunWorktree 'ro-new.txt') | Should -BeFalse -Because $because
+            [IO.File]::ReadAllText((Join-Path $script:RunWorktree 'README.txt')) | Should -Be 'readme-ok' -Because $because
+            Test-Path -LiteralPath $roOk | Should -BeTrue -Because $because
+        } finally {
+            try {
+                if (Test-Path -LiteralPath $roOk) {
+                    (Get-Item -LiteralPath $roOk -Force).IsReadOnly = $false
+                    Remove-Item -LiteralPath $roOk -Force
+                }
+            } catch { }
+        }
+    }
+
+    It 'Kill ends the whole process tree' -Skip:$script:RunSkip {
+        # Redirects force CreateProcess rather than ShellExecute, so the child stays in the job.
+        $writerLines = @(
+            '$ErrorActionPreference = ''Stop'''
+            'function Write-PidText([string]$Text) {'
+            '    $path = Join-Path $env:USERPROFILE ''pids.txt'''
+            '    for ($i = 0; $i -lt 50; $i++) {'
+            '        try {'
+            '            $stream = [IO.File]::Open($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)'
+            '            try {'
+            '                $bytes = [Text.Encoding]::UTF8.GetBytes($Text)'
+            '                $stream.Write($bytes, 0, $bytes.Length)'
+            '            } finally {'
+            '                $stream.Dispose()'
+            '            }'
+            '            return'
+            '        } catch {'
+            '            Start-Sleep -Milliseconds 20'
+            '        }'
+            '    }'
+            '    throw ''could not append pids.txt'''
+            '}'
+        )
+        $childLines = @(
+            '$out = Join-Path $env:USERPROFILE ''node.out'''
+            '$err = Join-Path $env:USERPROFILE ''node.err'''
+            '$node = Start-Process -FilePath ''NODEEXE'' -ArgumentList @(''-e'', ''setTimeout(()=>{},600000)'') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err'
+            'Start-Sleep -Milliseconds 200'
+            'Write-PidText ("child=" + $PID + "`r`n" + "grandchild=" + $node.Id + "`r`n")'
+            'Start-Sleep -Seconds 600'
+        )
+        $parentLines = @(
+            '$out = Join-Path $env:USERPROFILE ''child.out'''
+            '$err = Join-Path $env:USERPROFILE ''child.err'''
+            '$child = Start-Process -FilePath ''PWSH'' -ArgumentList @(''-NoProfile'', ''-ExecutionPolicy'', ''Bypass'', ''-File'', ''CHILDFILE'') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err'
+            'Write-PidText ("script=" + $PID + "`r`n" + "child=" + $child.Id + "`r`n")'
+            'Start-Sleep -Seconds 600'
+        )
+
+        $slot = $null
+        $run = $null
+        $h = $null
+        $stopped = $false
+        $scriptPid = $null
+        $childPid = $null
+        $grandPid = $null
+        $runHome = Join-Path $script:RunWorktree '.xagent\sandbox\home'
+        $pidsPath = Join-Path $runHome 'pids.txt'
+        $stdoutPath = $null
+        $stderrPath = $null
+        try {
+            $slot = Get-SandboxSlot
+            $letter = [string]$slot.letter
+            $runtimeLetter = $script:RunLetters[0]
+            $nodeExe = '{0}:\{1}\node.exe' -f $runtimeLetter, $script:RunRuntime.version
+            $childFile = '{0}:\.xagent\sleeper-child.ps1' -f $letter
+            $pwsh = 'C:\Program Files\PowerShell\7\pwsh.exe'
+            $xagentDir = Join-Path $script:RunWorktree '.xagent'
+            New-Item -ItemType Directory -Force -Path $xagentDir | Out-Null
+            $childBody = (($writerLines + $childLines) -join "`n").Replace('NODEEXE', $nodeExe)
+            $parentBody = (($writerLines + $parentLines) -join "`n").Replace('PWSH', $pwsh).Replace('CHILDFILE', $childFile)
+            [IO.File]::WriteAllText((Join-Path $xagentDir 'sleeper-child.ps1'), $childBody, [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $xagentDir 'sleeper.ps1'), $parentBody, [Text.UTF8Encoding]::new($false))
+
+            $outDir = Join-Path $TestDrive 'run-life-out'
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $stdoutPath = Join-Path $outDir 'sleeper.out'
+            $stderrPath = Join-Path $outDir 'sleeper.err'
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+            $run = New-SandboxRun -Slot $slot -Runtime $script:RunRuntime -Repo $script:RunRepo -Worktree $script:RunWorktree -WtName $script:RunWtName
+            $fileArg = '{0}:\.xagent\sleeper.ps1' -f $run.slot
+            $h = Start-SandboxProcess -Run $run -Exe $pwsh -Arguments @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fileArg
+            ) -StdoutPath $stdoutPath -StderrPath $stderrPath
+
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $pidText = ''
+            $previous = $null
+            $pidInfo = $null
+            do {
+                try {
+                    $pidText = Read-RunOutputText $pidsPath
+                } catch {
+                    $pidText = ''
+                }
+                $pidInfo = Read-SleeperPids $pidText
+                $scriptPid = $pidInfo.ScriptPid
+                $childPid = $pidInfo.ChildPid
+                $grandPid = $pidInfo.GrandchildPid
+                $settled = $pidInfo.Ready -and $pidText -eq $previous -and $pidText.EndsWith("`n")
+                if ($settled) { break }
+                $previous = $pidText
+                if ($clock.Elapsed.TotalMilliseconds -ge 30000) { break }
+                Start-Sleep -Milliseconds 200
+            } while ($true)
+
+            $detail = @(
+                ('stderr: ' + (Read-RunOutputText $stderrPath))
+                ('pids: ' + $pidText)
+                ('child.err: ' + (Read-RunOutputText (Join-Path $runHome 'child.err')))
+                ('node.err: ' + (Read-RunOutputText (Join-Path $runHome 'node.err')))
+            ) -join "`n"
+            $settled | Should -BeTrue -Because $detail
+
+            foreach ($procId in @($scriptPid, $childPid, $grandPid)) {
+                $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                $null -ne $proc | Should -BeTrue -Because "pid $procId is not running`n$detail"
+            }
+            $h.ProcessId | Should -BeIn @($scriptPid, $childPid, $grandPid) -Because $detail
+            (Get-Process -Id $grandPid -ErrorAction SilentlyContinue).ProcessName | Should -Be 'node' -Because $detail
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue).ProcessName | Should -Be 'pwsh' -Because $detail
+
+            [XagentSandbox]::Kill($h)
+            ([XagentSandbox]::Wait($h, 10000)) | Should -BeTrue -Because $detail
+
+            $alive = @()
+            $deadClock = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                $alive = @()
+                foreach ($procId in @($scriptPid, $childPid, $grandPid)) {
+                    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    if ($null -ne $proc) { $alive += $procId }
+                }
+                if ($alive.Count -eq 0) { break }
+                if ($deadClock.Elapsed.TotalMilliseconds -ge 10000) { break }
+                Start-Sleep -Milliseconds 200
+            } while ($true)
+            @($alive).Count | Should -Be 0 -Because ("still running: " + ($alive -join ',') + "`n" + $detail)
+
+            $null = [XagentSandbox]::Finish($h)
+            $notes = Stop-SandboxRun -Run $run -Slot $slot -Handle $h
+            $stopped = $true
+            $notes -is [array] | Should -BeTrue -Because $detail
+            @($notes).Count | Should -Be 0 -Because (($notes -join '; ') + "`n" + $detail)
+        } finally {
+            if (-not $stopped -and $null -ne $slot) {
+                try { Stop-SandboxRun -Run $run -Slot $slot -Handle $h | Out-Null } catch { }
+            }
+            foreach ($procId in @($scriptPid, $childPid, $grandPid)) {
+                if ($null -eq $procId) { continue }
+                try {
+                    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    if ($null -eq $proc) { continue }
+                    if ($proc.ProcessName -ne 'pwsh' -and $proc.ProcessName -ne 'node') { continue }
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                } catch { }
+            }
+            foreach ($name in @('pids.txt', 'child.out', 'child.err', 'node.out', 'node.err')) {
+                try {
+                    $path = Join-Path $runHome $name
+                    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+                } catch { }
+            }
+            foreach ($name in @('sleeper.ps1', 'sleeper-child.ps1')) {
+                try {
+                    Remove-Item -LiteralPath (Join-Path $script:RunWorktree ".xagent\$name") -Force -ErrorAction SilentlyContinue
+                } catch { }
+            }
+        }
+    }
+
+    It 'a stuck grant keeps the ledger with only that entry' -Skip:$script:RunSkip {
+        $stuck = [IO.Path]::GetFullPath((Join-Path $script:RunTestRoot 'stuck.txt'))
+        $slot = $null
+        $run = $null
+        $h = $null
+        $stopped = $false
+        $sid = $null
+        $ledgerPath = $null
+        try {
+            [IO.File]::WriteAllText($stuck, 'stuck', [Text.UTF8Encoding]::new($false))
+            $slot = Get-SandboxSlot
+            $run = New-SandboxRun -Slot $slot -Runtime $script:RunRuntime -Repo $script:RunRepo -Worktree $script:RunWorktree -WtName $script:RunWtName
+            $sid = [string]$run.sid
+            $letter = [string]$run.slot
+            $sandboxDir = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox'
+            $ledgerPath = Join-Path $sandboxDir "slot-$letter.json"
+
+            $grant = @(& icacls.exe $stuck /grant ("*${sid}:(R)") 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls grant stuck failed (${LASTEXITCODE}): $grant" }
+
+            InModuleScope Sandbox -Parameters @{ LedgerPath = $ledgerPath; StuckPath = $stuck } {
+                param($LedgerPath, $StuckPath)
+                $ledger = Read-SandboxLedger -Path $LedgerPath
+                if ($null -eq $ledger) { throw "ledger missing: $LedgerPath" }
+                $rows = New-Object System.Collections.Generic.List[object]
+                foreach ($row in @($ledger.grants)) {
+                    if ($null -ne $row) { $rows.Add($row) }
+                }
+                $rows.Add([pscustomobject]@{ path = $StuckPath; spec = '(R)' })
+                $ledger.grants = $rows.ToArray()
+                Write-SandboxLedger -Path $LedgerPath -Ledger $ledger
+            }
+
+            $deny = @(& icacls.exe $stuck /deny '*S-1-3-4:(WDAC)' 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls deny stuck failed (${LASTEXITCODE}): $deny" }
+
+            $notes = Stop-SandboxRun -Run $run -Slot $slot -Handle $h
+            $stopped = $true
+            $notes -is [array] | Should -BeTrue
+            @($notes).Count | Should -Be 1
+            $notes[0].StartsWith("grant not removed: $stuck") | Should -BeTrue -Because $notes[0]
+
+            Test-Path -LiteralPath $ledgerPath | Should -BeTrue
+            $after = InModuleScope Sandbox -Parameters @{ Path = $ledgerPath } {
+                param($Path)
+                Read-SandboxLedger -Path $Path
+            }
+            @($after.grants).Count | Should -Be 1
+            $after.grants[0].path | Should -Be $stuck
+            $after.grants[0].spec | Should -Be '(R)'
+            $names = @($after.grants[0].PSObject.Properties.Name)
+            @($names).Count | Should -Be 2
+            $names | Should -Contain 'path'
+            $names | Should -Contain 'spec'
+
+            (Get-IcaclsText $script:RunWorktree) | Should -Not -Match ([regex]::Escape($sid))
+            $idle = Join-Path $sandboxDir 'idle'
+            (Test-SameLetterTarget (Get-TestSubstMap)[$letter] $idle) | Should -BeTrue
+        } finally {
+            if (-not $stopped -and $null -ne $slot) {
+                try { Stop-SandboxRun -Run $run -Slot $slot -Handle $h | Out-Null } catch { }
+            }
+            try { & icacls.exe $stuck /remove:d '*S-1-3-4' 2>&1 | Out-Null } catch { }
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($sid)) {
+                    & icacls.exe $stuck /remove ("*$sid") 2>&1 | Out-Null
+                }
+            } catch { }
+            try {
+                if (Test-Path -LiteralPath $stuck) {
+                    (Get-Item -LiteralPath $stuck -Force).IsReadOnly = $false
+                    Remove-Item -LiteralPath $stuck -Force
+                }
+            } catch { }
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($ledgerPath)) {
+                    Remove-Item -LiteralPath $ledgerPath -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
     }
 }
