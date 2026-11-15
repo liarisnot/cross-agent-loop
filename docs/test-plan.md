@@ -339,3 +339,30 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
 ## worker-sandbox build (from 2026-11-14)
 
 - **G6 freeze (2026-11-14):** `D:\cross-agent-loop.frozen` is a detached worktree at `6ca02a1`, the design-lock commit. `~\.claude\skills\delegate` and `~\.claude\skills\feature` point at its `skills\delegate` and `skills\feature`, with the user's approval ("yes freeze skill"). `feature.ps1 doctor` through the junctions reports ready. Every run of this build should show `skillDir` under `D:\cross-agent-loop.frozen` once phase 4 adds the field. Before that, the junction targets are the record. After sign-off, the junctions go back to `D:\cross-agent-loop\skills\` and the worktree is removed.
+- **Phase 1 (2026-11-14):** `test-runner` and `kill-tree` (Composer 2.5) merged. `kill-tree` took 17 min; one lead fix-up (its tree test didn't assert that the deepest process died). Phase test: full suite, 224 passed on `feature/worker-sandbox`.
+- **`reconcile` loses the worktree (bug in the frozen `feature.ps1`):** for a detached worker that finished while no session was running, `reconcile` moved the task `running` → `in-review` but recorded no `worktree` or `baseSha`, so `verify` refused (`task kill-tree has no worktree in state.json`). Worked around by reading `summary-r1.json` and running `task -Status in-review -Worktree -BaseSha` by hand. Fix after this build: `reconcile` should take those fields from the run's summary file.
+- **Not a worker fault: Windows Terminal auto-update (2026-11-14 17:28).** Every pwsh window and Claude CLI session closed while the user was away. The user suspected `kill-tree` (its tests kill process trees). Its transcript showed only kills of processes it had started itself, and it had finished at 17:00. The event log showed the Microsoft Store updating Windows Terminal 1.24 → 1.25 at 17:28:49, which closes every tab.
+
+### `sandbox-core` run 1 timed out at 50 min: root cause (2026-11-14)
+
+`sandbox-core` (`code-hard`, Grok 4.7 high) timed out at `-TimeoutSec 3000` while running its acceptance command. Run 2 (fresh session, same worktree) finished in 15.5 min **with no edits**: run 1 had finished the work and was killed about 40 s before its final test run ended.
+
+**Timeline of run 1** (rebuilt from probe-file mtimes and terminal logs; Cursor writes no usage for a killed run):
+
+| Time | Minutes | Activity |
+|---|---|---|
+| 20:18 → ~20:50 | ~32 | Read the design and code (20 reads, 14 greps, 5 probes), wrote the 3 files (1,842 lines, 83 KB), 4 unit-test runs |
+| 20:52 → 20:55 | 3 | PowerShell quirks in its own tests (empty arrays collapsing to `$null`) |
+| 20:55 → 21:02 | 7 | Undocumented Windows behaviour: `CreateProcess` into an AppContainer fails unless the environment block is sorted in Windows' case-insensitive ordinal order and holds `LOCALAPPDATA` (~12 probes and a web search) |
+| ~21:00 | — | Context compaction (139 turns, ~415 KB) |
+| 21:02:35 → 21:08:39 | 6 | Acceptance command `scripts/test.ps1 -Fast` (~6.7 min, 224 feature tests this task can't affect); killed by the timeout |
+
+**Measured (run 2):** 926 s; 40.0k output tokens, of which 37.6k reasoning (94%); 179k input, 1.56M cache read; ~76 output tokens/s. Unit-test runs took 2-3 s each, so tests didn't eat the time; model turns did. **Estimated (run 1):** ~32 min at ~76 tok/s is ~140k output tokens against ~21k tokens of code, so roughly 110k reasoning tokens, about 5× the code. The user's "1,800 lines takes a few minutes" holds for a fast low-reasoning model (Composer), not for Grok high on Win32 interop.
+
+**Root causes, most to least:**
+1. **Task too big:** one task held a C# P/Invoke layer, a 795-line module and 32 tests, plus a 75-line task file with ~40 pinned rules to reason against. Nothing in plan or preflight estimated size or time.
+2. **High reasoning effort scales with size:** right for small hard tasks, costly over 1,800 lines.
+3. **Design gap handed to the worker:** the environment-block rule was not in the design; discovery belongs in design probes, not a timed run.
+4. **Acceptance command wider than the task:** the full fast suite (6.7 min) instead of the task's own tests (3 s). The phase test already runs the full suite after each phase.
+
+**Changes adopted (user, 2026-11-14):** the comprehension preflight gives a time and size estimate; a task estimated over ~20 min or ~600 changed lines goes back to be split (split by layer, so `code-hard` tasks stay on Grok high); a task's acceptance command (which `verify` also runs) covers only its own tests, and the full suite runs as the phase test. Rejected: telling the worker its time limit (the user doubted it would help). Review of the merged code: sound; one lead fix-up (the test file left `XAGENT_*` env vars pointing into a deleted TestDrive for later test files in the same run).
