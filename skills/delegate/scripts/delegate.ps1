@@ -346,7 +346,7 @@ try {
         } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidF
     } catch { }
     $timedOut = -not $proc.WaitForExit($TimeoutSec * 1000)
-    if ($timedOut) { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null; $proc.WaitForExit(10000) | Out-Null }
+    if ($timedOut) { try { $proc.Kill($true) } catch {}; $proc.WaitForExit(10000) | Out-Null }
     $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
 } finally {
     $sw.Stop()
