@@ -67,3 +67,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T20:40:03Z [stage] build -> plan: split sandbox-run into sandbox-run-fns and sandbox-run-harness
 - 2026-11-15T20:57:28Z [gate] plan-approved: "approve the plan"
 - 2026-11-15T20:57:28Z [decision] checkin: on-problems
+- 2026-11-15T20:57:29Z [stage] plan -> build
