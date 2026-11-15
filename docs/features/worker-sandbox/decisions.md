@@ -68,3 +68,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T20:57:28Z [gate] plan-approved: "approve the plan"
 - 2026-11-15T20:57:28Z [decision] checkin: on-problems
 - 2026-11-15T20:57:29Z [stage] plan -> build
+- 2026-11-15T21:01:47Z [dismiss] implementation_readiness (sandbox-run-fns preflight): login-copy test now — the copies are verified by sandbox-run-harness's container test; keeps this task inside its size estimate
