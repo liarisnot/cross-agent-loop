@@ -1213,6 +1213,13 @@ function Get-SandboxGrantList {
     Write-Output -NoEnumerate $rows.ToArray()
 }
 
+# RA is a specific right. icacls rejects "*<sid>:RA" (win32 87) and accepts "*<sid>:(RA)".
+# The ledger keeps the design's spec string; only the grant command is parenthesized.
+function ConvertTo-SandboxIcaclsSpec([string]$Spec) {
+    if ($Spec -eq 'RA') { return '(RA)' }
+    return $Spec
+}
+
 function Format-SandboxIcaclsError($Output) {
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($item in @($Output)) {
@@ -1674,7 +1681,7 @@ function New-SandboxRun {
         $pathText = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
         if (-not (Test-Path -LiteralPath $pathText)) { continue }
-        $spec = [string]$row.spec
+        $spec = ConvertTo-SandboxIcaclsSpec ([string]$row.spec)
         $output = @(& icacls.exe $pathText /grant ("*${sid}:${spec}") 2>&1)
         if ($LASTEXITCODE -ne 0) {
             throw "sandbox: grant failed on ${pathText}: $(Format-SandboxIcaclsError $output)"

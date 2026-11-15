@@ -56,6 +56,88 @@ function Get-ThrownMessage([scriptblock]$Command) {
     }
 }
 
+function Get-TestSubstMap {
+    $map = @{}
+    foreach ($line in @(& subst.exe 2>&1)) {
+        if ([string]$line -match '^([A-Za-z]):\\: => (.*)$') {
+            $map[$Matches[1].ToUpperInvariant()] = $Matches[2].Trim()
+        }
+    }
+    return $map
+}
+
+function Test-SameLetterTarget([string]$Actual, [string]$Expected) {
+    if ([string]::IsNullOrWhiteSpace($Actual) -or [string]::IsNullOrWhiteSpace($Expected)) { return $false }
+    $left = [IO.Path]::GetFullPath($Actual).TrimEnd('\')
+    $right = [IO.Path]::GetFullPath($Expected).TrimEnd('\')
+    return [string]::Equals($left, $right, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-TestFreeLetters {
+    $map = Get-TestSubstMap
+    $drives = @{}
+    foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+        if ($drive.Name) { $drives[$drive.Name.Substring(0, 1).ToUpperInvariant()] = $true }
+    }
+    $found = New-Object System.Collections.Generic.List[string]
+    for ($code = 90; $code -ge 68; $code--) {
+        $letter = [string][char]$code
+        if ($map.ContainsKey($letter) -or $drives.ContainsKey($letter)) { continue }
+        $found.Add($letter)
+        if ($found.Count -eq 3) { break }
+    }
+    return $found.ToArray()
+}
+
+function Get-IcaclsText([string]$Path) {
+    return ((@(& icacls.exe $Path 2>&1) | ForEach-Object { "$_" }) -join "`n")
+}
+
+function Import-TestParseVersionString {
+    $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../scripts/Sandbox.psm1'))
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
+    $fn = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Parse-VersionString'
+    }, $true)
+    if (-not $fn) { throw 'Parse-VersionString was not found in Sandbox.psm1' }
+    $text = $fn.Extent.Text -replace '^function\s+Parse-VersionString\b', 'function script:Parse-VersionString'
+    Invoke-Expression $text
+}
+
+function Get-TestRealCursorVersionDir {
+    $pattern = $script:VersionPattern
+    if ([string]::IsNullOrWhiteSpace($pattern)) {
+        $pattern = '^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$'
+    }
+    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+    $versionsDir = Join-Path $localAppData 'cursor-agent\versions'
+    if (-not (Test-Path -LiteralPath $versionsDir)) { return $null }
+    Import-TestParseVersionString
+    $dirs = @(Get-ChildItem -LiteralPath $versionsDir -Directory | Where-Object {
+        $_.Name -match $pattern -and (Test-Path -LiteralPath (Join-Path $_.FullName 'node.exe') -PathType Leaf)
+    })
+    if ($dirs.Count -eq 0) { return $null }
+    $picked = $dirs | Sort-Object { Parse-VersionString $_.Name } -Descending | Select-Object -First 1
+    return $picked.FullName
+}
+
+function Get-TestGitTopLevel {
+    try {
+        $output = @(& git -C $PSScriptRoot rev-parse --show-toplevel 2>&1)
+        if ($LASTEXITCODE -ne 0 -or @($output).Count -eq 0) { return $null }
+    } catch {
+        return $null
+    }
+    $text = ((@($output) | ForEach-Object { "$_" }) -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    $line = @($text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($line)) { return $null }
+    return [IO.Path]::GetFullPath($line.Trim())
+}
+
     $script:ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '../scripts/Sandbox.psm1')).Path
     $script:PipePattern = [byte[]](0x5C, 0x5C, 0x3F, 0x5C, 0x70, 0x69, 0x70, 0x65, 0x5C, 0x75, 0x76, 0x5C, 0x25, 0x6C, 0x6C, 0x75, 0x2D, 0x25, 0x6C, 0x75)
     $script:PipeReplacement = [byte[]](0x5C, 0x5C, 0x3F, 0x5C, 0x70, 0x69, 0x70, 0x65, 0x5C, 0x4C, 0x4F, 0x43, 0x41, 0x4C, 0x5C, 0x25, 0x6C, 0x6C, 0x75, 0x00)
@@ -1473,46 +1555,9 @@ Describe 'slots and release' {
         $script:SlotOne = $null
         $script:SlotTwo = $null
 
-        function Get-TestSubstMap {
-            $map = @{}
-            foreach ($line in @(& subst.exe 2>&1)) {
-                if ([string]$line -match '^([A-Za-z]):\\: => (.*)$') {
-                    $map[$Matches[1].ToUpperInvariant()] = $Matches[2].Trim()
-                }
-            }
-            return $map
-        }
-
-        function Test-SameLetterTarget([string]$Actual, [string]$Expected) {
-            if ([string]::IsNullOrWhiteSpace($Actual) -or [string]::IsNullOrWhiteSpace($Expected)) { return $false }
-            $left = [IO.Path]::GetFullPath($Actual).TrimEnd('\')
-            $right = [IO.Path]::GetFullPath($Expected).TrimEnd('\')
-            return [string]::Equals($left, $right, [StringComparison]::OrdinalIgnoreCase)
-        }
-
-        function Get-TestFreeLetters {
-            $map = Get-TestSubstMap
-            $drives = @{}
-            foreach ($drive in [IO.DriveInfo]::GetDrives()) {
-                if ($drive.Name) { $drives[$drive.Name.Substring(0, 1).ToUpperInvariant()] = $true }
-            }
-            $found = New-Object System.Collections.Generic.List[string]
-            for ($code = 90; $code -ge 68; $code--) {
-                $letter = [string][char]$code
-                if ($map.ContainsKey($letter) -or $drives.ContainsKey($letter)) { continue }
-                $found.Add($letter)
-                if ($found.Count -eq 3) { break }
-            }
-            return $found.ToArray()
-        }
-
         function Test-AppContainerMapped([string]$Sid) {
             $key = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\$Sid"
             return (Test-Path -LiteralPath $key)
-        }
-
-        function Get-IcaclsText([string]$Path) {
-            return ((@(& icacls.exe $Path 2>&1) | ForEach-Object { "$_" }) -join "`n")
         }
 
         function Start-SlotChild {
@@ -2204,5 +2249,392 @@ Describe 'run functions' {
         } finally {
             Release-RunSlot $slot
         }
+    }
+}
+
+# Pester keeps this scope for discovery only. BeforeDiscovery calls these helpers.
+# The three the run recomputes are defined again in the file-level BeforeAll.
+function Import-TestParseVersionString {
+    $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../scripts/Sandbox.psm1'))
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$tokens, [ref]$errors)
+    $fn = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Parse-VersionString'
+    }, $true)
+    if (-not $fn) { throw 'Parse-VersionString was not found in Sandbox.psm1' }
+    $text = $fn.Extent.Text -replace '^function\s+Parse-VersionString\b', 'function script:Parse-VersionString'
+    Invoke-Expression $text
+}
+
+function Get-TestRealCursorVersionDir {
+    $pattern = $script:VersionPattern
+    if ([string]::IsNullOrWhiteSpace($pattern)) {
+        $pattern = '^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$'
+    }
+    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+    $versionsDir = Join-Path $localAppData 'cursor-agent\versions'
+    if (-not (Test-Path -LiteralPath $versionsDir)) { return $null }
+    Import-TestParseVersionString
+    $dirs = @(Get-ChildItem -LiteralPath $versionsDir -Directory | Where-Object {
+        $_.Name -match $pattern -and (Test-Path -LiteralPath (Join-Path $_.FullName 'node.exe') -PathType Leaf)
+    })
+    if ($dirs.Count -eq 0) { return $null }
+    $picked = $dirs | Sort-Object { Parse-VersionString $_.Name } -Descending | Select-Object -First 1
+    return $picked.FullName
+}
+
+function Get-TestGitTopLevel {
+    try {
+        $output = @(& git -C $PSScriptRoot rev-parse --show-toplevel 2>&1)
+        if ($LASTEXITCODE -ne 0 -or @($output).Count -eq 0) { return $null }
+    } catch {
+        return $null
+    }
+    $text = ((@($output) | ForEach-Object { "$_" }) -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    $line = @($text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($line)) { return $null }
+    return [IO.Path]::GetFullPath($line.Trim())
+}
+
+function Get-TestFreeLetterCount {
+    $subst = @{}
+    foreach ($line in @(& subst.exe 2>&1)) {
+        if ([string]$line -match '^([A-Za-z]):\\: => ') {
+            $subst[$Matches[1].ToUpperInvariant()] = $true
+        }
+    }
+    $drives = @{}
+    foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+        if ($drive.Name) { $drives[$drive.Name.Substring(0, 1).ToUpperInvariant()] = $true }
+    }
+    $free = 0
+    foreach ($code in 68..90) {
+        $letter = [string][char]$code
+        if ($subst.ContainsKey($letter) -or $drives.ContainsKey($letter)) { continue }
+        $free++
+    }
+    return $free
+}
+
+function Test-TestPathUnderUserProfile([string]$Path) {
+    $profile = [Environment]::GetFolderPath('UserProfile')
+    if ([string]::IsNullOrWhiteSpace($profile) -or [string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $profileFull = [IO.Path]::GetFullPath($profile).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ([string]::Equals($full, $profileFull, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $full.StartsWith($profileFull + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-TestDriveRootWritable([string]$RepoRoot) {
+    $qualifier = Split-Path -Path $RepoRoot -Qualifier
+    if ([string]::IsNullOrWhiteSpace($qualifier)) { return $false }
+    $probe = Join-Path $qualifier ('xagent-probe-' + [guid]::NewGuid().ToString('N'))
+    $created = $false
+    try {
+        New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null
+        $created = $true
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($created) {
+            Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'run lifecycle' -Tag Sandbox {
+    BeforeDiscovery {
+        $script:RunSkip = $false
+        $script:RunSkipReason = ''
+        $script:RunRepoRoot = $null
+        $script:RunRealVersionDir = $null
+        $nativePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../scripts/SandboxNative.cs'))
+        if (-not ('XagentSandbox' -as [type])) {
+            Add-Type -Path $nativePath
+        }
+        if ([XagentSandbox]::IsAppContainer()) {
+            $script:RunSkip = $true
+            $script:RunSkipReason = 'already inside an AppContainer'
+        } elseif ([Environment]::OSVersion.Version.Build -lt 26300) {
+            $script:RunSkip = $true
+            $script:RunSkipReason = 'Windows build is older than 26300'
+        } elseif ((Get-TestFreeLetterCount) -lt 3) {
+            $script:RunSkip = $true
+            $script:RunSkipReason = 'fewer than three free letters D-Z'
+        } else {
+            $top = Get-TestGitTopLevel
+            if (-not $top) {
+                $script:RunSkip = $true
+                $script:RunSkipReason = 'git rev-parse --show-toplevel failed'
+            } elseif (Test-TestPathUnderUserProfile $top) {
+                $script:RunSkip = $true
+                $script:RunSkipReason = 'the repo root is under %USERPROFILE%'
+                $script:RunRepoRoot = $top
+            } elseif (-not (Test-TestDriveRootWritable $top)) {
+                $script:RunSkip = $true
+                $script:RunSkipReason = 'the repo drive root is not writable'
+                $script:RunRepoRoot = $top
+            } elseif (-not (Test-Path -LiteralPath 'C:\Program Files\PowerShell\7\pwsh.exe' -PathType Leaf)) {
+                $script:RunSkip = $true
+                $script:RunSkipReason = 'C:\Program Files\PowerShell\7\pwsh.exe is missing'
+                $script:RunRepoRoot = $top
+            } else {
+                $script:RunRepoRoot = $top
+                $versionDir = Get-TestRealCursorVersionDir
+                if (-not $versionDir) {
+                    $script:RunSkip = $true
+                    $script:RunSkipReason = 'Cursor is not installed'
+                } else {
+                    $script:RunRealVersionDir = $versionDir
+                }
+            }
+        }
+        if ($script:RunSkip) {
+            Write-Host "run lifecycle skipped: $script:RunSkipReason"
+        }
+    }
+
+    BeforeAll {
+        if ($script:RunSkip) { return }
+        $script:RunLetters = $null
+        $script:RunRuntime = $null
+        $script:RunTestRoot = $null
+        $script:RunRepo = $null
+        $script:RunWorktree = $null
+        $script:RunWtName = $null
+
+        $script:RunRepoRoot = Get-TestGitTopLevel
+        if (-not $script:RunRepoRoot) { throw 'git rev-parse --show-toplevel failed' }
+        $script:RunRealVersionDir = Get-TestRealCursorVersionDir
+        if (-not $script:RunRealVersionDir) { throw 'Cursor version folder was not found' }
+
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'run-life-root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'run-life-cursor'
+        New-Item -ItemType Directory -Force -Path $env:XAGENT_SANDBOX_ROOT, $env:XAGENT_CURSOR_ROOT | Out-Null
+        Import-Module $script:ModulePath -Force
+
+        $free = @(Get-TestFreeLetters)
+        if ($free.Count -lt 3) { throw 'sandbox: fewer than three free letters D-Z at reservation time' }
+        $script:RunLetters = @([string]$free[0], [string]$free[1], [string]$free[2])
+        Set-SandboxLetters -Letters $script:RunLetters
+
+        $versionName = Split-Path $script:RunRealVersionDir -Leaf
+        $fakeCursor = Join-Path $TestDrive 'run-life-fake-cursor'
+        $destDir = Join-Path $fakeCursor "versions\$versionName"
+        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RunRealVersionDir 'node.exe') -Destination (Join-Path $destDir 'node.exe') -Force
+        $script:RunRuntime = Get-SandboxRuntime -CursorRoot $fakeCursor
+        if (-not $script:RunRuntime.patched) {
+            throw "runtime not patched: uv $($script:RunRuntime.uv)"
+        }
+
+        $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:RunTestRoot = Join-Path (Split-Path $script:RunRepoRoot -Qualifier) ('xagent-tests-' + $suffix)
+        New-Item -ItemType Directory -Force -Path $script:RunTestRoot | Out-Null
+        $script:RunRepo = Join-Path $script:RunTestRoot 'repo'
+        New-Item -ItemType Directory -Force -Path $script:RunRepo | Out-Null
+
+        function Invoke-RunGit {
+            param([Parameter(Mandatory)][string[]]$ArgumentList)
+            $output = @(& git @ArgumentList 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $text = (@($output) | ForEach-Object { "$_" }) -join "`n"
+                throw "git $($ArgumentList -join ' ') failed (${LASTEXITCODE}): $text"
+            }
+        }
+
+        Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, 'init', '--quiet')
+        # Repo-local, so the container and the host agree. The container does not see the user's gitconfig.
+        Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, 'config', 'core.autocrlf', 'false')
+        [IO.File]::WriteAllText((Join-Path $script:RunRepo 'README.txt'), 'readme-ok', [Text.UTF8Encoding]::new($false))
+        Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, 'add', '--', 'README.txt')
+        Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'init', '--quiet')
+        $excludePath = Join-Path $script:RunRepo '.git\info\exclude'
+        $excludeText = ''
+        if (Test-Path -LiteralPath $excludePath) { $excludeText = [IO.File]::ReadAllText($excludePath) }
+        if ($excludeText.Length -gt 0 -and -not $excludeText.EndsWith("`n")) { $excludeText += "`n" }
+        $excludeText += ".xagent/`n"
+        [IO.File]::WriteAllText($excludePath, $excludeText, [Text.UTF8Encoding]::new($false))
+
+        $script:RunWorktree = Join-Path $script:RunTestRoot 'repo.xagent\task-1'
+        Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, 'worktree', 'add', $script:RunWorktree)
+        $gitText = [IO.File]::ReadAllText((Join-Path $script:RunWorktree '.git'))
+        if ($gitText -notmatch '(?m)^gitdir:\s*(.+?)\s*$') { throw "worktree .git has no gitdir: $gitText" }
+        $script:RunWtName = [IO.Path]::GetFileName($Matches[1].Trim())
+        if ([string]::IsNullOrWhiteSpace($script:RunWtName) -or $script:RunWtName -eq '.' -or $script:RunWtName -eq '..') {
+            throw "unexpected worktree name '$script:RunWtName'"
+        }
+
+        $loginProfile = Join-Path $TestDrive 'run-life-login\profile'
+        $loginAppData = Join-Path $TestDrive 'run-life-login\appdata'
+        New-Item -ItemType Directory -Force -Path (Join-Path $loginProfile '.cursor'), (Join-Path $loginAppData 'Cursor') | Out-Null
+        [IO.File]::WriteAllText((Join-Path $loginProfile '.cursor\cli-config.json'), '{}', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $loginProfile '.gitconfig'), "[user]`r`n`tname = t`r`n`temail = t@t`r`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $loginAppData 'Cursor\auth.json'), '{"fake":true}', [Text.UTF8Encoding]::new($false))
+        InModuleScope Sandbox -Parameters @{ LoginProfile = $loginProfile; LoginAppData = $loginAppData } {
+            param($LoginProfile, $LoginAppData)
+            $script:LoginProfile = $LoginProfile
+            $script:LoginAppData = $LoginAppData
+        }
+
+        function Read-RunOutputText([string]$Path) {
+            if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            $reader = New-Object IO.StreamReader($stream)
+            try {
+                return $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+        }
+
+        function Invoke-RunScript {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][string]$Body,
+                [switch]$ReadOnly,
+                [int]$TimeoutMs = 60000
+            )
+            $xagentDir = Join-Path $script:RunWorktree '.xagent'
+            New-Item -ItemType Directory -Force -Path $xagentDir | Out-Null
+            $scriptFile = Join-Path $xagentDir ($Name + '.ps1')
+            [IO.File]::WriteAllText($scriptFile, $Body, [Text.UTF8Encoding]::new($false))
+
+            $outDir = Join-Path $TestDrive 'run-life-out'
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $stdoutPath = Join-Path $outDir ($Name + '.out')
+            $stderrPath = Join-Path $outDir ($Name + '.err')
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+            $slot = Get-SandboxSlot
+            $run = $null
+            $h = $null
+            $timedOut = $false
+            $exitCode = $null
+            $thrown = $null
+            try {
+                $runArgs = @{
+                    Slot = $slot
+                    Runtime = $script:RunRuntime
+                    Repo = $script:RunRepo
+                    Worktree = $script:RunWorktree
+                    WtName = $script:RunWtName
+                }
+                if ($ReadOnly) { $runArgs['ReadOnly'] = $true }
+                $run = New-SandboxRun @runArgs
+                $fileArg = '{0}:\.xagent\{1}.ps1' -f $run.slot, $Name
+                $h = Start-SandboxProcess -Run $run -Exe 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fileArg
+                ) -StdoutPath $stdoutPath -StderrPath $stderrPath
+                $finished = [XagentSandbox]::Wait($h, $TimeoutMs)
+                if (-not $finished) {
+                    [XagentSandbox]::Kill($h)
+                    $timedOut = $true
+                }
+                $exitCode = [XagentSandbox]::Finish($h)
+            } catch {
+                $thrown = $_
+            } finally {
+                $notes = Stop-SandboxRun -Run $run -Slot $slot -Handle $h
+            }
+            if ($null -ne $thrown) { throw $thrown }
+            return [pscustomobject]@{
+                exitCode = $exitCode
+                timedOut = $timedOut
+                stdout = (Read-RunOutputText $stdoutPath)
+                stderr = (Read-RunOutputText $stderrPath)
+                notes = $notes
+                run = $run
+                slot = $slot
+            }
+        }
+    }
+
+    AfterAll {
+        if ($script:RunSkip) { return }
+        try {
+            try { Remove-SandboxLetters | Out-Null } catch { }
+            finally {
+                try {
+                    if ($script:RunLetters) {
+                        $letters = @($script:RunLetters)
+                        foreach ($letter in $letters) {
+                            if ([string]::IsNullOrWhiteSpace([string]$letter)) { continue }
+                            & subst.exe "${letter}:" '/D' 2>&1 | Out-Null
+                        }
+                        foreach ($index in 1, 2) {
+                            if ($index -ge $letters.Count) { continue }
+                            $letter = [string]$letters[$index]
+                            if ([string]::IsNullOrWhiteSpace($letter)) { continue }
+                            try { [XagentSandbox]::DeleteProfile("xagent.slot-$letter") } catch { }
+                        }
+                    }
+                } finally {
+                    try {
+                        if ($script:RunRepo -and $script:RunWorktree) {
+                            & git -C $script:RunRepo worktree remove --force $script:RunWorktree 2>&1 | Out-Null
+                        }
+                    } catch { }
+                    finally {
+                        if ($script:RunTestRoot -and (Test-Path -LiteralPath $script:RunTestRoot)) {
+                            Get-ChildItem -LiteralPath $script:RunTestRoot -Recurse -Force -File -ErrorAction SilentlyContinue |
+                                ForEach-Object { $_.IsReadOnly = $false }
+                            Remove-Item -LiteralPath $script:RunTestRoot -Recurse -Force
+                        }
+                    }
+                }
+            }
+        } finally {
+            $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+            $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+            Import-Module $script:ModulePath -Force
+        }
+    }
+
+    It 'runs a worker script in the container and cleans up' -Skip:$script:RunSkip {
+        $runtimeLetter = $script:RunLetters[0]
+        $nodeExe = '{0}:\{1}\node.exe' -f $runtimeLetter, $script:RunRuntime.version
+        $js = 'const c=require(''child_process'').spawn(process.execPath,[''-e'',''console.log(\"piped-ok\")''],{stdio:''pipe''});let o='''';c.stdout.on(''data'',d=>o+=d);c.on(''close'',()=>console.log(o.trim()))'
+        $jsForFile = $js.Replace("'", "''")
+        $nodeLine = '$nodeOut = & ''NODEEXE'' -e ''JS'''
+        $nodeLine = $nodeLine.Replace('NODEEXE', $nodeExe).Replace('JS', $jsForFile)
+        $bodyLines = @(
+            '$status = (git status --porcelain) -join '';'''
+            'Write-Output "status=[$status]"'
+            $nodeLine
+            '$nodeText = "$nodeOut".Trim()'
+            'Write-Output "node=$nodeText"'
+            '$location = (Get-Location).Path'
+            '$root = $location.TrimEnd(''\'')'
+            '$readme = [IO.File]::ReadAllText(($root + ''\README.txt'')).Trim()'
+            'Write-Output "readme=$readme"'
+            'exit 0'
+        )
+        $r = Invoke-RunScript -Name 'worker' -Body ($bodyLines -join "`n")
+        $because = "stderr: $($r.stderr)`nstdout: $($r.stdout)"
+        $r.timedOut | Should -BeFalse -Because $because
+        $r.exitCode | Should -Be 0 -Because $because
+        $r.run.runtimeLetter | Should -Be $runtimeLetter -Because $because
+        $lines = @($r.stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+        $lines | Should -Be @('status=[]', 'node=piped-ok', 'readme=readme-ok') -Because $because
+        $r.notes -is [array] | Should -BeTrue -Because $because
+        @($r.notes).Count | Should -Be 0 -Because $because
+
+        $letter = [string]$r.run.slot
+        $sandboxDir = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox'
+        Test-Path -LiteralPath (Join-Path $sandboxDir "slot-$letter.json") | Should -BeFalse -Because $because
+        $runHome = Join-Path $script:RunWorktree '.xagent\sandbox\home'
+        Test-Path -LiteralPath (Join-Path $runHome 'AppData\Roaming\Cursor\auth.json') | Should -BeFalse -Because $because
+        $gitconfig = Join-Path $runHome '.gitconfig'
+        Test-Path -LiteralPath $gitconfig | Should -BeTrue -Because $because
+        (Get-Item -LiteralPath $gitconfig -Force).IsReadOnly | Should -BeTrue -Because $because
+        $idle = Join-Path $sandboxDir 'idle'
+        $map = Get-TestSubstMap
+        (Test-SameLetterTarget $map[$letter] $idle) | Should -BeTrue -Because $because
+        (Get-IcaclsText $script:RunWorktree) | Should -Not -Match ([regex]::Escape([string]$r.run.sid)) -Because $because
     }
 }
