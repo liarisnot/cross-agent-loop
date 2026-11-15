@@ -475,26 +475,42 @@ function New-SupportResult {
     }
 }
 
-function Get-SupportLetters([string]$CacheRoot, $Problems) {
+function Get-SupportConfigLayout([string]$CacheRoot) {
     $cacheFull = [IO.Path]::GetFullPath($CacheRoot)
     $sandboxDir = Split-Path -Parent $cacheFull
     $root = Split-Path -Parent $sandboxDir
-    $configPath = Join-Path $root 'sandbox.json'
+    return @{
+        Cache = $cacheFull
+        SandboxDir = $sandboxDir
+        Root = $root
+        ConfigPath = (Join-Path $root 'sandbox.json')
+    }
+}
+
+function Read-SupportConfig([string]$CacheRoot) {
+    $layout = Get-SupportConfigLayout $CacheRoot
+    if (-not (Test-Path -LiteralPath $layout.ConfigPath)) {
+        return @{ Ok = $true; Config = $null; Error = $null }
+    }
+    try {
+        $parsed = [IO.File]::ReadAllText($layout.ConfigPath) | ConvertFrom-Json
+        return @{ Ok = $true; Config = $parsed; Error = $null }
+    } catch {
+        return @{ Ok = $false; Config = $null; Error = $_.Exception.Message }
+    }
+}
+
+function Get-SupportLetters([string]$CacheRoot, $Config, $Problems) {
+    $layout = Get-SupportConfigLayout $CacheRoot
     $lettersObj = $null
-    if (Test-Path -LiteralPath $configPath) {
-        try {
-            $parsed = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
-            $lettersObj = Get-ObjectProperty $parsed 'letters'
-        } catch {
-            $Problems.Add("cannot read sandbox.json ($($_.Exception.Message))")
-            return New-EmptyLetters
-        }
+    if ($null -ne $Config) {
+        $lettersObj = Get-ObjectProperty $Config 'letters'
     }
     $shape = Get-LettersShape $lettersObj
     if (-not $shape.reserved) { return New-EmptyLetters }
 
-    $cursor = Join-Path $sandboxDir 'cursor'
-    $idle = Join-Path $sandboxDir 'idle'
+    $cursor = Join-Path $layout.SandboxDir 'cursor'
+    $idle = Join-Path $layout.SandboxDir 'idle'
     $map = Get-SubstMap
     $drives = Get-DriveLetters
     $states = @{}
@@ -506,7 +522,7 @@ function Get-SupportLetters([string]$CacheRoot, $Problems) {
         $entries.Add([pscustomobject]@{ Letter = $slot; Expected = $idle; Slot = $true })
     }
     foreach ($entry in $entries) {
-        $ledger = Join-Path $sandboxDir ("slot-$($entry.Letter).json")
+        $ledger = Join-Path $layout.SandboxDir ("slot-$($entry.Letter).json")
         $state = Get-ReservedLetterState -Letter $entry.Letter -Expected $entry.Expected -LedgerPath $ledger -Slot:([bool]$entry.Slot) -Map $map -Drives $drives
         $states[$entry.Letter] = $state
         if ($state -eq 'used') {
@@ -519,6 +535,197 @@ function Get-SupportLetters([string]$CacheRoot, $Problems) {
         slots = [string[]]$shape.slots
         states = $states
     }
+}
+
+# Separator-bounded: C:\Users\me2 is not under C:\Users\me. Both arguments are already normalized.
+function Test-SandboxPathUnder([string]$Candidate, [string]$Folder) {
+    if ([string]::IsNullOrEmpty($Candidate) -or [string]::IsNullOrEmpty($Folder)) { return $false }
+    if ([string]::Equals($Candidate, $Folder, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    $prefix = $Folder.TrimEnd('\', '/') + '\'
+    return $Candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-SandboxReadObject($Entry) {
+    if ($null -eq $Entry) { return $false }
+    if ($Entry -is [string] -or $Entry -is [System.ValueType]) { return $false }
+    if ($Entry -is [System.Collections.IDictionary]) { return $true }
+    if ($Entry -is [System.Management.Automation.PSCustomObject]) { return $true }
+    if ($Entry -is [System.Collections.IEnumerable]) { return $false }
+    return $true
+}
+
+function Format-ReadListProblem([string]$Path, [string]$Reason) {
+    return "read-list entry '$Path' $Reason; edit sandbox.json"
+}
+
+function Get-SandboxProfileRoot {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { return $null }
+    return [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+}
+
+function Add-SandboxProtectedFolders($Folders) {
+    $profile = Get-SandboxProfileRoot
+    if ($profile) {
+        foreach ($leaf in @('.ssh', '.aws', '.gnupg', '.cursor', 'AppData\Roaming')) {
+            $Folders.Add([IO.Path]::GetFullPath((Join-Path $profile $leaf)).TrimEnd('\', '/'))
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $Folders.Add([IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'cursor-agent')).TrimEnd('\', '/'))
+    }
+}
+
+# reason is $null when the entry is allowed. path is the message text when refused, and the normalized full path when allowed.
+function Resolve-SandboxReadEntry($Entry) {
+    $raw = $null
+    $hasRaw = $false
+    if (Test-SandboxReadObject $Entry) {
+        $raw = Get-ObjectProperty $Entry 'path'
+        $hasRaw = $true
+    }
+    if (-not $hasRaw -or $raw -isnot [string] -or $raw.Length -eq 0) {
+        $shown = ''
+        if ($null -ne $raw -and $raw -isnot [string]) { $shown = [string]$raw }
+        return @{ path = $shown; addToPath = $false; reason = 'is not a valid path' }
+    }
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+    if ($expanded.Length -gt 0 -and $expanded[0] -eq [char]'~') {
+        $profileRoot = Get-SandboxProfileRoot
+        if ($null -eq $profileRoot) { $profileRoot = '' }
+        $expanded = $profileRoot + $expanded.Substring(1)
+    }
+
+    # GetFullPath turns a relative path into an absolute one, so the absolute check uses the expanded text.
+    try {
+        $full = [IO.Path]::GetFullPath($expanded)
+    } catch {
+        return @{ path = $raw; addToPath = $false; reason = 'is not a valid path' }
+    }
+    if (-not [IO.Path]::IsPathFullyQualified($expanded)) {
+        return @{ path = $expanded.TrimEnd('\', '/'); addToPath = $false; reason = 'is not an absolute path' }
+    }
+    # GetFullPath keeps the path the user wrote when it only changes case or a trailing separator.
+    $normalized = $full.TrimEnd('\', '/')
+    $authored = $expanded.Replace('/', '\').TrimEnd('\')
+    if ([string]::Equals($normalized, $authored, [StringComparison]::OrdinalIgnoreCase)) {
+        $normalized = $authored
+    }
+
+    $profile = Get-SandboxProfileRoot
+    if ($profile -and [string]::Equals($normalized, $profile, [StringComparison]::OrdinalIgnoreCase)) {
+        return @{ path = $normalized; addToPath = $false; reason = 'is the profile root' }
+    }
+
+    $protected = New-Object System.Collections.Generic.List[string]
+    Add-SandboxProtectedFolders $protected
+    foreach ($folder in $protected) {
+        if (Test-SandboxPathUnder $normalized $folder) {
+            return @{ path = $normalized; addToPath = $false; reason = "is under a protected folder ($folder)" }
+        }
+    }
+
+    $sandboxRoot = $null
+    if (-not [string]::IsNullOrWhiteSpace($script:Root)) {
+        $sandboxRoot = [IO.Path]::GetFullPath($script:Root).TrimEnd('\', '/')
+    }
+    if ($sandboxRoot -and (Test-SandboxPathUnder $normalized $sandboxRoot)) {
+        return @{ path = $normalized; addToPath = $false; reason = "is under the sandbox's own folder" }
+    }
+
+    if (-not (Test-Path -LiteralPath $normalized)) {
+        return @{ path = $normalized; addToPath = $false; reason = 'does not exist' }
+    }
+
+    $addToPath = $false
+    $flag = Get-ObjectProperty $Entry 'addToPath'
+    if ($null -ne $flag) { $addToPath = [bool]$flag }
+    return @{ path = $normalized; addToPath = $addToPath; reason = $null }
+}
+
+function Add-SandboxReadListProblems($Config, $Problems) {
+    if ($null -eq $Config) { return }
+    $read = Get-ObjectProperty $Config 'read'
+    if ($null -eq $read) { return }
+    foreach ($entry in @($read)) {
+        $resolved = Resolve-SandboxReadEntry $entry
+        if ($null -ne $resolved.reason) {
+            $Problems.Add((Format-ReadListProblem $resolved.path $resolved.reason))
+        }
+    }
+}
+
+function Test-SandboxReadList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$Entries
+    )
+    $result = New-Object System.Collections.Generic.List[pscustomobject]
+    if ($null -ne $Entries) {
+        foreach ($entry in @($Entries)) {
+            $resolved = Resolve-SandboxReadEntry $entry
+            if ($null -ne $resolved.reason) {
+                throw ("sandbox: " + (Format-ReadListProblem $resolved.path $resolved.reason))
+            }
+            $result.Add([pscustomobject]@{ path = [string]$resolved.path; addToPath = [bool]$resolved.addToPath })
+        }
+    }
+    Write-Output -NoEnumerate $result.ToArray()
+}
+
+function Assert-SandboxOutsideProfile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+    $profile = Get-SandboxProfileRoot
+    if (-not $profile) { return }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    if (Test-SandboxPathUnder $full $profile) {
+        throw 'sandbox: repos under the user profile are not supported'
+    }
+}
+
+function Get-SandboxEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Slot,
+        [AllowNull()][AllowEmptyCollection()][object[]]$ReadList
+    )
+    # SandboxNative.cs sorts the block. The names are the whole environment the child receives.
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS')) {
+        $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if ($null -eq $value) { $value = '' }
+        $list.Add("${name}=${value}")
+    }
+
+    $pathValue = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd'
+    if ($null -ne $ReadList) {
+        foreach ($entry in @($ReadList)) {
+            if ($null -eq $entry) { continue }
+            $add = Get-ObjectProperty $entry 'addToPath'
+            if (-not $add) { continue }
+            $entryPath = Get-ObjectProperty $entry 'path'
+            if ($null -eq $entryPath) { $entryPath = '' }
+            $pathValue = $pathValue + ';' + [string]$entryPath
+        }
+    }
+    $list.Add("PATH=$pathValue")
+    $list.Add('PSModulePath=C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules')
+
+    $homeDir = $Slot + ':\.xagent\sandbox\home'
+    $tmp = $Slot + ':\.xagent\sandbox\tmp'
+    $list.Add("USERPROFILE=$homeDir")
+    $list.Add("HOME=$homeDir")
+    $list.Add("APPDATA=$homeDir\AppData\Roaming")
+    $list.Add("LOCALAPPDATA=$homeDir\AppData\Local")
+    $list.Add("TEMP=$tmp")
+    $list.Add("TMP=$tmp")
+    $list.Add('CURSOR_INVOKED_AS=agent.cmd')
+    $list.Add("NODE_COMPILE_CACHE=$tmp\node-compile-cache")
+    Write-Output -NoEnumerate $list.ToArray()
 }
 
 function Get-WindowsBuild {
@@ -580,8 +787,14 @@ function Test-SandboxSupport {
         }
     }
 
-    $letters = Get-SupportLetters -CacheRoot $CacheRoot -Problems $problems
-    # Read-list rules are phase 3.
+    $loaded = Read-SupportConfig -CacheRoot $CacheRoot
+    if (-not $loaded.Ok) {
+        $problems.Add("cannot read sandbox.json ($($loaded.Error))")
+        $letters = New-EmptyLetters
+    } else {
+        $letters = Get-SupportLetters -CacheRoot $CacheRoot -Config $loaded.Config -Problems $problems
+        Add-SandboxReadListProblems -Config $loaded.Config -Problems $problems
+    }
     return (New-SupportResult -Ok ($problems.Count -eq 0) -Build $build -CursorVersion $cursorVersion -Uv $uvRaw -PatternCount $patternCount -Letters $letters -Problems $problems.ToArray())
 }
 

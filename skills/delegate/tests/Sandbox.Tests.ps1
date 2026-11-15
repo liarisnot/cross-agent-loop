@@ -576,3 +576,273 @@ Describe 'letters' {
         @($result.problems) | Should -Contain "reserved letter ${used}: is used by another drive; choose new letters"
     }
 }
+
+Describe 'read list and environment' {
+    BeforeAll {
+        $script:ReadRoot = Join-Path $TestDrive 'read-root'
+        $script:ReadCursor = Join-Path $TestDrive 'read-cursor'
+        $env:XAGENT_SANDBOX_ROOT = $script:ReadRoot
+        $env:XAGENT_CURSOR_ROOT = $script:ReadCursor
+        New-Item -ItemType Directory -Force -Path $script:ReadRoot, $script:ReadCursor | Out-Null
+        $script:ReadVersion = '2026.04.05-abc123'
+        New-CursorTree -CursorRoot $script:ReadCursor -Version $script:ReadVersion -PatternCount 1
+        Import-Module $script:ModulePath -Force
+
+        function Set-ReadConfig($Read) {
+            $payload = @{ letters = $null; read = @($Read) }
+            $json = $payload | ConvertTo-Json -Depth 6
+            $path = Join-Path $script:ReadRoot 'sandbox.json'
+            [IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
+        }
+
+        function Get-ReadSupport {
+            $cache = Join-Path $script:ReadRoot 'sandbox\cursor'
+            return Test-SandboxSupport -CursorRoot $script:ReadCursor -CacheRoot $cache -UvProbe { '1.53.0' }
+        }
+
+        function Get-NormalizedEntryPath([string]$Path) {
+            $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+            if ($expanded.Length -gt 0 -and $expanded[0] -eq [char]'~') {
+                $profileRoot = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+                $expanded = $profileRoot + $expanded.Substring(1)
+            }
+            $full = [IO.Path]::GetFullPath($expanded).TrimEnd('\', '/')
+            $authored = $expanded.Replace('/', '\').TrimEnd('\')
+            if ([string]::Equals($full, $authored, [StringComparison]::OrdinalIgnoreCase)) { return $authored }
+            return $full
+        }
+
+        function Get-ReadProblemText([string]$Path, [string]$Reason) {
+            return "read-list entry '$Path' $Reason; edit sandbox.json"
+        }
+    }
+
+    AfterAll {
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+        Import-Module $script:ModulePath -Force
+    }
+
+    It 'refuses each read-list case in the throw and in Test-SandboxSupport' {
+        $profile = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+        $ssh = [IO.Path]::GetFullPath((Join-Path $profile '.ssh')).TrimEnd('\', '/')
+        $roaming = [IO.Path]::GetFullPath((Join-Path $profile 'AppData\Roaming')).TrimEnd('\', '/')
+        $cursorAgent = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'cursor-agent')).TrimEnd('\', '/')
+        $sandboxDir = [IO.Path]::GetFullPath((Join-Path $script:ReadRoot 'sandbox')).TrimEnd('\', '/')
+        $missing = Join-Path $TestDrive ('missing-' + [guid]::NewGuid().ToString('N'))
+        $cases = @(
+            @{ Name = 'profile root'; Entry = $profile; Reason = 'is the profile root' }
+            @{ Name = 'ssh'; Entry = '~\.ssh'; Reason = "is under a protected folder ($ssh)" }
+            @{ Name = 'ssh mixed case'; Entry = '~\.SSH\id_ed25519'; Reason = "is under a protected folder ($ssh)" }
+            @{ Name = 'roaming'; Entry = '~\AppData\Roaming\x'; Reason = "is under a protected folder ($roaming)" }
+            @{ Name = 'cursor-agent'; Entry = '%LOCALAPPDATA%\cursor-agent\versions'; Reason = "is under a protected folder ($cursorAgent)" }
+            @{ Name = 'sandbox folder'; Entry = $sandboxDir; Reason = "is under the sandbox's own folder" }
+            @{ Name = 'missing'; Entry = $missing; Reason = 'does not exist' }
+        )
+        foreach ($case in $cases) {
+            $display = Get-NormalizedEntryPath $case.Entry
+            $expected = Get-ReadProblemText $display $case.Reason
+            $thrown = InModuleScope Sandbox -Parameters @{ Entry = $case.Entry } {
+                param($Entry)
+                try {
+                    Test-SandboxReadList -Entries @([pscustomobject]@{ path = $Entry }) | Out-Null
+                    return $null
+                } catch {
+                    return $_.Exception.Message
+                }
+            }
+            $thrown | Should -Be "sandbox: $expected" -Because $case.Name
+            Set-ReadConfig @(@{ path = $case.Entry })
+            $result = Get-ReadSupport
+            @($result.problems) | Should -Be @($expected) -Because $case.Name
+        }
+        $mixed = Get-NormalizedEntryPath '~\.SSH\id_ed25519'
+        $mixed | Should -Match '\.SSH\\id_ed25519$'
+        $ssh | Should -Match '\.ssh$'
+    }
+
+    It 'refuses a malformed entry and a relative path in both message forms' {
+        $malformed = "read-list entry '' is not a valid path; edit sandbox.json"
+        $thrown = InModuleScope Sandbox {
+            try {
+                Test-SandboxReadList -Entries @([pscustomobject]@{ addToPath = $true }) | Out-Null
+                return $null
+            } catch {
+                return $_.Exception.Message
+            }
+        }
+        $thrown | Should -Be "sandbox: $malformed"
+        Set-ReadConfig @(@{ addToPath = $true })
+        @((Get-ReadSupport).problems) | Should -Be @($malformed)
+
+        $relative = "read-list entry 'tools\python' is not an absolute path; edit sandbox.json"
+        $thrown = InModuleScope Sandbox {
+            try {
+                Test-SandboxReadList -Entries @([pscustomobject]@{ path = 'tools\python' }) | Out-Null
+                return $null
+            } catch {
+                return $_.Exception.Message
+            }
+        }
+        $thrown | Should -Be "sandbox: $relative"
+        Set-ReadConfig @(@{ path = 'tools\python' })
+        @((Get-ReadSupport).problems) | Should -Be @($relative)
+    }
+
+    It 'lists the pattern problem and then each refused entry, in config order' {
+        $cursor = Join-Path $TestDrive 'order-cursor'
+        New-CursorTree -CursorRoot $cursor -Version $script:ReadVersion -PatternCount 0
+        $profile = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+        $ssh = [IO.Path]::GetFullPath((Join-Path $profile '.ssh')).TrimEnd('\', '/')
+        $first = Get-NormalizedEntryPath $profile
+        $second = Get-NormalizedEntryPath '~\.ssh'
+        Set-ReadConfig @(
+            @{ path = $profile }
+            @{ path = '~\.ssh' }
+        )
+        $cache = Join-Path $script:ReadRoot 'sandbox\cursor'
+        $result = Test-SandboxSupport -CursorRoot $cursor -CacheRoot $cache -UvProbe { '1.52.1' }
+        $pattern = "Cursor $($script:ReadVersion): " + ($script:PatternProblem -f 0)
+        $entry1 = Get-ReadProblemText $first 'is the profile root'
+        $entry2 = Get-ReadProblemText $second "is under a protected folder ($ssh)"
+        @($result.problems) | Should -Be @($pattern, $entry1, $entry2)
+    }
+
+    It 'returns a normalized entry and an empty result for null or empty input' {
+        $tool = Join-Path $TestDrive 'allowed-tool'
+        New-Item -ItemType Directory -Force -Path $tool | Out-Null
+        $written = $tool.TrimEnd('\', '/') + '\'
+        $expected = Get-NormalizedEntryPath $written
+        $got = InModuleScope Sandbox -Parameters @{ Written = $written } {
+            param($Written)
+            $entries = Test-SandboxReadList -Entries @([pscustomobject]@{ path = $Written })
+            $entries[0]
+        }
+        $got.path | Should -Be $expected
+        $got.addToPath | Should -Be $false
+        $counts = InModuleScope Sandbox {
+            $fromNull = Test-SandboxReadList -Entries $null
+            $fromEmpty = Test-SandboxReadList -Entries @()
+            [pscustomobject]@{
+                NullCount = $(if ($null -eq $fromNull) { -1 } else { @($fromNull).Count })
+                EmptyCount = $(if ($null -eq $fromEmpty) { -1 } else { @($fromEmpty).Count })
+            }
+        }
+        $counts.NullCount | Should -Be 0
+        $counts.EmptyCount | Should -Be 0
+
+        Set-ReadConfig @(@{ path = $written })
+        $support = Get-ReadSupport
+        $support.ok | Should -BeTrue
+        @($support.problems).Count | Should -Be 0
+    }
+
+    It 'builds the environment from the listed names and addToPath entries' {
+        $tool = Join-Path $TestDrive 'on-path-tool'
+        New-Item -ItemType Directory -Force -Path $tool | Out-Null
+        $tool = Get-NormalizedEntryPath $tool
+        $oldGh = [Environment]::GetEnvironmentVariable('GH_TOKEN', 'Process')
+        $oldAws = [Environment]::GetEnvironmentVariable('AWS_SECRET_ACCESS_KEY', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable('GH_TOKEN', 'gh-secret-value', 'Process')
+            [Environment]::SetEnvironmentVariable('AWS_SECRET_ACCESS_KEY', 'aws-secret-value', 'Process')
+            $packed = InModuleScope Sandbox -Parameters @{ Tool = $tool } {
+                param($Tool)
+                $read = Test-SandboxReadList -Entries @([pscustomobject]@{ path = $Tool; addToPath = $true })
+                [pscustomobject]@{
+                    Block = Get-SandboxEnvironment -Slot 'S' -ReadList $read
+                    Bare = Get-SandboxEnvironment -Slot 'S' -ReadList $null
+                    Empty = Get-SandboxEnvironment -Slot 'S' -ReadList @()
+                }
+            }
+        } finally {
+            [Environment]::SetEnvironmentVariable('GH_TOKEN', $oldGh, 'Process')
+            [Environment]::SetEnvironmentVariable('AWS_SECRET_ACCESS_KEY', $oldAws, 'Process')
+        }
+
+        $expectedNames = @(
+            'SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS',
+            'PROCESSOR_ARCHITECTURE', 'OS', 'PATH', 'PSModulePath', 'USERPROFILE',
+            'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'CURSOR_INVOKED_AS',
+            'NODE_COMPILE_CACHE'
+        ) | Sort-Object
+        $base = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd'
+        foreach ($block in ($packed.Block, $packed.Bare, $packed.Empty)) {
+            $names = @($block | ForEach-Object { ($_ -split '=', 2)[0] })
+            @($names | Sort-Object) | Should -Be @($expectedNames)
+            $names | Should -Not -Contain 'GH_TOKEN'
+            $names | Should -Not -Contain 'AWS_SECRET_ACCESS_KEY'
+        }
+        $map = @{}
+        foreach ($item in @($packed.Block)) {
+            $pair = $item -split '=', 2
+            $map[$pair[0]] = $pair[1]
+        }
+        $map['PATH'] | Should -Be ($base + ';' + $tool)
+        $map['USERPROFILE'] | Should -Be 'S:\.xagent\sandbox\home'
+        $map['HOME'] | Should -Be 'S:\.xagent\sandbox\home'
+        $map['APPDATA'] | Should -Be 'S:\.xagent\sandbox\home\AppData\Roaming'
+        $map['LOCALAPPDATA'] | Should -Be 'S:\.xagent\sandbox\home\AppData\Local'
+        $map['TEMP'] | Should -Be 'S:\.xagent\sandbox\tmp'
+        $map['TMP'] | Should -Be 'S:\.xagent\sandbox\tmp'
+        $map['NODE_COMPILE_CACHE'] | Should -Be 'S:\.xagent\sandbox\tmp\node-compile-cache'
+        $map['CURSOR_INVOKED_AS'] | Should -Be 'agent.cmd'
+        $map['PSModulePath'] | Should -Be 'C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules'
+        $map['SystemRoot'] | Should -Be ([Environment]::GetEnvironmentVariable('SystemRoot', 'Process'))
+        $bareMap = @{}
+        foreach ($item in @($packed.Bare)) {
+            $pair = $item -split '=', 2
+            $bareMap[$pair[0]] = $pair[1]
+        }
+        $bareMap['PATH'] | Should -Be $base
+        $emptyMap = @{}
+        foreach ($item in @($packed.Empty)) {
+            $pair = $item -split '=', 2
+            $emptyMap[$pair[0]] = $pair[1]
+        }
+        $emptyMap['PATH'] | Should -Be $base
+    }
+
+    It 'refuses a repo under the user profile and accepts a sibling' {
+        $profile = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+        $child = Join-Path $profile 'Documents'
+        $refused = @($profile, ($profile + '\'), $child, $child.ToUpperInvariant())
+        foreach ($target in $refused) {
+            $message = InModuleScope Sandbox -Parameters @{ Target = $target } {
+                param($Target)
+                try {
+                    Assert-SandboxOutsideProfile -Path $Target
+                    return $null
+                } catch {
+                    return $_.Exception.Message
+                }
+            }
+            $message | Should -Be 'sandbox: repos under the user profile are not supported'
+        }
+        foreach ($target in @(($profile + '2'), 'D:\xagent-outside-profile')) {
+            InModuleScope Sandbox -Parameters @{ Target = $target } {
+                param($Target)
+                Assert-SandboxOutsideProfile -Path $Target
+            }
+        }
+    }
+
+    It 'reports one parse problem and no read-list problems when sandbox.json is invalid' {
+        [IO.File]::WriteAllText((Join-Path $script:ReadRoot 'sandbox.json'), '{ not json', [Text.UTF8Encoding]::new($false))
+        $result = Get-ReadSupport
+        @($result.problems).Count | Should -Be 1
+        $result.problems[0] | Should -Match '^cannot read sandbox.json \('
+        $result.problems[0] | Should -Match '\)$'
+        $result.problems[0] | Should -Not -Match 'read-list'
+    }
+
+    It 'treats a null or empty read list as no problem' {
+        foreach ($readJson in @('null', '[]')) {
+            $json = '{ "letters": null, "read": ' + $readJson + ' }'
+            [IO.File]::WriteAllText((Join-Path $script:ReadRoot 'sandbox.json'), $json, [Text.UTF8Encoding]::new($false))
+            $result = Get-ReadSupport
+            $result.ok | Should -BeTrue
+            @($result.problems).Count | Should -Be 0
+        }
+    }
+}
