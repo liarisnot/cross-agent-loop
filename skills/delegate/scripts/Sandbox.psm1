@@ -9,6 +9,9 @@ $script:ConfigPath = Join-Path $script:Root 'sandbox.json'
 $script:SandboxDir = Join-Path $script:Root 'sandbox'
 $script:CacheRoot = Join-Path $script:SandboxDir 'cursor'
 $script:IdleDir = Join-Path $script:SandboxDir 'idle'
+# Tests point these at a fake profile through InModuleScope. Never copy the real login in a test.
+$script:LoginProfile = $env:USERPROFILE
+$script:LoginAppData = $env:APPDATA
 $script:MinimumBuild = 26300
 $script:VersionPattern = '^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$'
 # \\?\pipe\uv\%llu-%lu  and  \\?\pipe\LOCAL\%llu plus a null. The original terminator after these 20 bytes stays.
@@ -1313,11 +1316,13 @@ function Close-SandboxMutex($Mutex, [bool]$Owned) {
 }
 
 # Failed grants are written back as {path, spec} only. The ledger's other fields stay.
+# Returns the Remove-SandboxGrants failures (empty when the ledger was deleted).
 function Clear-DeadSandboxLedger([string]$Path) {
     $ledger = Read-SandboxLedger -Path $Path
     $failed = Remove-SandboxGrants -Ledger $ledger
     if ($null -eq $failed -or $failed.Count -eq 0) {
         Remove-Item -LiteralPath $Path -Force
+        Write-Output -NoEnumerate (New-Object object[] 0)
         return
     }
     $rows = New-Object System.Collections.Generic.List[object]
@@ -1329,6 +1334,7 @@ function Clear-DeadSandboxLedger([string]$Path) {
     }
     $ledger.grants = $rows.ToArray()
     Write-SandboxLedger -Path $Path -Ledger $ledger
+    Write-Output -NoEnumerate $failed
 }
 
 function Get-SandboxLoopbackExemptions {
@@ -1406,7 +1412,7 @@ function Get-SandboxSlot {
                     $busy = $true
                 } else {
                     if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
-                        Clear-DeadSandboxLedger -Path $ledgerPath
+                        $null = Clear-DeadSandboxLedger -Path $ledgerPath
                     }
                     $container = "xagent.slot-$letter"
                     $sid = [XagentSandbox]::EnsureProfile($container)
@@ -1534,4 +1540,282 @@ function Remove-SandboxLetters {
     }
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters
+# Same rules as delegate.ps1's Quote. Named so it cannot clash with that function.
+function ConvertTo-SandboxArgument([string]$s) {
+    # MSVCRT/Go command-line escaping: backslashes are literal unless they precede a quote
+    if ($s -and $s -notmatch '[\s"]') { return $s }
+    $s = [regex]::Replace($s, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $s = [regex]::Replace($s, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    '"' + $s + '"'
+}
+
+function Get-SandboxCommandLine {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments
+    )
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add((ConvertTo-SandboxArgument $Exe))
+    foreach ($arg in @($Arguments)) {
+        $parts.Add((ConvertTo-SandboxArgument ([string]$arg)))
+    }
+    return ($parts.ToArray() -join ' ')
+}
+
+function Copy-SandboxLoginFile([string]$Source, [string]$Destination, [bool]$ReadOnly) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return }
+    try {
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            $existing = Get-Item -LiteralPath $Destination -Force
+            $existing.IsReadOnly = $false
+        }
+        [IO.File]::Copy($Source, $Destination, $true)
+        $copied = Get-Item -LiteralPath $Destination -Force
+        $copied.IsReadOnly = $ReadOnly
+    } catch {
+        throw "sandbox: cannot copy ${Source}: $($_.Exception.Message)"
+    }
+}
+
+function New-SandboxRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Slot,
+        [Parameter(Mandatory)]$Runtime,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][string]$WtName,
+        [switch]$ReadOnly
+    )
+
+    # On a throw, leave the ledger and any grants. The caller's finally calls Stop-SandboxRun.
+    Assert-SandboxOutsideProfile -Path $Worktree
+    Assert-SandboxOutsideProfile -Path (Join-Path $Repo '.git')
+
+    $cfg = Get-SandboxConfig
+    $readValue = Get-ObjectProperty $cfg 'read'
+    $readItems = $null
+    if ($null -ne $readValue) {
+        if ($readValue -is [System.Array]) {
+            $readItems = $readValue
+        } else {
+            $readItems = [object[]]::new(1)
+            $readItems[0] = $readValue
+        }
+    }
+    $read = Test-SandboxReadList -Entries $readItems
+    $shape = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
+    if (-not $shape.reserved) {
+        throw (Get-NoLettersReservedMessage)
+    }
+    $runtimeLetter = [string]$shape.runtime
+
+    $runtimeRoot = [string](Get-ObjectProperty $Runtime 'root')
+    $runtimeVersion = [string](Get-ObjectProperty $Runtime 'version')
+    $grantArgs = @{
+        Repo = $Repo
+        Worktree = $Worktree
+        WtName = $WtName
+        RuntimeRoot = $runtimeRoot
+        RuntimeVersion = $runtimeVersion
+        ReadList = $read
+    }
+    if ($ReadOnly) { $grantArgs['ReadOnly'] = $true }
+    $fresh = Get-SandboxGrantList @grantArgs
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($row in @($fresh)) {
+        if ($null -eq $row) { continue }
+        Add-SandboxGrantRow $rows $seen ([string](Get-ObjectProperty $row 'path')) ([string](Get-ObjectProperty $row 'spec'))
+    }
+
+    $letter = [string]$Slot.letter
+    $ledgerPath = Join-Path $script:SandboxDir "slot-$letter.json"
+    if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+        $old = Read-SandboxLedger -Path $ledgerPath
+        if ($null -ne $old) {
+            foreach ($row in @(Get-ObjectProperty $old 'grants')) {
+                if ($null -eq $row) { continue }
+                $oldPath = Get-ObjectProperty $row 'path'
+                $oldSpec = Get-ObjectProperty $row 'spec'
+                if ($null -eq $oldPath -or $null -eq $oldSpec) { continue }
+                Add-SandboxGrantRow $rows $seen ([string]$oldPath) ([string]$oldSpec)
+            }
+        }
+    }
+
+    $worktreeFull = Resolve-SandboxPath $Worktree
+    Write-SandboxLedger -Path $ledgerPath -Ledger ([ordered]@{
+        slot = $letter
+        sid = [string]$Slot.sid
+        pid = $PID
+        startTime = (Get-Process -Id $PID).StartTime
+        runtimeVersion = $runtimeVersion
+        worktree = $worktreeFull
+        grants = $rows.ToArray()
+    })
+
+    $runHome = Join-Path $worktreeFull '.xagent\sandbox\home'
+    $versionDir = Join-Path (Resolve-SandboxPath $runtimeRoot) $runtimeVersion
+    foreach ($dir in @(
+        (Join-Path $runHome '.cursor'),
+        (Join-Path $runHome 'AppData\Roaming\Cursor'),
+        (Join-Path $runHome 'AppData\Local'),
+        (Join-Path $worktreeFull '.xagent\sandbox\tmp'),
+        (Join-Path $versionDir '.running')
+    )) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+
+    # No /T. A missing path stays in the ledger; removal skips it too.
+    $sid = [string]$Slot.sid
+    foreach ($row in $rows) {
+        $pathText = [string]$row.path
+        if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
+        if (-not (Test-Path -LiteralPath $pathText)) { continue }
+        $spec = [string]$row.spec
+        $output = @(& icacls.exe $pathText /grant ("*${sid}:${spec}") 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "sandbox: grant failed on ${pathText}: $(Format-SandboxIcaclsError $output)"
+        }
+    }
+
+    Copy-SandboxLoginFile (Join-Path $script:LoginProfile '.cursor\cli-config.json') (Join-Path $runHome '.cursor\cli-config.json') $false
+    Copy-SandboxLoginFile (Join-Path $script:LoginAppData 'Cursor\auth.json') (Join-Path $runHome 'AppData\Roaming\Cursor\auth.json') $false
+    Copy-SandboxLoginFile (Join-Path $script:LoginProfile '.gitconfig') (Join-Path $runHome '.gitconfig') $true
+
+    $letterKey = $letter.Trim().ToUpperInvariant()
+    $map = Get-SubstMap
+    if ($map.ContainsKey($letterKey)) {
+        Invoke-SandboxSubstDelete -Letter $letterKey
+    }
+    Invoke-SubstMap -Letter $letterKey -Target $worktreeFull
+
+    $envVars = Get-SandboxEnvironment -Slot $letter -ReadList $read
+    return [pscustomobject]@{
+        slot = $letter
+        container = $Slot.container
+        sid = $Slot.sid
+        runtimeLetter = $runtimeLetter
+        runtimeVersion = $runtimeVersion
+        patched = [bool](Get-ObjectProperty $Runtime 'patched')
+        cwd = ($letter + ':\')
+        env = $envVars
+        worktree = $worktreeFull
+    }
+}
+
+function Start-SandboxProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Run,
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$StdoutPath,
+        [Parameter(Mandatory)][string]$StderrPath
+    )
+    $commandLine = Get-SandboxCommandLine -Exe $Exe -Arguments $Arguments
+    $sid = [string](Get-ObjectProperty $Run 'sid')
+    $cwd = [string](Get-ObjectProperty $Run 'cwd')
+    $envList = Get-ObjectProperty $Run 'env'
+    if ($null -eq $envList) {
+        $envList = [string[]]::new(0)
+    } else {
+        $envList = [string[]]@($envList)
+    }
+    try {
+        return [XagentSandbox]::Start($sid, $Exe, $commandLine, $cwd, $envList, $StdoutPath, $StderrPath)
+    } catch {
+        throw "sandbox: cannot start ${Exe}: $($_.Exception.GetBaseException().Message)"
+    }
+}
+
+function Stop-SandboxRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Run,
+        [Parameter(Mandatory)]$Slot,
+        [AllowNull()][RunHandle]$Handle
+    )
+    $notes = New-Object System.Collections.Generic.List[string]
+    $letter = [string]$Slot.letter
+    $ledgerWorktree = $null
+
+    try {
+        if ($null -ne $Handle -and -not $Handle.Closed) {
+            $null = [XagentSandbox]::Finish($Handle)
+        }
+    } catch {
+        $notes.Add("close handles: $($_.Exception.Message)")
+    }
+
+    try {
+        $ledgerPath = Join-Path $script:SandboxDir "slot-$letter.json"
+        if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+            $parsed = Read-SandboxLedger -Path $ledgerPath
+            if ($null -eq $parsed) {
+                $notes.Add("remove grants: ledger unreadable $ledgerPath")
+            } else {
+                $remembered = Get-ObjectProperty $parsed 'worktree'
+                if ($null -ne $remembered) { $ledgerWorktree = [string]$remembered }
+                $failed = Clear-DeadSandboxLedger -Path $ledgerPath
+                foreach ($row in @($failed)) {
+                    if ($null -eq $row) { continue }
+                    $grantPath = Get-ObjectProperty $row 'path'
+                    $grantError = Get-ObjectProperty $row 'error'
+                    $notes.Add("grant not removed: $grantPath ($grantError)")
+                }
+            }
+        }
+    } catch {
+        $notes.Add("remove grants: $($_.Exception.Message)")
+    }
+
+    try {
+        $worktree = $null
+        if ($null -ne $Run) {
+            $worktree = Get-ObjectProperty $Run 'worktree'
+        } else {
+            $worktree = $ledgerWorktree
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$worktree)) {
+            $authPath = Join-Path ([string]$worktree) '.xagent\sandbox\home\AppData\Roaming\Cursor\auth.json'
+            if (Test-Path -LiteralPath $authPath) {
+                Remove-Item -LiteralPath $authPath -Force
+            }
+        }
+    } catch {
+        $notes.Add("delete auth.json: $($_.Exception.Message)")
+    }
+
+    try {
+        $cfg = Get-SandboxConfig
+        $shape = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
+        $letterKey = $letter.Trim().ToUpperInvariant()
+        $isSlot = $false
+        foreach ($candidate in @($shape.slots)) {
+            if ([string]$candidate -eq $letterKey) { $isSlot = $true; break }
+        }
+        if ($isSlot) {
+            New-Item -ItemType Directory -Force -Path $script:IdleDir | Out-Null
+            $map = Get-SubstMap
+            if ($map.ContainsKey($letterKey)) {
+                Invoke-SandboxSubstDelete -Letter $letterKey
+            }
+            Invoke-SubstMap -Letter $letterKey -Target $script:IdleDir
+        }
+    } catch {
+        $notes.Add("remap slot: $($_.Exception.Message)")
+    }
+
+    try {
+        Close-SandboxMutex -Mutex $Slot.mutex -Owned $true
+    } catch {
+        $notes.Add("release slot: $($_.Exception.Message)")
+    }
+
+    Write-Output -NoEnumerate $notes.ToArray()
+}
+
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun

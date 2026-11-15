@@ -1892,3 +1892,317 @@ while ($true) {
         }
     }
 }
+
+Describe 'run functions' {
+    BeforeAll {
+        $script:RunRoot = Join-Path $TestDrive 'run-root'
+        $script:RunCursor = Join-Path $TestDrive 'run-cursor'
+        $env:XAGENT_SANDBOX_ROOT = $script:RunRoot
+        $env:XAGENT_CURSOR_ROOT = $script:RunCursor
+        New-Item -ItemType Directory -Force -Path $script:RunRoot, $script:RunCursor | Out-Null
+        Import-Module $script:ModulePath -Force
+
+        function New-RunSlot {
+            $name = 'Local\xagent-run-test-' + [guid]::NewGuid().ToString('N')
+            $mutex = [Threading.Mutex]::new($false, $name)
+            $owned = $false
+            try {
+                $owned = $mutex.WaitOne(0)
+            } catch [System.Threading.AbandonedMutexException] {
+                $owned = $true
+            }
+            if (-not $owned) {
+                $mutex.Dispose()
+                throw "could not take mutex $name"
+            }
+            return [pscustomobject]@{
+                letter = 'Q'
+                container = 'xagent.slot-Q'
+                sid = 'S-1-15-2-1'
+                mutex = $mutex
+                MutexName = $name
+            }
+        }
+
+        function Release-RunSlot($Slot) {
+            if ($null -eq $Slot) { return }
+            $mutex = $Slot.mutex
+            if ($null -eq $mutex) { return }
+            try { $mutex.ReleaseMutex() } catch { }
+            try { $mutex.Dispose() } catch { }
+        }
+
+        function Test-RunMutexDisposed($Mutex) {
+            try {
+                $null = $Mutex.WaitOne(0)
+                return $false
+            } catch {
+                return $true
+            }
+        }
+
+        function Test-RunMutexFree([string]$Name) {
+            $ps = [powershell]::Create()
+            $null = $ps.AddScript({
+                param($MutexName)
+                $m = [Threading.Mutex]::new($false, $MutexName)
+                $clean = $false
+                $owned = $false
+                try {
+                    $clean = $m.WaitOne(0)
+                    $owned = $clean
+                } catch [System.Threading.AbandonedMutexException] {
+                    $owned = $true
+                    $clean = $false
+                }
+                if ($owned) {
+                    try { $m.ReleaseMutex() } catch { }
+                }
+                $m.Dispose()
+                return $clean
+            }).AddArgument($Name)
+            try {
+                $result = @($ps.Invoke())
+                if ($ps.HadErrors) {
+                    $msg = @($ps.Streams.Error | ForEach-Object { $_.ToString() }) -join ' '
+                    throw $msg
+                }
+                return [bool]$result[0]
+            } finally {
+                $ps.Dispose()
+            }
+        }
+
+        function Get-RunLedgerPath {
+            return (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox\slot-Q.json')
+        }
+    }
+
+    AfterAll {
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+        Import-Module $script:ModulePath -Force
+    }
+
+    It 'quotes arguments the same way as delegate.ps1 Quote' {
+        $delegate = (Resolve-Path (Join-Path $PSScriptRoot '../scripts/delegate.ps1')).Path
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($delegate, [ref]$tokens, [ref]$errors)
+        $fn = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Quote'
+        }, $true)
+        $fn | Should -Not -BeNullOrEmpty
+        Invoke-Expression $fn.Extent.Text
+
+        $samples = @(
+            'plain',
+            'has space',
+            'has"quote',
+            'trailing\',
+            "trailing space\ ",
+            'a\"b',
+            ''
+        )
+        foreach ($sample in $samples) {
+            $oracle = Quote $sample
+            $got = InModuleScope Sandbox -Parameters @{ Sample = $sample } {
+                param($Sample)
+                ConvertTo-SandboxArgument $Sample
+            }
+            $got | Should -Be $oracle
+        }
+        $line = InModuleScope Sandbox {
+            Get-SandboxCommandLine -Exe 'C:\Program Files\x.exe' -Arguments @('a', 'b c')
+        }
+        $line | Should -Be '"C:\Program Files\x.exe" a "b c"'
+    }
+
+    It 'returns an empty array and releases the mutex when there is no run and no ledger' {
+        $slot = New-RunSlot
+        try {
+            $notes = Stop-SandboxRun -Run $null -Slot $slot
+            $notes -is [array] | Should -BeTrue
+            $notes.Count | Should -Be 0
+            (Test-RunMutexDisposed $slot.mutex) | Should -BeTrue
+            (Test-RunMutexFree $slot.MutexName) | Should -BeTrue
+            $hasQ = InModuleScope Sandbox { [bool](Get-SubstMap).ContainsKey('Q') }
+            $hasQ | Should -BeFalse
+        } finally {
+            Release-RunSlot $slot
+        }
+
+        $slot2 = New-RunSlot
+        try {
+            $notes2 = Stop-SandboxRun -Run $null -Slot $slot2 -Handle $null
+            $notes2 -is [array] | Should -BeTrue
+            $notes2.Count | Should -Be 0
+        } finally {
+            Release-RunSlot $slot2
+        }
+    }
+
+    It 'writes a failed grant back and removes the one that succeeded' {
+        $a = [IO.Path]::GetFullPath((Join-Path $TestDrive 'grant-a.txt'))
+        $b = [IO.Path]::GetFullPath((Join-Path $TestDrive 'grant-b.txt'))
+        $wt = [IO.Path]::GetFullPath((Join-Path $TestDrive 'failed-grant-wt'))
+        New-Item -ItemType Directory -Force -Path $wt | Out-Null
+        [IO.File]::WriteAllText($a, 'a')
+        [IO.File]::WriteAllText($b, 'b')
+        $ledger = Get-RunLedgerPath
+        $sid = 'S-1-15-2-1'
+        $slot = New-RunSlot
+        try {
+            $grantA = @(& icacls.exe $a /grant '*S-1-15-2-1:(R)' 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls grant a failed: $grantA" }
+            $grantB = @(& icacls.exe $b /grant '*S-1-15-2-1:(R)' 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls grant b failed: $grantB" }
+            $deny = @(& icacls.exe $b /deny '*S-1-3-4:(WDAC)' 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls deny b failed: $deny" }
+
+            $start = (Get-Process -Id $PID).StartTime
+            InModuleScope Sandbox -Parameters @{
+                LedgerPath = $ledger
+                Worktree = $wt
+                GrantA = $a
+                GrantB = $b
+                ProcessId = $PID
+                StartTime = $start
+            } {
+                param($LedgerPath, $Worktree, $GrantA, $GrantB, $ProcessId, $StartTime)
+                Write-SandboxLedger -Path $LedgerPath -Ledger ([ordered]@{
+                    slot = 'Q'
+                    sid = 'S-1-15-2-1'
+                    pid = $ProcessId
+                    startTime = $StartTime
+                    runtimeVersion = 'test'
+                    worktree = $Worktree
+                    grants = @(
+                        [pscustomobject]@{ path = $GrantA; spec = '(R)' },
+                        [pscustomobject]@{ path = $GrantB; spec = '(R)' }
+                    )
+                })
+            }
+            $before = InModuleScope Sandbox -Parameters @{ Path = $ledger } {
+                param($Path)
+                Read-SandboxLedger -Path $Path
+            }
+
+            $notes = Stop-SandboxRun -Run $null -Slot $slot
+            $notes -is [array] | Should -BeTrue
+            @($notes).Count | Should -Be 1
+            $notes[0].StartsWith("grant not removed: $b") | Should -BeTrue
+
+            Test-Path -LiteralPath $ledger | Should -BeTrue
+            $after = InModuleScope Sandbox -Parameters @{ Path = $ledger } {
+                param($Path)
+                Read-SandboxLedger -Path $Path
+            }
+            $after.slot | Should -Be $before.slot
+            $after.sid | Should -Be $before.sid
+            $after.pid | Should -Be $before.pid
+            $after.startTime | Should -Be $before.startTime
+            $after.runtimeVersion | Should -Be $before.runtimeVersion
+            $after.worktree | Should -Be $before.worktree
+            @($after.grants).Count | Should -Be 1
+            $after.grants[0].path | Should -Be $b
+            $after.grants[0].spec | Should -Be '(R)'
+            @($after.grants[0].PSObject.Properties.Name) | Should -Not -Contain 'error'
+
+            $acl = ((@(& icacls.exe $a 2>&1) | ForEach-Object { "$_" }) -join "`n")
+            $acl | Should -Not -Match ([regex]::Escape($sid))
+        } finally {
+            & icacls.exe $a /remove '*S-1-15-2-1' 2>&1 | Out-Null
+            & icacls.exe $b /remove '*S-1-15-2-1' 2>&1 | Out-Null
+            & icacls.exe $b /remove:d '*S-1-3-4' 2>&1 | Out-Null
+            Remove-Item -LiteralPath $a, $b, $ledger -Force -ErrorAction SilentlyContinue
+            Release-RunSlot $slot
+        }
+    }
+
+    It 'keeps an unreadable ledger and notes it' {
+        $ledger = Get-RunLedgerPath
+        $dir = Split-Path -Parent $ledger
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        [IO.File]::WriteAllText($ledger, '{')
+        $slot = New-RunSlot
+        try {
+            $notes = Stop-SandboxRun -Run $null -Slot $slot
+            $notes -is [array] | Should -BeTrue
+            @($notes).Count | Should -Be 1
+            $notes[0] | Should -Be "remove grants: ledger unreadable $ledger"
+            Test-Path -LiteralPath $ledger | Should -BeTrue
+        } finally {
+            Remove-Item -LiteralPath $ledger -Force -ErrorAction SilentlyContinue
+            Release-RunSlot $slot
+        }
+    }
+
+    It 'deletes auth.json from the run object and from a ledger worktree' {
+        $wt = [IO.Path]::GetFullPath((Join-Path $TestDrive 'auth-wt'))
+        $cursorDir = Join-Path $wt '.xagent\sandbox\home\AppData\Roaming\Cursor'
+        New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null
+        $auth = Join-Path $cursorDir 'auth.json'
+        $keep = Join-Path $cursorDir 'keep.json'
+        [IO.File]::WriteAllText($auth, '{"token":"x"}')
+        [IO.File]::WriteAllText($keep, '{"keep":true}')
+        $ledger = Get-RunLedgerPath
+        $slot = New-RunSlot
+        try {
+            $notes = Stop-SandboxRun -Run ([pscustomobject]@{ worktree = $wt }) -Slot $slot
+            $notes -is [array] | Should -BeTrue
+            $notes.Count | Should -Be 0
+            Test-Path -LiteralPath $auth | Should -BeFalse
+            Test-Path -LiteralPath $keep | Should -BeTrue
+        } finally {
+            Release-RunSlot $slot
+        }
+
+        [IO.File]::WriteAllText($auth, '{"token":"y"}')
+        $slot2 = New-RunSlot
+        try {
+            $start = (Get-Process -Id $PID).StartTime
+            InModuleScope Sandbox -Parameters @{
+                LedgerPath = $ledger
+                Worktree = $wt
+                ProcessId = $PID
+                StartTime = $start
+            } {
+                param($LedgerPath, $Worktree, $ProcessId, $StartTime)
+                Write-SandboxLedger -Path $LedgerPath -Ledger ([ordered]@{
+                    slot = 'Q'
+                    sid = 'S-1-15-2-1'
+                    pid = $ProcessId
+                    startTime = $StartTime
+                    runtimeVersion = 'test'
+                    worktree = $Worktree
+                    grants = @()
+                })
+            }
+            $notes2 = Stop-SandboxRun -Run $null -Slot $slot2
+            $notes2 -is [array] | Should -BeTrue
+            $notes2.Count | Should -Be 0
+            Test-Path -LiteralPath $auth | Should -BeFalse
+            Test-Path -LiteralPath $keep | Should -BeTrue
+            Test-Path -LiteralPath $ledger | Should -BeFalse
+        } finally {
+            Remove-Item -LiteralPath $ledger -Force -ErrorAction SilentlyContinue
+            Release-RunSlot $slot2
+        }
+    }
+
+    It 'throws when no letters are reserved and writes no ledger' {
+        $slot = New-RunSlot
+        try {
+            $expected = InModuleScope Sandbox { Get-NoLettersReservedMessage }
+            $message = Get-ThrownMessage {
+                New-SandboxRun -Slot $slot -Runtime @{ root = 'D:\xagent-none\runtime'; version = 'test'; uv = '1.52.1'; patched = $false } -Repo 'D:\xagent-none\repo' -Worktree 'D:\xagent-none\wt' -WtName 'wt'
+            }
+            $message | Should -Be $expected
+            Test-Path -LiteralPath (Get-RunLedgerPath) | Should -BeFalse
+        } finally {
+            Release-RunSlot $slot
+        }
+    }
+}
