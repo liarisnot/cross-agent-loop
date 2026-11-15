@@ -62,3 +62,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T20:30:46Z [gate] plan-approved: "approve plan"
 - 2026-11-15T20:30:46Z [decision] checkin: on-problems
 - 2026-11-15T20:30:53Z [stage] plan -> build
+- 2026-11-15T20:32:21Z [stop] sandbox-run: preflight size gate says split again (comprehension: 450-650 lines, 22-32 min; readiness agrees); proposed: sandbox-run-fns (3 functions + container-free unit tests) and sandbox-run-harness (container harness + worker-run test); readiness: 1 Blocker (unreadable vs missing ledger in Stop-SandboxRun) and 8 Majors to pin
