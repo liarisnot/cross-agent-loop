@@ -33,3 +33,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T00:17:27Z [decision] review plan-3: declined by the user
 - 2026-11-15T00:17:27Z [gate] plan-approved: "approve plan"
 - 2026-11-15T00:17:27Z [decision] checkin: on-problems
+- 2026-11-15T00:17:28Z [stage] plan -> build
