@@ -1422,3 +1422,473 @@ Describe 'grant list and ledger' {
         }
     }
 }
+
+Describe 'slots and release' {
+    BeforeDiscovery {
+        $script:SlotContainerSkip = $false
+        $script:SlotContainerReason = ''
+        $nativePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../scripts/SandboxNative.cs'))
+        if (-not ('XagentSandbox' -as [type])) {
+            Add-Type -Path $nativePath
+        }
+        if ([XagentSandbox]::IsAppContainer()) {
+            $script:SlotContainerSkip = $true
+            $script:SlotContainerReason = 'already inside an AppContainer'
+        } elseif ([Environment]::OSVersion.Version.Build -lt 26300) {
+            $script:SlotContainerSkip = $true
+            $script:SlotContainerReason = 'Windows build is older than 26300'
+        } else {
+            $subst = @{}
+            foreach ($line in @(& subst.exe 2>&1)) {
+                if ([string]$line -match '^([A-Za-z]):\\: => ') {
+                    $subst[$Matches[1].ToUpperInvariant()] = $true
+                }
+            }
+            $drives = @{}
+            foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+                if ($drive.Name) { $drives[$drive.Name.Substring(0, 1).ToUpperInvariant()] = $true }
+            }
+            $free = 0
+            foreach ($code in 68..90) {
+                $letter = [string][char]$code
+                if ($subst.ContainsKey($letter) -or $drives.ContainsKey($letter)) { continue }
+                $free++
+            }
+            if ($free -lt 3) {
+                $script:SlotContainerSkip = $true
+                $script:SlotContainerReason = 'fewer than three free letters D-Z'
+            }
+        }
+    }
+
+    BeforeAll {
+        $script:SlotRoot = Join-Path $TestDrive 'slot-root'
+        $script:SlotCursor = Join-Path $TestDrive 'slot-cursor'
+        $env:XAGENT_SANDBOX_ROOT = $script:SlotRoot
+        $env:XAGENT_CURSOR_ROOT = $script:SlotCursor
+        New-Item -ItemType Directory -Force -Path $script:SlotRoot, $script:SlotCursor | Out-Null
+        Import-Module $script:ModulePath -Force
+        $script:SlotChildren = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
+        $script:SlotRuntime = $null
+        $script:SlotOne = $null
+        $script:SlotTwo = $null
+
+        function Get-TestSubstMap {
+            $map = @{}
+            foreach ($line in @(& subst.exe 2>&1)) {
+                if ([string]$line -match '^([A-Za-z]):\\: => (.*)$') {
+                    $map[$Matches[1].ToUpperInvariant()] = $Matches[2].Trim()
+                }
+            }
+            return $map
+        }
+
+        function Test-SameLetterTarget([string]$Actual, [string]$Expected) {
+            if ([string]::IsNullOrWhiteSpace($Actual) -or [string]::IsNullOrWhiteSpace($Expected)) { return $false }
+            $left = [IO.Path]::GetFullPath($Actual).TrimEnd('\')
+            $right = [IO.Path]::GetFullPath($Expected).TrimEnd('\')
+            return [string]::Equals($left, $right, [StringComparison]::OrdinalIgnoreCase)
+        }
+
+        function Get-TestFreeLetters {
+            $map = Get-TestSubstMap
+            $drives = @{}
+            foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+                if ($drive.Name) { $drives[$drive.Name.Substring(0, 1).ToUpperInvariant()] = $true }
+            }
+            $found = New-Object System.Collections.Generic.List[string]
+            for ($code = 90; $code -ge 68; $code--) {
+                $letter = [string][char]$code
+                if ($map.ContainsKey($letter) -or $drives.ContainsKey($letter)) { continue }
+                $found.Add($letter)
+                if ($found.Count -eq 3) { break }
+            }
+            return $found.ToArray()
+        }
+
+        function Test-AppContainerMapped([string]$Sid) {
+            $key = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\$Sid"
+            return (Test-Path -LiteralPath $key)
+        }
+
+        function Get-IcaclsText([string]$Path) {
+            return ((@(& icacls.exe $Path 2>&1) | ForEach-Object { "$_" }) -join "`n")
+        }
+
+        function Start-SlotChild {
+            param(
+                [string[]]$MutexNames = @(),
+                [string]$LedgerPath = '',
+                [string]$Sid = '',
+                [string]$GrantPath = '',
+                [Parameter(Mandatory)][string]$ReadyFile
+            )
+            $argList = New-Object System.Collections.Generic.List[string]
+            [void]$argList.Add('-NoProfile')
+            [void]$argList.Add('-ExecutionPolicy')
+            [void]$argList.Add('Bypass')
+            [void]$argList.Add('-File')
+            [void]$argList.Add($script:SlotChildScript)
+            # pwsh -File binds only one argument to a [string[]], so names travel as one comma-separated value.
+            if (@($MutexNames).Count -gt 0) {
+                [void]$argList.Add('-MutexNames')
+                [void]$argList.Add((@($MutexNames) -join ','))
+            }
+            if (-not [string]::IsNullOrWhiteSpace($LedgerPath)) {
+                [void]$argList.Add('-LedgerPath')
+                [void]$argList.Add($LedgerPath)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Sid)) {
+                [void]$argList.Add('-Sid')
+                [void]$argList.Add($Sid)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($GrantPath)) {
+                [void]$argList.Add('-GrantPath')
+                [void]$argList.Add($GrantPath)
+            }
+            [void]$argList.Add('-ReadyFile')
+            [void]$argList.Add($ReadyFile)
+            $pwsh = (Get-Process -Id $PID).Path
+            $proc = Start-Process -FilePath $pwsh -ArgumentList $argList.ToArray() -PassThru -WindowStyle Hidden -RedirectStandardOutput "$ReadyFile.out" -RedirectStandardError "$ReadyFile.err"
+            [void]$script:SlotChildren.Add($proc)
+            return $proc
+        }
+
+        function Wait-SlotReady($Process, [string]$ReadyFile) {
+            $deadline = [datetime]::UtcNow.AddSeconds(15)
+            while (-not (Test-Path -LiteralPath $ReadyFile)) {
+                if ($Process.HasExited) { break }
+                if ([datetime]::UtcNow -ge $deadline) { break }
+                Start-Sleep -Milliseconds 50
+            }
+            if (Test-Path -LiteralPath $ReadyFile) { return }
+            $err = ''
+            $errPath = "$ReadyFile.err"
+            if (Test-Path -LiteralPath $errPath) { $err = [IO.File]::ReadAllText($errPath) }
+            $code = if ($Process.HasExited) { [string]$Process.ExitCode } else { 'still-running' }
+            throw "slot child was not ready within 15s (exit $code). $err"
+        }
+
+        function Stop-SlotChild($Process) {
+            if ($null -eq $Process) { return }
+            try {
+                if (-not $Process.HasExited) { $Process.Kill() }
+            } catch { }
+            try { $null = $Process.WaitForExit(10000) } catch { }
+            try { $Process.Refresh() } catch { }
+        }
+
+        function Release-TestSlot($Slot) {
+            if ($null -eq $Slot) { return }
+            $mutex = $Slot.mutex
+            if ($null -eq $mutex) { return }
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+        }
+    }
+
+    AfterAll {
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+        Import-Module $script:ModulePath -Force
+    }
+
+    It 'parses LoopbackExempt text and keeps only the requested slot SID' {
+        $fixture = Join-Path $PSScriptRoot 'fixtures/loopback-exempt.txt'
+        $text = [IO.File]::ReadAllText($fixture)
+        $rows = @(InModuleScope Sandbox -Parameters @{ Text = $text } {
+            param($Text)
+            Get-SandboxLoopbackExemptions -Text $Text -Sids @('S-1-15-2-1111')
+        })
+        $rows.Count | Should -Be 1
+        $rows[0].sid | Should -Be 'S-1-15-2-1111'
+        $rows[0].command | Should -Be 'CheckNetIsolation LoopbackExempt -d -p=S-1-15-2-1111'
+        @($rows.sid) | Should -Not -Contain 'S-1-15-2-2222'
+    }
+
+    It 'Remove-SandboxLetters does nothing when no letters are reserved' {
+        $result = Remove-SandboxLetters
+        $result.released -is [System.Array] | Should -BeTrue
+        $result.exemptions -is [System.Array] | Should -BeTrue
+        $result.leftoverGrants -is [System.Array] | Should -BeTrue
+        @($result.released).Count | Should -Be 0
+        @($result.exemptions).Count | Should -Be 0
+        @($result.leftoverGrants).Count | Should -Be 0
+        Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json') | Should -BeFalse
+    }
+
+    It 'Get-SandboxSlot throws the same unreserved-letters message and maps nothing' {
+        $expected = InModuleScope Sandbox { Get-NoLettersReservedMessage }
+        $fromSlot = Get-ThrownMessage { Get-SandboxSlot -TimeoutSec 0 }
+        $fromInit = Get-ThrownMessage { Initialize-SandboxLetters }
+        $fromSlot | Should -Be $expected
+        $fromInit | Should -Be $expected
+        Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeFalse
+    }
+
+    It 'rejects a letters object that is not one runtime letter and two slots' {
+        $path = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json'
+        [IO.File]::WriteAllText($path, '{"letters":{"runtime":"Z","slots":["Y"]},"read":[]}')
+        try {
+            Get-ThrownMessage { Get-SandboxSlot -TimeoutSec 0 } | Should -Be 'sandbox: sandbox.json letters must be a runtime letter and two slots'
+            Get-ThrownMessage { Remove-SandboxLetters } | Should -Be 'sandbox: sandbox.json letters must be a runtime letter and two slots'
+            Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeFalse
+        } finally {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reports an unreadable sandbox.json from Get-SandboxConfig' {
+        $path = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json'
+        [IO.File]::WriteAllText($path, '{')
+        try {
+            $slotMessage = Get-ThrownMessage { Get-SandboxSlot -TimeoutSec 0 }
+            $releaseMessage = Get-ThrownMessage { Remove-SandboxLetters }
+            $slotMessage | Should -Match '^sandbox: cannot read sandbox.json \('
+            $releaseMessage | Should -Be $slotMessage
+        } finally {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context $(if ($script:SlotContainerSkip) { "reserved letters ($script:SlotContainerReason)" } else { 'reserved letters' }) -Skip:$script:SlotContainerSkip {
+        BeforeAll {
+            $free = @(Get-TestFreeLetters)
+            if ($free.Count -lt 3) { throw 'sandbox: fewer than three free letters D-Z at reservation time' }
+            $script:SlotRuntime = [string]$free[0]
+            $script:SlotOne = [string]$free[1]
+            $script:SlotTwo = [string]$free[2]
+            Set-SandboxLetters -Letters @($script:SlotRuntime, $script:SlotOne, $script:SlotTwo)
+            $script:SlotChildScript = Join-Path $TestDrive 'slot-child.ps1'
+            $childSource = @'
+param(
+    [string[]]$MutexNames = @(),
+    [string]$LedgerPath = '',
+    [string]$Sid = '',
+    [string]$GrantPath = '',
+    [string]$ReadyFile = ''
+)
+$ErrorActionPreference = 'Stop'
+$held = New-Object System.Collections.Generic.List[Threading.Mutex]
+$names = New-Object System.Collections.Generic.List[string]
+foreach ($item in @($MutexNames)) {
+    foreach ($part in ([string]$item -split ',')) {
+        if (-not [string]::IsNullOrWhiteSpace($part)) { $names.Add($part.Trim()) }
+    }
+}
+foreach ($name in $names) {
+    $mutex = [Threading.Mutex]::new($false, $name)
+    $owned = $false
+    try {
+        $owned = $mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        $owned = $true
+    }
+    if (-not $owned) {
+        $mutex.Dispose()
+        throw "could not take mutex $name"
+    }
+    $held.Add($mutex)
+}
+if (-not [string]::IsNullOrWhiteSpace($LedgerPath)) {
+    $grantRows = @()
+    if (-not [string]::IsNullOrWhiteSpace($GrantPath) -and -not [string]::IsNullOrWhiteSpace($Sid)) {
+        $full = [IO.Path]::GetFullPath($GrantPath)
+        $grantOutput = @(& icacls.exe $full /grant ("*${Sid}:(OI)(CI)RX") 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $text = (@($grantOutput) | ForEach-Object { "$_" }) -join ' '
+            throw "icacls grant failed: $text"
+        }
+        $grantRows = @([pscustomobject]@{ path = $full; spec = '(OI)(CI)RX' })
+    }
+    if ($LedgerPath -notmatch 'slot-([A-Za-z])\.json$') { throw "unexpected ledger path $LedgerPath" }
+    $slot = $Matches[1].ToUpperInvariant()
+    $proc = Get-Process -Id $PID
+    $worktree = if (-not [string]::IsNullOrWhiteSpace($GrantPath)) { [IO.Path]::GetFullPath($GrantPath) } else { $LedgerPath }
+    $body = [ordered]@{
+        slot = $slot
+        sid = [string]$Sid
+        pid = $PID
+        startTime = $proc.StartTime.ToUniversalTime().ToString('o')
+        runtimeVersion = 'test'
+        worktree = $worktree
+        grants = $grantRows
+    }
+    $parent = Split-Path -Parent $LedgerPath
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $json = ($body | ConvertTo-Json -Depth 6) + "`n"
+    [IO.File]::WriteAllText($LedgerPath, $json, [Text.UTF8Encoding]::new($false))
+}
+if ([string]::IsNullOrWhiteSpace($ReadyFile)) { throw 'ReadyFile is required' }
+$readyParent = Split-Path -Parent $ReadyFile
+if (-not [string]::IsNullOrWhiteSpace($readyParent) -and -not (Test-Path -LiteralPath $readyParent)) {
+    New-Item -ItemType Directory -Force -Path $readyParent | Out-Null
+}
+[IO.File]::WriteAllText($ReadyFile, "$PID`n", [Text.UTF8Encoding]::new($false))
+while ($true) {
+    Start-Sleep -Seconds 30
+}
+'@
+            [IO.File]::WriteAllText($script:SlotChildScript, $childSource, [Text.UTF8Encoding]::new($false))
+        }
+
+        AfterAll {
+            try {
+                foreach ($proc in @($script:SlotChildren)) { Stop-SlotChild $proc }
+            } finally {
+                try { Remove-SandboxLetters | Out-Null } catch { }
+                foreach ($letter in @($script:SlotRuntime, $script:SlotOne, $script:SlotTwo)) {
+                    if ([string]::IsNullOrWhiteSpace([string]$letter)) { continue }
+                    & subst.exe "${letter}:" '/D' 2>&1 | Out-Null
+                }
+                foreach ($letter in @($script:SlotOne, $script:SlotTwo)) {
+                    if ([string]::IsNullOrWhiteSpace([string]$letter)) { continue }
+                    try { [XagentSandbox]::DeleteProfile("xagent.slot-$letter") } catch { }
+                }
+            }
+        }
+
+        It 'reserves three mappings and two profiles, then release removes them' {
+            $cursor = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox\cursor'
+            $idle = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox\idle'
+            $configPath = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json'
+            $sid1 = [XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotOne")
+            $sid1Again = [XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotOne")
+            $sid2 = [XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotTwo")
+            try {
+                $sid1 | Should -Be $sid1Again
+                (Test-AppContainerMapped $sid1) | Should -BeTrue
+                (Test-AppContainerMapped $sid2) | Should -BeTrue
+                Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeTrue
+                $before = Get-TestSubstMap
+                (Test-SameLetterTarget $before[$script:SlotRuntime] $cursor) | Should -BeTrue
+                (Test-SameLetterTarget $before[$script:SlotOne] $idle) | Should -BeTrue
+                (Test-SameLetterTarget $before[$script:SlotTwo] $idle) | Should -BeTrue
+
+                InModuleScope Sandbox {
+                    $cfg = Get-SandboxConfig
+                    $cfg['read'] = @(@{ path = 'C:\Windows'; addToPath = $false })
+                    Save-SandboxConfig $cfg
+                }
+
+                $result = Remove-SandboxLetters
+                @($result.released) | Should -Be @($script:SlotRuntime, $script:SlotOne, $script:SlotTwo)
+                $result.exemptions -is [System.Array] | Should -BeTrue
+                $result.leftoverGrants -is [System.Array] | Should -BeTrue
+                $after = Get-TestSubstMap
+                $after.ContainsKey($script:SlotRuntime) | Should -BeFalse
+                $after.ContainsKey($script:SlotOne) | Should -BeFalse
+                $after.ContainsKey($script:SlotTwo) | Should -BeFalse
+                Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeFalse
+                (Test-AppContainerMapped $sid1) | Should -BeFalse
+                (Test-AppContainerMapped $sid2) | Should -BeFalse
+                $parsed = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
+                $parsed.PSObject.Properties.Name | Should -Not -Contain 'letters'
+                @($parsed.read).Count | Should -Be 1
+                $parsed.read[0].path | Should -Be 'C:\Windows'
+            } finally {
+                Set-SandboxLetters -Letters @($script:SlotRuntime, $script:SlotOne, $script:SlotTwo)
+            }
+        }
+
+        It 'refuses release while a slot mutex is held and leaves the mappings' {
+            $ready = Join-Path $TestDrive 'ready-held'
+            $proc = Start-SlotChild -MutexNames @("Local\xagent-slot-$script:SlotOne") -ReadyFile $ready
+            try {
+                Wait-SlotReady $proc $ready
+                $before = Get-TestSubstMap
+                $message = Get-ThrownMessage { Remove-SandboxLetters }
+                $message | Should -Be 'sandbox: a slot is in use; release refused'
+                $after = Get-TestSubstMap
+                $cursor = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox\cursor'
+                $idle = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox\idle'
+                (Test-SameLetterTarget $after[$script:SlotRuntime] $cursor) | Should -BeTrue
+                (Test-SameLetterTarget $after[$script:SlotOne] $idle) | Should -BeTrue
+                (Test-SameLetterTarget $after[$script:SlotTwo] $idle) | Should -BeTrue
+                (Test-SameLetterTarget $before[$script:SlotRuntime] $after[$script:SlotRuntime]) | Should -BeTrue
+                Test-Path -LiteralPath (Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox') | Should -BeTrue
+                $raw = [IO.File]::ReadAllText((Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json'))
+                $raw | Should -Match '"letters"'
+            } finally {
+                Stop-SlotChild $proc
+            }
+        }
+
+        It 'fails when both slots stay busy for the timeout' {
+            $ready = Join-Path $TestDrive 'ready-busy-both'
+            $proc = Start-SlotChild -MutexNames @(
+                "Local\xagent-slot-$script:SlotOne"
+                "Local\xagent-slot-$script:SlotTwo"
+            ) -ReadyFile $ready
+            $slot = $null
+            try {
+                Wait-SlotReady $proc $ready
+                $message = $null
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                try {
+                    $slot = Get-SandboxSlot -TimeoutSec 4
+                } catch {
+                    $message = $_.Exception.Message
+                }
+                $elapsed = $clock.Elapsed.TotalSeconds
+                $message | Should -Be 'sandbox: no free slot (both slots busy)'
+                $elapsed | Should -BeGreaterOrEqual 4
+                $elapsed | Should -BeLessThan 7
+            } finally {
+                Release-TestSlot $slot
+                Stop-SlotChild $proc
+            }
+        }
+
+        It 'treats a ledger that names a live process as a busy slot' {
+            $ready = Join-Path $TestDrive 'ready-live-ledger'
+            $ledger = Join-Path $env:XAGENT_SANDBOX_ROOT "sandbox\slot-$script:SlotOne.json"
+            $sid = [XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotOne")
+            $proc = Start-SlotChild -LedgerPath $ledger -Sid $sid -ReadyFile $ready
+            $slot = $null
+            try {
+                Wait-SlotReady $proc $ready
+                $slot = Get-SandboxSlot -TimeoutSec 5
+                $slot.letter | Should -Be $script:SlotTwo
+                $slot.container | Should -Be "xagent.slot-$script:SlotTwo"
+                $slot.sid | Should -Be ([XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotTwo"))
+            } finally {
+                Release-TestSlot $slot
+                Stop-SlotChild $proc
+                Remove-Item -LiteralPath $ledger -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'takes an abandoned slot and removes the dead run grants' {
+            $ready = Join-Path $TestDrive 'ready-crash'
+            $ledger = Join-Path $env:XAGENT_SANDBOX_ROOT "sandbox\slot-$script:SlotOne.json"
+            $folder = Join-Path $TestDrive 'crash-folder'
+            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            $sid = [XagentSandbox]::EnsureProfile("xagent.slot-$script:SlotOne")
+            $proc = Start-SlotChild -MutexNames @("Local\xagent-slot-$script:SlotOne") -LedgerPath $ledger -Sid $sid -GrantPath $folder -ReadyFile $ready
+            $slot = $null
+            try {
+                Wait-SlotReady $proc $ready
+                (Get-IcaclsText $folder) | Should -Match ([regex]::Escape($sid))
+                Stop-SlotChild $proc
+                $proc.HasExited | Should -BeTrue
+                $slot = Get-SandboxSlot -TimeoutSec 5
+                $slot.letter | Should -Be $script:SlotOne
+                $slot.container | Should -Be "xagent.slot-$script:SlotOne"
+                $slot.sid | Should -Be $sid
+                (Get-IcaclsText $folder) | Should -Not -Match ([regex]::Escape($sid))
+                Test-Path -LiteralPath $ledger | Should -BeFalse
+            } finally {
+                Stop-SlotChild $proc
+                Release-TestSlot $slot
+                if ($sid -and (Test-Path -LiteralPath $folder)) {
+                    & icacls.exe $folder /remove ("*$sid") 2>&1 | Out-Null
+                }
+                Remove-Item -LiteralPath $ledger -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}

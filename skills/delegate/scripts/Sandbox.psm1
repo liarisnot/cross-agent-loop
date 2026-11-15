@@ -1034,17 +1034,21 @@ function Set-SandboxLetters {
     Save-SandboxConfig $cfg
 }
 
+function Get-NoLettersReservedMessage {
+    $suggested = @(Get-FreeLetterSuggestions)
+    if ($suggested.Count -eq 1 -and $suggested[0] -is [System.Array]) { $suggested = @($suggested[0]) }
+    if ($suggested.Count -lt 3) { return 'sandbox: no drive letters reserved; not enough free letters D-Z' }
+    $a = $suggested[0]; $b = $suggested[1]; $c = $suggested[2]
+    return "sandbox: no drive letters reserved; suggested: $a, $b, $c; ask the user, then run delegate.ps1 -SandboxCheck -Reserve $a,$b,$c -Repo <repo>"
+}
+
 function Initialize-SandboxLetters {
     [CmdletBinding()]
     param()
     $cfg = Get-SandboxConfig
     $shape = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
     if (-not $shape.reserved) {
-        $suggested = @(Get-FreeLetterSuggestions)
-        if ($suggested.Count -eq 1 -and $suggested[0] -is [System.Array]) { $suggested = @($suggested[0]) }
-        if ($suggested.Count -lt 3) { throw 'sandbox: no drive letters reserved; not enough free letters D-Z' }
-        $a = $suggested[0]; $b = $suggested[1]; $c = $suggested[2]
-        throw "sandbox: no drive letters reserved; suggested: $a, $b, $c; ask the user, then run delegate.ps1 -SandboxCheck -Reserve $a,$b,$c -Repo <repo>"
+        throw (Get-NoLettersReservedMessage)
     }
     if ([string]::IsNullOrWhiteSpace([string]$shape.runtime) -or @($shape.slots).Count -ne 2) {
         throw 'sandbox: sandbox.json letters must be a runtime letter and two slots'
@@ -1259,4 +1263,275 @@ function Remove-SandboxGrants {
     Write-Output -NoEnumerate $failed.ToArray()
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants
+function Resolve-SandboxLetterPlan {
+    $cfg = Get-SandboxConfig
+    $shape = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
+    if ($shape.reserved) {
+        if ([string]::IsNullOrWhiteSpace([string]$shape.runtime) -or @($shape.slots).Count -ne 2) {
+            throw 'sandbox: sandbox.json letters must be a runtime letter and two slots'
+        }
+    }
+    return @{
+        Config = $cfg
+        Reserved = [bool]$shape.reserved
+        Shape = $shape
+    }
+}
+
+function Test-SandboxAbandoned([Exception]$Exception) {
+    $ex = $Exception
+    while ($null -ne $ex) {
+        if ($ex -is [Threading.AbandonedMutexException]) { return $true }
+        $ex = $ex.InnerException
+    }
+    return $false
+}
+
+# WaitOne(0): true means taken. AbandonedMutexException also means taken (this caller owns it).
+# false means another process holds it. A mutex this caller rejects is always released, if owned, and disposed.
+function Open-SandboxSlotMutex([string]$Letter) {
+    $mutex = [Threading.Mutex]::new($false, "Local\xagent-slot-$Letter")
+    $owned = $false
+    try {
+        $owned = $mutex.WaitOne(0)
+    } catch {
+        if (-not (Test-SandboxAbandoned $_.Exception)) {
+            $mutex.Dispose()
+            throw
+        }
+        $owned = $true
+    }
+    return @{ Mutex = $mutex; Owned = $owned }
+}
+
+function Close-SandboxMutex($Mutex, [bool]$Owned) {
+    if ($null -eq $Mutex) { return }
+    if ($Owned) {
+        try { $Mutex.ReleaseMutex() } catch { }
+    }
+    $Mutex.Dispose()
+}
+
+# Failed grants are written back as {path, spec} only. The ledger's other fields stay.
+function Clear-DeadSandboxLedger([string]$Path) {
+    $ledger = Read-SandboxLedger -Path $Path
+    $failed = Remove-SandboxGrants -Ledger $ledger
+    if ($null -eq $failed -or $failed.Count -eq 0) {
+        Remove-Item -LiteralPath $Path -Force
+        return
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($row in @($failed)) {
+        $rows.Add([pscustomobject]@{
+            path = (Get-ObjectProperty $row 'path')
+            spec = (Get-ObjectProperty $row 'spec')
+        })
+    }
+    $ledger.grants = $rows.ToArray()
+    Write-SandboxLedger -Path $Path -Ledger $ledger
+}
+
+function Get-SandboxLoopbackExemptions {
+    param(
+        [AllowEmptyString()][AllowNull()][string]$Text,
+        [AllowEmptyCollection()][AllowNull()][string[]]$Sids
+    )
+    $wanted = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($sid in @($Sids)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$sid)) {
+            [void]$wanted.Add(([string]$sid).Trim())
+        }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not [string]::IsNullOrEmpty($Text)) {
+        foreach ($line in ($Text -split '\r?\n')) {
+            if ($line -match '^\s*SID:\s*(\S+)\s*$') {
+                $sid = $Matches[1]
+                if ($wanted.Contains($sid)) {
+                    $rows.Add([pscustomobject]@{
+                        sid = $sid
+                        command = "CheckNetIsolation LoopbackExempt -d -p=$sid"
+                    })
+                }
+            }
+        }
+    }
+    Write-Output -NoEnumerate $rows.ToArray()
+}
+
+function Read-SandboxLoopbackExemptText {
+    $exe = Join-Path $env:SystemRoot 'System32\CheckNetIsolation.exe'
+    if (-not (Test-Path -LiteralPath $exe)) { return '' }
+    try {
+        $output = @(& $exe 'LoopbackExempt' '-s' 2>&1)
+        if ($LASTEXITCODE -ne 0) { return '' }
+        return ((@($output) | ForEach-Object { "$_" }) -join "`n")
+    } catch {
+        return ''
+    }
+}
+
+function Invoke-SandboxSubstDelete([string]$Letter) {
+    $output = @(& subst.exe "${Letter}:" '/D' 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $text = ((@($output) | ForEach-Object { "$_" }) -join ' ').Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { $text = "subst ${Letter}: /D exited $LASTEXITCODE" }
+        throw "sandbox: release failed: $text"
+    }
+}
+
+function Get-SandboxSlot {
+    [CmdletBinding()]
+    param(
+        [int]$TimeoutSec = 60
+    )
+    $plan = Resolve-SandboxLetterPlan
+    if (-not $plan.Reserved) {
+        throw (Get-NoLettersReservedMessage)
+    }
+    $slots = @($plan.Shape.slots)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        foreach ($letter in $slots) {
+            $opened = Open-SandboxSlotMutex -Letter ([string]$letter)
+            if (-not $opened.Owned) {
+                Close-SandboxMutex -Mutex $opened.Mutex -Owned $false
+                continue
+            }
+            $busy = $false
+            $result = $null
+            try {
+                $ledgerPath = Join-Path $script:SandboxDir ("slot-$letter.json")
+                if (Test-LedgerProcessLive $ledgerPath) {
+                    $busy = $true
+                } else {
+                    if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+                        Clear-DeadSandboxLedger -Path $ledgerPath
+                    }
+                    $container = "xagent.slot-$letter"
+                    $sid = [XagentSandbox]::EnsureProfile($container)
+                    $result = [pscustomobject]@{
+                        letter = [string]$letter
+                        mutex = $opened.Mutex
+                        container = $container
+                        sid = [string]$sid
+                    }
+                }
+            } catch {
+                Close-SandboxMutex -Mutex $opened.Mutex -Owned $true
+                throw
+            }
+            if ($busy) {
+                Close-SandboxMutex -Mutex $opened.Mutex -Owned $true
+                continue
+            }
+            return $result
+        }
+        if ($clock.Elapsed.TotalSeconds -ge $TimeoutSec) {
+            throw 'sandbox: no free slot (both slots busy)'
+        }
+        $remain = $TimeoutSec - $clock.Elapsed.TotalSeconds
+        if ($remain -gt 0) {
+            Start-Sleep -Seconds ([Math]::Min(2.0, $remain))
+        }
+    }
+}
+
+function Remove-SandboxLetters {
+    [CmdletBinding()]
+    param()
+    $plan = Resolve-SandboxLetterPlan
+    if (-not $plan.Reserved) {
+        return @{
+            released = (New-Object object[] 0)
+            exemptions = (New-Object object[] 0)
+            leftoverGrants = (New-Object object[] 0)
+        }
+    }
+
+    $cfg = $plan.Config
+    $runtime = [string]$plan.Shape.runtime
+    $slots = @($plan.Shape.slots)
+    $held = New-Object 'System.Collections.Generic.List[Threading.Mutex]'
+    try {
+        foreach ($letter in $slots) {
+            $opened = Open-SandboxSlotMutex -Letter ([string]$letter)
+            if (-not $opened.Owned) {
+                Close-SandboxMutex -Mutex $opened.Mutex -Owned $false
+                throw 'sandbox: a slot is in use; release refused'
+            }
+            $held.Add($opened.Mutex)
+            $ledgerPath = Join-Path $script:SandboxDir ("slot-$letter.json")
+            if (Test-LedgerProcessLive $ledgerPath) {
+                throw 'sandbox: a slot is in use; release refused'
+            }
+        }
+
+        $names = @(
+            ("xagent.slot-" + $slots[0])
+            ("xagent.slot-" + $slots[1])
+        )
+        $sids = New-Object System.Collections.Generic.List[string]
+        foreach ($name in $names) {
+            try {
+                $sids.Add([string][XagentSandbox]::EnsureProfile($name))
+            } catch {
+                throw "sandbox: release failed: $($_.Exception.Message)"
+            }
+        }
+
+        $exemptText = Read-SandboxLoopbackExemptText
+        $exemptions = Get-SandboxLoopbackExemptions -Text $exemptText -Sids $sids.ToArray()
+
+        $leftover = New-Object System.Collections.Generic.List[object]
+        if (Test-Path -LiteralPath $script:SandboxDir -PathType Container) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $script:SandboxDir -Filter 'slot-?.json' -File -ErrorAction SilentlyContinue)) {
+                $ledger = Read-SandboxLedger -Path $file.FullName
+                $failed = Remove-SandboxGrants -Ledger $ledger
+                if ($null -eq $failed) { continue }
+                foreach ($row in @($failed)) { $leftover.Add($row) }
+            }
+        }
+
+        $map = Get-SubstMap
+        $released = New-Object System.Collections.Generic.List[string]
+        foreach ($letter in @($runtime, [string]$slots[0], [string]$slots[1])) {
+            if (-not $map.ContainsKey($letter)) { continue }
+            Invoke-SandboxSubstDelete -Letter $letter
+            $released.Add($letter)
+        }
+
+        foreach ($name in $names) {
+            try {
+                [XagentSandbox]::DeleteProfile($name)
+            } catch {
+                throw "sandbox: release failed: $($_.Exception.Message)"
+            }
+        }
+
+        if (Test-Path -LiteralPath $script:SandboxDir) {
+            try {
+                Remove-Item -LiteralPath $script:SandboxDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                throw "sandbox: release failed: $($_.Exception.Message)"
+            }
+        }
+
+        if ($cfg -is [System.Collections.IDictionary]) {
+            [void]$cfg.Remove('letters')
+        }
+        Save-SandboxConfig $cfg
+
+        return @{
+            released = $released.ToArray()
+            exemptions = $exemptions
+            leftoverGrants = $leftover.ToArray()
+        }
+    } finally {
+        foreach ($mutex in $held) {
+            Close-SandboxMutex -Mutex $mutex -Owned $true
+        }
+    }
+}
+
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters
