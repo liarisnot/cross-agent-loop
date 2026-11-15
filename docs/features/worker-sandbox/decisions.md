@@ -43,3 +43,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T06:05:09Z [gate] plan-approved: "approve the plan"
 - 2026-11-15T06:05:09Z [decision] checkin: on-problems
 - 2026-11-15T06:05:10Z [stage] plan -> build
+- 2026-11-15T06:17:26Z [stop] sandbox-access: preflight size gate says split (comprehension: 550-900 lines, 30-50 min); readiness: 1 Blocker, 8 Major spec gaps in the grant-list and ledger contracts
