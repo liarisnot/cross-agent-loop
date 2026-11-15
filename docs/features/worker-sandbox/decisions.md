@@ -35,3 +35,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T00:17:27Z [decision] checkin: on-problems
 - 2026-11-15T00:17:28Z [stage] plan -> build
 - 2026-11-15T03:58:15Z [fix-up] kill-tree: 1 files, 1 lines — tree test also asserts the deepest (grandchild) pid is gone
+- 2026-11-15T05:38:12Z [fix-up] sandbox-core: 1 files, 12 lines — Sandbox.Tests.ps1 restores XAGENT_* env vars and unloads the module in AfterAll
