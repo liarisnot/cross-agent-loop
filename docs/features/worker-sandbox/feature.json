@@ -1,6 +1,6 @@
 {
   "name": "worker-sandbox",
-  "stage": "plan",
+  "stage": "build",
   "checkin": "on-problems",
   "designDoc": "docs/designs/worker-sandbox.md",
   "gates": {
