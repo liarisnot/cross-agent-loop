@@ -47,7 +47,9 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
    - **Review round 1 done (2026-11-14, consolidated preset, all 10 lenses first try in 24 min):** synthesis `docs/features/worker-sandbox/reviews/design-1.md` (8 Blockers, 30 Majors, Nits). Several items are author decisions (B3, B4, B5, B6, M1, M5, M8, M13, M31).
    - **Round 2 (re-audit of phases 7 and 9) done and resolved** (`design-2.md`, `resolution-2.md`). The design changed after round 1: one permanent AppContainer per reserved slot letter, a slot ledger, and per-run grants.
    - **Design locked 2026-11-14** at `6ca02a1`, the commit to freeze from (G6). The feature is in stage `plan`.
-   - **Next:** "plan it". Before phase 1, with the user's OK: `git worktree add --detach D:\cross-agent-loop.frozen 6ca02a1`, then point both skill junctions there. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
+   - **Plan approved 2026-11-14** after two plan-review rounds (`plan-1.md`, `plan-2.md`; round 3 was declined by the user). The plan has 5 phases and 7 tasks (`plan.md`), check-ins are on-problems, and the feature is in stage `build`.
+   - **Next:** before phase 1, with the user's OK: `git worktree add --detach D:\cross-agent-loop.frozen 6ca02a1`, then point both skill junctions at its `skills\delegate` and `skills\feature`.
+   - **Then:** build. Full-suite tasks run with `-TimeoutSec 2700` and verify with `-TimeoutSec 2400`. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
    - **Machine change made:** Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules` (the user ran it as admin).
 
 ## How to run a review lens
