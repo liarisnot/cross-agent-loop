@@ -38,3 +38,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T05:38:12Z [fix-up] sandbox-core: 1 files, 12 lines — Sandbox.Tests.ps1 restores XAGENT_* env vars and unloads the module in AfterAll
 - 2026-11-15T05:52:39Z [stage] build -> plan: apply the fixes, time estimate, split tasks and narrower acceptance test
 - 2026-11-15T06:01:43Z [dismiss] comprehension: TEST REPOS rule missing from sandbox-access — it creates no repo or worktree; its refusal test checks paths only
+- 2026-11-15T06:01:44Z [dismiss] comprehension: no per-task Describe filter for iterating — skills/delegate/tests runs in seconds, so the narrowed command is the iteration command
