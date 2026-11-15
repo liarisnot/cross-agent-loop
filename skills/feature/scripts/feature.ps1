@@ -1714,6 +1714,20 @@ function Test-ProcessStartTimeMatch {
     }
 }
 
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+    try {
+        $p = [Diagnostics.Process]::GetProcessById($ProcessId)
+    } catch [ArgumentException] {
+        return
+    }
+    try {
+        $p.Kill($true)
+    } catch [InvalidOperationException] {
+    }
+    $null = $p.WaitForExit(10000)
+}
+
 function Get-DelegateRunDirs {
     param([string]$Repository, [string]$DelegateTaskId)
     $runsRoot = Join-Path $Repository '.xagent/runs'
@@ -1803,7 +1817,7 @@ function Update-ReconcileInFlightTask {
             $parentLive = (Test-ProcessStartTimeMatch -ProcessId ([int]$obj.pid) -StartTime $obj.startTime)
         }
         if ($parentLive) { continue }
-        & taskkill.exe /T /F /PID $childPid 2>&1 | Out-Null
+        Stop-ProcessTree -ProcessId $childPid
         $orphanKilled = $true
     }
     $stdoutPath = Get-NewestStdoutJsonPath -Repository $Repository -DelegateTaskId $DelegateTaskId
@@ -2287,8 +2301,7 @@ exit `$LASTEXITCODE
         $waited = $proc.WaitForExit($TimeoutSec * 1000)
         if (-not $waited) {
             $timedOut = $true
-            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
-            $proc.WaitForExit(10000) | Out-Null
+            Stop-ProcessTree -ProcessId $proc.Id
             $exitCode = -1
         } else {
             $exitCode = $proc.ExitCode
@@ -2553,7 +2566,7 @@ function Invoke-DoctorCommand {
             -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
         $finished = $proc.WaitForExit($TimeoutSec * 1000)
         if (-not $finished) {
-            $null = Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/T', '/F', "/PID", $proc.Id) -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            Stop-ProcessTree -ProcessId $proc.Id
             return @{ exitCode = -1; output = ''; timedOut = $true }
         }
         $stdout = [IO.File]::ReadAllText($stdoutFile, [Text.UTF8Encoding]::new($false))
