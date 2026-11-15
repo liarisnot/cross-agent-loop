@@ -1,0 +1,795 @@
+#Requires -Version 7.0
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# Settings are fixed at import. Tests set XAGENT_SANDBOX_ROOT and XAGENT_CURSOR_ROOT first.
+$script:Root = if ($env:XAGENT_SANDBOX_ROOT) { $env:XAGENT_SANDBOX_ROOT } else { Join-Path $env:LOCALAPPDATA 'xagent' }
+$script:CursorRoot = if ($env:XAGENT_CURSOR_ROOT) { $env:XAGENT_CURSOR_ROOT } else { Join-Path $env:LOCALAPPDATA 'cursor-agent' }
+$script:ConfigPath = Join-Path $script:Root 'sandbox.json'
+$script:SandboxDir = Join-Path $script:Root 'sandbox'
+$script:CacheRoot = Join-Path $script:SandboxDir 'cursor'
+$script:IdleDir = Join-Path $script:SandboxDir 'idle'
+$script:MinimumBuild = 26300
+$script:VersionPattern = '^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$'
+# \\?\pipe\uv\%llu-%lu  and  \\?\pipe\LOCAL\%llu plus a null. The original terminator after these 20 bytes stays.
+$script:PipePattern = [byte[]](0x5C, 0x5C, 0x3F, 0x5C, 0x70, 0x69, 0x70, 0x65, 0x5C, 0x75, 0x76, 0x5C, 0x25, 0x6C, 0x6C, 0x75, 0x2D, 0x25, 0x6C, 0x75)
+$script:PipeReplacement = [byte[]](0x5C, 0x5C, 0x3F, 0x5C, 0x70, 0x69, 0x70, 0x65, 0x5C, 0x4C, 0x4F, 0x43, 0x41, 0x4C, 0x5C, 0x25, 0x6C, 0x6C, 0x75, 0x00)
+
+if (-not ('XagentSandbox' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'SandboxNative.cs')
+}
+
+function Parse-VersionString {
+    param(
+        [string]$versionString
+    )
+
+    # Split on '-' to remove the commit hash part
+    $datePart = $versionString.Split('-')[0]
+
+    # Split on '.' to get year, month, day
+    $parts = $datePart.Split('.')
+
+    # Ensure we have exactly 3 parts (year, month, day)
+    if ($parts.Length -ne 3) {
+        throw "Invalid version format. Expected format: YYYY.MM.DD-commit"
+    }
+
+    # Pad month and day to 2 digits if needed, then concatenate
+    $year = $parts[0]
+    $month = $parts[1].PadLeft(2, '0')
+    $day = $parts[2].PadLeft(2, '0')
+
+    # Return as integer for proper numeric comparison
+    return [int]($year + $month + $day)
+}
+
+function Get-ObjectProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
+function Resolve-SandboxPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
+
+function Test-SamePath([string]$Left, [string]$Right) {
+    return [string]::Equals((Resolve-SandboxPath $Left), (Resolve-SandboxPath $Right), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-SameHash([string]$Left, [string]$Right) {
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) { return $false }
+    return [string]::Equals($Left.Trim(), $Right.Trim(), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-SandboxFileHash([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $hash = $sha.ComputeHash($stream)
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-CursorVersionName([string]$CursorRoot) {
+    $versionsDir = Join-Path $CursorRoot 'versions'
+    if (-not (Test-Path -LiteralPath $versionsDir)) { return $null }
+    $dirs = @(Get-ChildItem -LiteralPath $versionsDir -Directory | Where-Object { $_.Name -match $script:VersionPattern })
+    if ($dirs.Count -eq 0) { return $null }
+    $picked = $dirs | Sort-Object { Parse-VersionString $_.Name } -Descending | Select-Object -First 1
+    return $picked.Name
+}
+
+function Get-VersionMissingMessage([string]$CursorRoot) {
+    $versionsDir = Join-Path $CursorRoot 'versions'
+    return "Cursor CLI not found at $versionsDir (no version folder matches)"
+}
+
+function ConvertTo-UvVersion([string]$Raw) {
+    $text = $Raw.Trim()
+    if (($text.StartsWith("'") -and $text.EndsWith("'")) -or ($text.StartsWith('"') -and $text.EndsWith('"'))) {
+        if ($text.Length -ge 2) { $text = $text.Substring(1, $text.Length - 2).Trim() }
+    }
+    $base = ($text -split '-', 2)[0].Trim()
+    if (-not $base) { throw 'no output' }
+    return [version]$base
+}
+
+function Test-UvAtLeast153([version]$Version) {
+    if ($Version.Major -gt 1) { return $true }
+    if ($Version.Major -lt 1) { return $false }
+    return ($Version.Minor -ge 53)
+}
+
+function Read-NodeUv([string]$NodeExe, [scriptblock]$UvProbe) {
+    $rawResult = $null
+    try {
+        $rawResult = & $UvProbe $NodeExe
+    } catch {
+        $reason = $_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($reason)) { $reason = 'no output' }
+        return @{ ok = $false; reason = $reason.Trim() }
+    }
+    if ($null -eq $rawResult) { return @{ ok = $false; reason = 'no output' } }
+    if ($rawResult -is [version]) {
+        return @{ ok = $true; raw = $rawResult.ToString(); version = [version]$rawResult }
+    }
+    $text = ((@($rawResult) | ForEach-Object { "$_" }) -join "`n").Trim()
+    if (-not $text) { return @{ ok = $false; reason = 'no output' } }
+    try {
+        $version = ConvertTo-UvVersion $text
+    } catch {
+        $reason = $_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($reason)) { $reason = 'no output' }
+        return @{ ok = $false; reason = $reason.Trim() }
+    }
+    return @{ ok = $true; raw = $text; version = $version }
+}
+
+function Invoke-DefaultUvProbe {
+    param([Parameter(Mandatory)][string]$NodeExe)
+    $id = [guid]::NewGuid().ToString('N')
+    $stdout = Join-Path ([IO.Path]::GetTempPath()) "xagent-uv-$id.out"
+    $stderr = Join-Path ([IO.Path]::GetTempPath()) "xagent-uv-$id.err"
+    $proc = $null
+    try {
+        $work = [IO.Path]::GetDirectoryName($NodeExe)
+        $proc = Start-Process -FilePath $NodeExe -ArgumentList @('-p', 'process.versions.uv') -WorkingDirectory $work -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
+        if (-not $proc.WaitForExit(5000)) {
+            try { $proc.Kill($true) } catch {}
+            try { $null = $proc.WaitForExit(2000) } catch {}
+            throw 'timed out after 5 s'
+        }
+        $text = ''
+        if (Test-Path -LiteralPath $stdout) { $text = [IO.File]::ReadAllText($stdout).Trim() }
+        if ($proc.ExitCode -ne 0) { throw "exit code $($proc.ExitCode)" }
+        if (-not $text) { throw 'no output' }
+        return $text
+    } finally {
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-PatternProblem([string]$Version, [int]$Count) {
+    return "Cursor ${Version}: node.exe pipe-name pattern found $Count times; Sandbox.psm1 needs an update (use -NoSandbox to run unsandboxed)"
+}
+
+function Get-PipePatternOffsets([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ,@() }
+    $found = [XagentSandbox]::FindFilePattern($Path, $script:PipePattern)
+    return ,$found
+}
+
+function Set-PipePattern([string]$Path, [int]$Offset) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    for ($i = 0; $i -lt $script:PipeReplacement.Length; $i++) {
+        $bytes[$Offset + $i] = $script:PipeReplacement[$i]
+    }
+    [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+function Write-PatchJson([string]$Directory, $Body) {
+    $json = ($Body | ConvertTo-Json -Depth 6) + "`n"
+    [IO.File]::WriteAllText((Join-Path $Directory 'patch.json'), $json, [Text.UTF8Encoding]::new($false))
+}
+
+function Remove-SandboxTree([string]$Path, [string]$Version) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    } catch {
+        throw "sandbox: Cursor ${Version}: cannot replace cache folder ${Path} (in use?): $($_.Exception.Message)"
+    }
+}
+
+function Test-CachedRuntime([string]$Dest, [string]$SourceNode) {
+    $patchPath = Join-Path $Dest 'patch.json'
+    $cachedNode = Join-Path $Dest 'node.exe'
+    if (-not (Test-Path -LiteralPath $patchPath) -or -not (Test-Path -LiteralPath $cachedNode)) { return $null }
+    try {
+        $patch = [IO.File]::ReadAllText($patchPath) | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    $cachedHash = Get-SandboxFileHash $cachedNode
+    $patchedFlag = [bool](Get-ObjectProperty $patch 'patched')
+    $uvText = [string](Get-ObjectProperty $patch 'uv')
+    if (-not $patchedFlag) {
+        try { $version = ConvertTo-UvVersion $uvText } catch { return $null }
+        if (-not (Test-UvAtLeast153 $version)) { return $null }
+        if (-not (Test-Path -LiteralPath $SourceNode)) { return $null }
+        $sourceHash = Get-SandboxFileHash $SourceNode
+        if (-not (Test-SameHash $cachedHash $sourceHash)) { return $null }
+        return @{ uv = $uvText; patched = $false }
+    }
+    $recorded = [string](Get-ObjectProperty $patch 'patchedSha256')
+    if (-not (Test-SameHash $cachedHash $recorded)) { return $null }
+    $sourceRecorded = Get-ObjectProperty $patch 'sourceSha256'
+    if ($sourceRecorded -is [string] -and -not [string]::IsNullOrWhiteSpace($sourceRecorded)) {
+        if (-not (Test-Path -LiteralPath $SourceNode)) { return $null }
+        $sourceHash = Get-SandboxFileHash $SourceNode
+        if (-not (Test-SameHash $sourceHash $sourceRecorded)) { return $null }
+    }
+    return @{ uv = $uvText; patched = $true }
+}
+
+function Get-LedgerRuntimeVersions([string]$SandboxDir) {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    if (-not (Test-Path -LiteralPath $SandboxDir)) { return $set }
+    foreach ($file in @(Get-ChildItem -LiteralPath $SandboxDir -Filter 'slot-?.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $obj = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        $value = Get-ObjectProperty $obj 'runtimeVersion'
+        if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) {
+            [void]$set.Add($value)
+        }
+    }
+    Write-Output -NoEnumerate $set
+}
+
+function Invoke-SandboxCachePrune([string]$CacheRoot, [string]$KeepVersion) {
+    $sandboxDir = Split-Path -Parent $CacheRoot
+    $partials = @(Get-ChildItem -LiteralPath $CacheRoot -Force -Directory -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name.EndsWith('.partial') -and $_.Name -ne ($KeepVersion + '.partial')
+    })
+    foreach ($dir in $partials) {
+        try {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+        } catch {
+            throw "sandbox: Cursor ${KeepVersion}: cannot prune runtime cache folder $($dir.FullName): $($_.Exception.Message)"
+        }
+    }
+
+    $ledger = Get-LedgerRuntimeVersions -SandboxDir $sandboxDir
+    $versions = @(Get-ChildItem -LiteralPath $CacheRoot -Force -Directory -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match $script:VersionPattern
+    })
+    $sorted = @($versions | Sort-Object { Parse-VersionString $_.Name } -Descending)
+    $keep = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    [void]$keep.Add($KeepVersion)
+    $take = [Math]::Min(2, $sorted.Count)
+    for ($i = 0; $i -lt $take; $i++) { [void]$keep.Add($sorted[$i].Name) }
+    for ($i = 0; $i -lt $sorted.Count; $i++) {
+        if ([string]::Equals($sorted[$i].Name, $KeepVersion, [StringComparison]::OrdinalIgnoreCase)) {
+            if (($i + 1) -lt $sorted.Count) { [void]$keep.Add($sorted[$i + 1].Name) }
+            break
+        }
+    }
+    foreach ($name in $ledger) { [void]$keep.Add($name) }
+    foreach ($dir in $versions) {
+        if ($keep.Contains($dir.Name)) { continue }
+        try {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+        } catch {
+            throw "sandbox: Cursor ${KeepVersion}: cannot prune runtime cache folder $($dir.FullName): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-SubstMap {
+    $map = @{}
+    $lines = @(& subst.exe 2>&1)
+    foreach ($line in $lines) {
+        $text = [string]$line
+        if ($text -match '^([A-Za-z]):\\: => (.*)$') {
+            $map[$Matches[1].ToUpperInvariant()] = $Matches[2].Trim()
+        }
+    }
+    return $map
+}
+
+function Get-DriveLetters {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+        if ($drive.Name) { [void]$set.Add($drive.Name.Substring(0, 1).ToUpperInvariant()) }
+    }
+    Write-Output -NoEnumerate $set
+}
+
+function Test-LetterFreeWithMap {
+    param([string]$Letter, $Map, $Drives)
+    $Letter = $Letter.Trim().ToUpperInvariant()
+    if ($Letter -notmatch '^[A-Z]$') { return 'used' }
+    if ($Map.ContainsKey($Letter)) {
+        return ('ours:' + (Resolve-SandboxPath $Map[$Letter]))
+    }
+    if ($Drives.Contains($Letter)) { return 'used' }
+    return 'free'
+}
+
+function Test-LetterFree {
+    param(
+        [Parameter(Mandatory)][string]$Letter
+    )
+    return Test-LetterFreeWithMap -Letter $Letter -Map (Get-SubstMap) -Drives (Get-DriveLetters)
+}
+
+function Test-OursTarget([string]$Status, [string]$Expected) {
+    if (-not $Status.StartsWith('ours:')) { return $false }
+    return (Test-SamePath $Status.Substring(5) $Expected)
+}
+
+function ConvertTo-LetterList($Raw) {
+    $list = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Raw) { return ,$list.ToArray() }
+    $items = if ($Raw -is [string]) { ,$Raw } else { @($Raw) }
+    foreach ($slot in $items) {
+        if ($null -eq $slot) { continue }
+        $text = ([string]$slot).Trim().ToUpperInvariant()
+        if ($text) { $list.Add($text) }
+    }
+    return ,$list.ToArray()
+}
+
+function Get-LettersShape($Letters) {
+    $runtime = $null
+    $slots = [string[]]::new(0)
+    $reserved = $false
+    if ($null -ne $Letters) {
+        $runtimeText = Get-ObjectProperty $Letters 'runtime'
+        if (-not [string]::IsNullOrWhiteSpace([string]$runtimeText)) {
+            $runtime = ([string]$runtimeText).Trim().ToUpperInvariant()
+            $reserved = $true
+        }
+        $slots = ConvertTo-LetterList (Get-ObjectProperty $Letters 'slots')
+        if ($slots.Count -gt 0) { $reserved = $true }
+    }
+    return @{ reserved = $reserved; runtime = $runtime; slots = $slots }
+}
+
+function Get-FreeLetterSuggestions {
+    $map = Get-SubstMap
+    $drives = Get-DriveLetters
+    $found = New-Object System.Collections.Generic.List[string]
+    for ($code = 90; $code -ge 68; $code--) {
+        $letter = [string][char]$code
+        if ((Test-LetterFreeWithMap -Letter $letter -Map $map -Drives $drives) -eq 'free') {
+            $found.Add($letter)
+            if ($found.Count -eq 3) { break }
+        }
+    }
+    Write-Output -NoEnumerate $found.ToArray()
+}
+
+function Invoke-SubstMap([string]$Letter, [string]$Target) {
+    $output = @(& subst.exe "${Letter}:" $Target 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $text = (@($output) | ForEach-Object { "$_" }) -join ' '
+        throw "sandbox: subst ${Letter}: failed ($text)"
+    }
+}
+
+function Test-LedgerProcessLive([string]$LedgerPath) {
+    if (-not (Test-Path -LiteralPath $LedgerPath)) { return $false }
+    try {
+        $obj = [IO.File]::ReadAllText($LedgerPath) | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+    $processIdText = Get-ObjectProperty $obj 'pid'
+    $start = Get-ObjectProperty $obj 'startTime'
+    if ($null -eq $processIdText -or $null -eq $start) { return $false }
+    $processId = 0
+    if (-not [int]::TryParse([string]$processIdText, [ref]$processId) -or $processId -le 0) { return $false }
+    try {
+        $proc = Get-Process -Id $processId -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    try {
+        $expected = if ($start -is [datetime]) { $start.ToUniversalTime() } else { ([datetime][string]$start).ToUniversalTime() }
+    } catch {
+        return $false
+    }
+    $delta = [Math]::Abs(($proc.StartTime.ToUniversalTime() - $expected).TotalSeconds)
+    return ($delta -lt 2)
+}
+
+function Get-ReservedLetterState {
+    param(
+        [string]$Letter,
+        [string]$Expected,
+        [string]$LedgerPath,
+        [bool]$Slot,
+        $Map,
+        $Drives
+    )
+    $status = Test-LetterFreeWithMap -Letter $Letter -Map $Map -Drives $Drives
+    if ($status -eq 'free') { return 'free' }
+    if ($status -eq 'used') { return 'used' }
+    $target = $status.Substring(5)
+    if (Test-SamePath $target $Expected) { return 'ours' }
+    if ($Slot -and (Test-LedgerProcessLive $LedgerPath)) { return 'busy' }
+    return 'used'
+}
+
+function Save-SandboxConfig($Config) {
+    $dir = Split-Path -Parent $script:ConfigPath
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $json = ($Config | ConvertTo-Json -Depth 30) + "`n"
+    [IO.File]::WriteAllText($script:ConfigPath, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function Resolve-SandboxCall {
+    param($Bound, [string]$CursorRoot, [string]$CacheRoot, [scriptblock]$UvProbe)
+    $cursor = $CursorRoot
+    if (-not $Bound.ContainsKey('CursorRoot') -or [string]::IsNullOrWhiteSpace($CursorRoot)) { $cursor = $script:CursorRoot }
+    $cache = $CacheRoot
+    if (-not $Bound.ContainsKey('CacheRoot') -or [string]::IsNullOrWhiteSpace($CacheRoot)) { $cache = $script:CacheRoot }
+    $probe = $UvProbe
+    if (-not $Bound.ContainsKey('UvProbe') -or $null -eq $UvProbe) { $probe = $script:DefaultUvProbe }
+    return @{
+        CursorRoot = $cursor
+        CacheRoot = [IO.Path]::GetFullPath($cache)
+        UvProbe = $probe
+    }
+}
+
+function New-EmptyLetters {
+    return @{
+        reserved = $false
+        runtime = $null
+        slots = [string[]]::new(0)
+        states = @{}
+    }
+}
+
+function New-SupportResult {
+    param(
+        [bool]$Ok,
+        [int]$Build,
+        $CursorVersion,
+        $Uv,
+        $PatternCount,
+        $Letters,
+        [AllowEmptyCollection()][string[]]$Problems
+    )
+    # An empty array assigned from if/pipeline output collapses to $null. Build it directly.
+    $storedProblems = New-Object string[] 0
+    if ($null -ne $Problems -and $Problems.Length -gt 0) {
+        $storedProblems = [string[]]$Problems
+    }
+    return @{
+        ok = $Ok
+        build = $Build
+        cursorVersion = $CursorVersion
+        uv = $Uv
+        patternCount = $PatternCount
+        letters = $Letters
+        problems = $storedProblems
+    }
+}
+
+function Get-SupportLetters([string]$CacheRoot, $Problems) {
+    $cacheFull = [IO.Path]::GetFullPath($CacheRoot)
+    $sandboxDir = Split-Path -Parent $cacheFull
+    $root = Split-Path -Parent $sandboxDir
+    $configPath = Join-Path $root 'sandbox.json'
+    $lettersObj = $null
+    if (Test-Path -LiteralPath $configPath) {
+        try {
+            $parsed = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
+            $lettersObj = Get-ObjectProperty $parsed 'letters'
+        } catch {
+            $Problems.Add("cannot read sandbox.json ($($_.Exception.Message))")
+            return New-EmptyLetters
+        }
+    }
+    $shape = Get-LettersShape $lettersObj
+    if (-not $shape.reserved) { return New-EmptyLetters }
+
+    $cursor = Join-Path $sandboxDir 'cursor'
+    $idle = Join-Path $sandboxDir 'idle'
+    $map = Get-SubstMap
+    $drives = Get-DriveLetters
+    $states = @{}
+    $entries = New-Object System.Collections.Generic.List[object]
+    if ($shape.runtime) {
+        $entries.Add([pscustomobject]@{ Letter = $shape.runtime; Expected = $cursor; Slot = $false })
+    }
+    foreach ($slot in @($shape.slots)) {
+        $entries.Add([pscustomobject]@{ Letter = $slot; Expected = $idle; Slot = $true })
+    }
+    foreach ($entry in $entries) {
+        $ledger = Join-Path $sandboxDir ("slot-$($entry.Letter).json")
+        $state = Get-ReservedLetterState -Letter $entry.Letter -Expected $entry.Expected -LedgerPath $ledger -Slot:([bool]$entry.Slot) -Map $map -Drives $drives
+        $states[$entry.Letter] = $state
+        if ($state -eq 'used') {
+            $Problems.Add("reserved letter $($entry.Letter): is used by another drive; choose new letters")
+        }
+    }
+    return @{
+        reserved = $true
+        runtime = $shape.runtime
+        slots = [string[]]$shape.slots
+        states = $states
+    }
+}
+
+function Get-WindowsBuild {
+    return [int][Environment]::OSVersion.Version.Build
+}
+
+$script:DefaultUvProbe = ${function:Invoke-DefaultUvProbe}
+
+function Test-SandboxSupport {
+    [CmdletBinding()]
+    param(
+        [string]$CursorRoot,
+        [string]$CacheRoot,
+        [scriptblock]$UvProbe
+    )
+    if ($env:XAGENT_SANDBOX_FORCE_FAIL) {
+        return (New-SupportResult -Ok $false -Build (Get-WindowsBuild) -CursorVersion $null -Uv $null -PatternCount $null -Letters (New-EmptyLetters) -Problems @('forced failure (XAGENT_SANDBOX_FORCE_FAIL)'))
+    }
+
+    $call = Resolve-SandboxCall -Bound $PSBoundParameters -CursorRoot $CursorRoot -CacheRoot $CacheRoot -UvProbe $UvProbe
+    $CursorRoot = $call.CursorRoot
+    $CacheRoot = $call.CacheRoot
+    $UvProbe = $call.UvProbe
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    $build = Get-WindowsBuild
+    if ($build -lt $script:MinimumBuild) {
+        $problems.Add("Windows build $build is older than $($script:MinimumBuild); the sandbox needs Windows 11 build $($script:MinimumBuild) or later")
+    }
+
+    $cursorVersion = $null
+    $uvRaw = $null
+    $patternCount = $null
+    $version = Get-CursorVersionName -CursorRoot $CursorRoot
+    if (-not $version) {
+        $problems.Add((Get-VersionMissingMessage $CursorRoot))
+    } else {
+        $cursorVersion = $version
+        $sourceNode = Join-Path (Join-Path (Join-Path $CursorRoot 'versions') $version) 'node.exe'
+        $uv = Read-NodeUv -NodeExe $sourceNode -UvProbe $UvProbe
+        if (-not $uv.ok) {
+            $problems.Add("Cursor ${version}: cannot read libuv version from node.exe ($($uv.reason))")
+        } else {
+            $uvRaw = [string]$uv.raw
+            if (Test-UvAtLeast153 $uv.version) {
+                $patternCount = $null
+            } else {
+                try {
+                    $offsets = Get-PipePatternOffsets -Path $sourceNode
+                    $patternCount = @($offsets).Count
+                } catch {
+                    $problems.Add("Cursor ${version}: cannot read node.exe ($($_.Exception.Message))")
+                    $patternCount = $null
+                }
+                if ($null -ne $patternCount -and $patternCount -ne 1) {
+                    $problems.Add((Get-PatternProblem -Version $version -Count $patternCount))
+                }
+            }
+        }
+    }
+
+    $letters = Get-SupportLetters -CacheRoot $CacheRoot -Problems $problems
+    # Read-list rules are phase 3.
+    return (New-SupportResult -Ok ($problems.Count -eq 0) -Build $build -CursorVersion $cursorVersion -Uv $uvRaw -PatternCount $patternCount -Letters $letters -Problems $problems.ToArray())
+}
+
+function Get-SandboxRuntime {
+    [CmdletBinding()]
+    param(
+        [string]$CursorRoot,
+        [string]$CacheRoot,
+        [scriptblock]$UvProbe
+    )
+    $call = Resolve-SandboxCall -Bound $PSBoundParameters -CursorRoot $CursorRoot -CacheRoot $CacheRoot -UvProbe $UvProbe
+    $CursorRoot = $call.CursorRoot
+    $CacheRoot = $call.CacheRoot
+    $UvProbe = $call.UvProbe
+
+    $version = Get-CursorVersionName -CursorRoot $CursorRoot
+    if (-not $version) { throw "sandbox: $(Get-VersionMissingMessage $CursorRoot)" }
+
+    $sourceDir = Join-Path (Join-Path $CursorRoot 'versions') $version
+    $sourceNode = Join-Path $sourceDir 'node.exe'
+    $dest = Join-Path $CacheRoot $version
+    $reuse = Test-CachedRuntime -Dest $dest -SourceNode $sourceNode
+    if ($null -ne $reuse) {
+        return @{
+            root = $CacheRoot
+            version = $version
+            uv = [string]$reuse.uv
+            patched = [bool]$reuse.patched
+        }
+    }
+
+    # Probe the source before any cache folder is deleted. A failure leaves the cache as it was.
+    $uv = Read-NodeUv -NodeExe $sourceNode -UvProbe $UvProbe
+    if (-not $uv.ok) {
+        throw "sandbox: Cursor ${version}: cannot read libuv version from node.exe ($($uv.reason))"
+    }
+    $needPatch = -not (Test-UvAtLeast153 $uv.version)
+    if ($needPatch) {
+        $offsets = Get-PipePatternOffsets -Path $sourceNode
+        if (@($offsets).Count -ne 1) {
+            throw "sandbox: $(Get-PatternProblem -Version $version -Count $(@($offsets).Count))"
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $CacheRoot)) {
+        New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+    }
+    $partial = Join-Path $CacheRoot ($version + '.partial')
+    Remove-SandboxTree -Path $dest -Version $version
+    Remove-SandboxTree -Path $partial -Version $version
+    try {
+        Copy-Item -LiteralPath $sourceDir -Destination $partial -Recurse -Force -ErrorAction Stop
+    } catch {
+        throw "sandbox: Cursor ${version}: copying to the runtime cache failed: $($_.Exception.Message)"
+    }
+
+    $patched = $false
+    if (-not $needPatch) {
+        Write-PatchJson -Directory $partial -Body ([ordered]@{ patched = $false; uv = [string]$uv.raw })
+    } else {
+        $copyNode = Join-Path $partial 'node.exe'
+        $copyOffsets = Get-PipePatternOffsets -Path $copyNode
+        if (@($copyOffsets).Count -ne 1) {
+            Remove-SandboxTree -Path $partial -Version $version
+            throw "sandbox: $(Get-PatternProblem -Version $version -Count $(@($copyOffsets).Count))"
+        }
+        $offset = [int]$copyOffsets[0]
+        $sourceHash = Get-SandboxFileHash $sourceNode
+        Set-PipePattern -Path $copyNode -Offset $offset
+        $patchedHash = Get-SandboxFileHash $copyNode
+        Write-PatchJson -Directory $partial -Body ([ordered]@{
+            patched = $true
+            offset = $offset
+            uv = [string]$uv.raw
+            sourceSha256 = $sourceHash
+            patchedSha256 = $patchedHash
+        })
+        $patched = $true
+    }
+
+    try {
+        Rename-Item -LiteralPath $partial -NewName $version -ErrorAction Stop
+    } catch {
+        throw "sandbox: Cursor ${version}: cannot replace cache folder ${dest} (in use?): $($_.Exception.Message)"
+    }
+    Invoke-SandboxCachePrune -CacheRoot $CacheRoot -KeepVersion $version
+    return @{
+        root = $CacheRoot
+        version = $version
+        uv = [string]$uv.raw
+        patched = $patched
+    }
+}
+
+function Get-SandboxConfig {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-Path -LiteralPath $script:ConfigPath)) {
+        return @{ letters = $null; read = @() }
+    }
+    try {
+        $text = [IO.File]::ReadAllText($script:ConfigPath)
+        $obj = $text | ConvertFrom-Json -AsHashtable
+    } catch {
+        throw "sandbox: cannot read sandbox.json ($($_.Exception.Message))"
+    }
+    if ($null -eq $obj) { return @{ letters = $null; read = @() } }
+    if (-not $obj.Contains('letters')) { $obj['letters'] = $null }
+    if (-not $obj.Contains('read') -or $null -eq $obj['read']) { $obj['read'] = @() }
+    return $obj
+}
+
+function Set-SandboxLetters {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Letters
+    )
+    $clean = @($Letters | ForEach-Object {
+        if ($null -eq $_) { '' } else { $_.Trim().ToUpperInvariant() }
+    })
+    $valid = ($clean.Count -eq 3)
+    if ($valid) {
+        $seen = @{}
+        foreach ($letter in $clean) {
+            if ($letter -notmatch '^[D-Z]$' -or $seen.ContainsKey($letter)) { $valid = $false; break }
+            $seen[$letter] = $true
+        }
+    }
+    if (-not $valid) { throw 'sandbox: -Reserve needs three distinct letters D-Z' }
+
+    $cfg = Get-SandboxConfig
+    $current = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
+    if ($current.reserved -and $current.runtime -eq $clean[0] -and @($current.slots).Count -eq 2 -and $current.slots[0] -eq $clean[1] -and $current.slots[1] -eq $clean[2]) {
+        $map = Get-SubstMap
+        $drives = Get-DriveLetters
+        $cursor = Join-Path $script:SandboxDir 'cursor'
+        $idle = Join-Path $script:SandboxDir 'idle'
+        $runtimeStatus = Test-LetterFreeWithMap -Letter $clean[0] -Map $map -Drives $drives
+        $slot1 = Test-LetterFreeWithMap -Letter $clean[1] -Map $map -Drives $drives
+        $slot2 = Test-LetterFreeWithMap -Letter $clean[2] -Map $map -Drives $drives
+        if ((Test-OursTarget $runtimeStatus $cursor) -and (Test-OursTarget $slot1 $idle) -and (Test-OursTarget $slot2 $idle)) {
+            return
+        }
+    }
+
+    $map = Get-SubstMap
+    $drives = Get-DriveLetters
+    foreach ($letter in $clean) {
+        $status = Test-LetterFreeWithMap -Letter $letter -Map $map -Drives $drives
+        if ($status -ne 'free') { throw "sandbox: letter ${letter}: is in use" }
+    }
+
+    $cursorDir = Join-Path $script:SandboxDir 'cursor'
+    $idleDir = Join-Path $script:SandboxDir 'idle'
+    New-Item -ItemType Directory -Force -Path $cursorDir, $idleDir | Out-Null
+    Invoke-SubstMap -Letter $clean[0] -Target $cursorDir
+    Invoke-SubstMap -Letter $clean[1] -Target $idleDir
+    Invoke-SubstMap -Letter $clean[2] -Target $idleDir
+    try {
+        [void][XagentSandbox]::EnsureProfile("xagent.slot-$($clean[1])")
+        [void][XagentSandbox]::EnsureProfile("xagent.slot-$($clean[2])")
+    } catch {
+        throw "sandbox: EnsureProfile failed: $($_.Exception.Message)"
+    }
+    $cfg['letters'] = @{ runtime = $clean[0]; slots = @($clean[1], $clean[2]) }
+    if ($null -eq (Get-ObjectProperty $cfg 'read')) { $cfg['read'] = @() }
+    Save-SandboxConfig $cfg
+}
+
+function Initialize-SandboxLetters {
+    [CmdletBinding()]
+    param()
+    $cfg = Get-SandboxConfig
+    $shape = Get-LettersShape (Get-ObjectProperty $cfg 'letters')
+    if (-not $shape.reserved) {
+        $suggested = @(Get-FreeLetterSuggestions)
+        if ($suggested.Count -eq 1 -and $suggested[0] -is [System.Array]) { $suggested = @($suggested[0]) }
+        if ($suggested.Count -lt 3) { throw 'sandbox: no drive letters reserved; not enough free letters D-Z' }
+        $a = $suggested[0]; $b = $suggested[1]; $c = $suggested[2]
+        throw "sandbox: no drive letters reserved; suggested: $a, $b, $c; ask the user, then run delegate.ps1 -SandboxCheck -Reserve $a,$b,$c -Repo <repo>"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$shape.runtime) -or @($shape.slots).Count -ne 2) {
+        throw 'sandbox: sandbox.json letters must be a runtime letter and two slots'
+    }
+
+    $map = Get-SubstMap
+    $drives = Get-DriveLetters
+    $cursorDir = Join-Path $script:SandboxDir 'cursor'
+    $idleDir = Join-Path $script:SandboxDir 'idle'
+    $plan = @(
+        [pscustomobject]@{ Letter = [string]$shape.runtime; Target = $cursorDir; Slot = $false }
+        [pscustomobject]@{ Letter = [string]$shape.slots[0]; Target = $idleDir; Slot = $true }
+        [pscustomobject]@{ Letter = [string]$shape.slots[1]; Target = $idleDir; Slot = $true }
+    )
+    foreach ($item in $plan) {
+        $ledger = Join-Path $script:SandboxDir ("slot-$($item.Letter).json")
+        $state = Get-ReservedLetterState -Letter $item.Letter -Expected $item.Target -LedgerPath $ledger -Slot:([bool]$item.Slot) -Map $map -Drives $drives
+        if ($state -eq 'used') {
+            throw "sandbox: reserved letter $($item.Letter): is used by another drive; choose new letters"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $cursorDir)) { New-Item -ItemType Directory -Force -Path $cursorDir | Out-Null }
+    if (-not (Test-Path -LiteralPath $idleDir)) { New-Item -ItemType Directory -Force -Path $idleDir | Out-Null }
+    foreach ($item in $plan) {
+        $ledger = Join-Path $script:SandboxDir ("slot-$($item.Letter).json")
+        $state = Get-ReservedLetterState -Letter $item.Letter -Expected $item.Target -LedgerPath $ledger -Slot:([bool]$item.Slot) -Map $map -Drives $drives
+        if ($state -eq 'free') { Invoke-SubstMap -Letter $item.Letter -Target $item.Target }
+    }
+}
+
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters
