@@ -59,3 +59,5 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T16:12:11Z [stop] sandbox-lifecycle: preflight size gate says split (comprehension, composer-2.5: 500-700 lines, 28-42 worker min); proposed: sandbox-run (3 functions + harness + worker-run test) and sandbox-run-checks (read-only, kill, unremovable-grant tests); readiness found 1 Blocker (Stop-SandboxRun with no run) and 6 Majors to pin
 - 2026-11-15T20:10:59Z [resume] user: split sandbox-lifecycle into sandbox-run and sandbox-run-checks ('yes, split it into those two')
 - 2026-11-15T20:11:00Z [stage] build -> plan: split sandbox-lifecycle into sandbox-run and sandbox-run-checks
+- 2026-11-15T20:30:46Z [gate] plan-approved: "approve plan"
+- 2026-11-15T20:30:46Z [decision] checkin: on-problems
