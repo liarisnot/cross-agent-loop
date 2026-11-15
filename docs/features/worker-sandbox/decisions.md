@@ -27,3 +27,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-14T21:44:57Z [stage] design-review -> plan
 - 2026-11-14T21:58:01Z [dismiss] comprehension cm1: check-in mode on-problems undefined in plan.md - generated line; defined in the feature skill, which is the reader's context for plan approval
 - 2026-11-15T00:13:41Z [decision] plan: sandbox: no-retry rule extended to signoff.md and design-review.md failed-reviewer ladder (found in plan review 2; design rule applies to every retry-once site)
+- 2026-11-15T00:13:42Z [dismiss] comprehension p2 cm1: junction target wording - lead step; design Machine setup gives per-skill paths
