@@ -223,15 +223,89 @@ function Test-CachedRuntime([string]$Dest, [string]$SourceNode) {
     return @{ uv = $uvText; patched = $true }
 }
 
+function Test-SandboxLedgerField($Ledger, [string]$Name) {
+    if ($null -eq $Ledger) { return $false }
+    if ($Ledger -is [System.Collections.IDictionary]) {
+        if (-not $Ledger.Contains($Name)) { return $false }
+        return $null -ne $Ledger[$Name]
+    }
+    $prop = $Ledger.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $false }
+    return $null -ne $prop.Value
+}
+
+function Copy-SandboxLedgerTable($Ledger) {
+    $table = [ordered]@{}
+    if ($Ledger -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Ledger.Keys)) {
+            $table[[string]$key] = $Ledger[$key]
+        }
+    } else {
+        foreach ($prop in @($Ledger.PSObject.Properties)) {
+            $table[$prop.Name] = $prop.Value
+        }
+    }
+    return $table
+}
+
+function Read-SandboxLedger {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try {
+        $obj = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if ($obj -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+    $grants = Get-ObjectProperty $obj 'grants'
+    if ($null -eq $grants) {
+        $items = @()
+    } else {
+        $items = @($grants)
+    }
+    $arr = New-Object object[] $items.Count
+    for ($i = 0; $i -lt $items.Count; $i++) { $arr[$i] = $items[$i] }
+    if ($null -eq $obj.PSObject.Properties['grants']) {
+        $obj | Add-Member -NotePropertyName 'grants' -NotePropertyValue $arr
+    } else {
+        $obj.PSObject.Properties['grants'].Value = $arr
+    }
+    return $obj
+}
+
+function Write-SandboxLedger {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Ledger
+    )
+    foreach ($name in @('slot', 'sid', 'pid', 'startTime', 'runtimeVersion', 'worktree', 'grants')) {
+        if (-not (Test-SandboxLedgerField $Ledger $name)) {
+            throw "sandbox: ledger is missing field '$name'"
+        }
+    }
+    $table = Copy-SandboxLedgerTable $Ledger
+    $start = $table['startTime']
+    if ($start -is [datetime]) {
+        $table['startTime'] = $start.ToUniversalTime().ToString('o')
+    }
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrEmpty($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $json = ($table | ConvertTo-Json -Depth 6) + "`n"
+    [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+}
+
 function Get-LedgerRuntimeVersions([string]$SandboxDir) {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     if (-not (Test-Path -LiteralPath $SandboxDir)) { return $set }
     foreach ($file in @(Get-ChildItem -LiteralPath $SandboxDir -Filter 'slot-?.json' -File -ErrorAction SilentlyContinue)) {
-        try {
-            $obj = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
-        } catch {
-            continue
-        }
+        $obj = Read-SandboxLedger -Path $file.FullName
+        if ($null -eq $obj) { continue }
         $value = Get-ObjectProperty $obj 'runtimeVersion'
         if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) {
             [void]$set.Add($value)
@@ -373,12 +447,8 @@ function Invoke-SubstMap([string]$Letter, [string]$Target) {
 }
 
 function Test-LedgerProcessLive([string]$LedgerPath) {
-    if (-not (Test-Path -LiteralPath $LedgerPath)) { return $false }
-    try {
-        $obj = [IO.File]::ReadAllText($LedgerPath) | ConvertFrom-Json
-    } catch {
-        return $false
-    }
+    $obj = Read-SandboxLedger -Path $LedgerPath
+    if ($null -eq $obj) { return $false }
     $processIdText = Get-ObjectProperty $obj 'pid'
     $start = Get-ObjectProperty $obj 'startTime'
     if ($null -eq $processIdText -or $null -eq $start) { return $false }
@@ -1005,4 +1075,188 @@ function Initialize-SandboxLetters {
     }
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters
+function Add-SandboxGrantRow($Rows, $Seen, [string]$Path, [string]$Spec) {
+    $full = Resolve-SandboxPath $Path
+    if ([string]::IsNullOrEmpty($full)) { return }
+    if ($Seen.Add($full + '|' + $Spec)) {
+        $Rows.Add([pscustomobject]@{ path = $full; spec = $Spec })
+    }
+}
+
+# Nearest parent first, stopping before the drive root. The drive root never gets a row.
+function Get-SandboxGrantAncestors([string]$Path) {
+    $list = New-Object System.Collections.Generic.List[string]
+    $full = Resolve-SandboxPath $Path
+    if (-not [string]::IsNullOrEmpty($full)) {
+        $current = [IO.Path]::GetDirectoryName($full)
+        while (-not [string]::IsNullOrEmpty($current)) {
+            $root = [IO.Path]::GetPathRoot($current)
+            if ([string]::IsNullOrEmpty($root)) { break }
+            if ([string]::Equals($current.TrimEnd('\', '/'), $root.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $list.Add((Resolve-SandboxPath $current))
+            $next = [IO.Path]::GetDirectoryName($current)
+            if ([string]::IsNullOrEmpty($next) -or [string]::Equals($next, $current, [StringComparison]::OrdinalIgnoreCase)) { break }
+            $current = $next
+        }
+    }
+    Write-Output -NoEnumerate $list.ToArray()
+}
+
+# Profile root first, then down to the entry's parent. Nothing above the profile root.
+function Get-SandboxProfileGrantChain([string]$EntryPath, [string]$ProfileRoot) {
+    $up = New-Object System.Collections.Generic.List[string]
+    $current = [IO.Path]::GetDirectoryName($EntryPath)
+    while (-not [string]::IsNullOrEmpty($current)) {
+        $norm = Resolve-SandboxPath $current
+        if (-not (Test-SandboxPathUnder $norm $ProfileRoot)) { break }
+        $up.Add($norm)
+        if ([string]::Equals($norm, $ProfileRoot, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $next = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrEmpty($next) -or [string]::Equals($next, $current, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $current = $next
+    }
+    $down = New-Object System.Collections.Generic.List[string]
+    for ($i = $up.Count - 1; $i -ge 0; $i--) { $down.Add($up[$i]) }
+    Write-Output -NoEnumerate $down.ToArray()
+}
+
+# One level, no -Recurse and no -FollowSymlink. worktrees is not a child grant.
+function Get-SandboxGitChildren([string]$GitDir) {
+    $sorted = New-Object System.Collections.Generic.List[System.IO.FileSystemInfo]
+    if (Test-Path -LiteralPath $GitDir -PathType Container) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $GitDir -Force)) {
+            $sorted.Add($child)
+        }
+        if ($sorted.Count -gt 1) {
+            $sorted.Sort([System.Comparison[System.IO.FileSystemInfo]]{
+                param($Left, $Right)
+                [StringComparer]::OrdinalIgnoreCase.Compare($Left.Name, $Right.Name)
+            })
+        }
+    }
+    Write-Output -NoEnumerate $sorted.ToArray()
+}
+
+function Get-SandboxGrantList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][AllowEmptyString()][AllowNull()][string]$WtName,
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$RuntimeVersion,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$ReadList,
+        [switch]$ReadOnly
+    )
+    if ([string]::IsNullOrEmpty($WtName) -or $WtName -eq '.' -or $WtName -eq '..' -or $WtName.Contains('\') -or $WtName.Contains('/')) {
+        throw "sandbox: invalid worktree name '$WtName'"
+    }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $worktreeSpec = if ($ReadOnly) { '(OI)(CI)RX' } else { '(OI)(CI)M' }
+    $worktreeFull = Resolve-SandboxPath $Worktree
+    Add-SandboxGrantRow $rows $seen $worktreeFull $worktreeSpec
+    Add-SandboxGrantRow $rows $seen (Join-Path $worktreeFull '.xagent\sandbox') '(OI)(CI)M'
+
+    $gitDir = Resolve-SandboxPath (Join-Path (Resolve-SandboxPath $Repo) '.git')
+    Add-SandboxGrantRow $rows $seen $gitDir 'RX'
+    $children = Get-SandboxGitChildren $gitDir
+    foreach ($child in $children) {
+        if ([string]::Equals($child.Name, 'worktrees', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $childSpec = if ($child.PSIsContainer) { '(OI)(CI)RX' } else { 'RX' }
+        Add-SandboxGrantRow $rows $seen $child.FullName $childSpec
+    }
+    Add-SandboxGrantRow $rows $seen (Join-Path $gitDir 'worktrees') 'RA'
+    Add-SandboxGrantRow $rows $seen (Join-Path $gitDir "worktrees\$WtName") '(OI)(CI)M'
+
+    $worktreeAncestors = Get-SandboxGrantAncestors $worktreeFull
+    foreach ($ancestor in $worktreeAncestors) {
+        Add-SandboxGrantRow $rows $seen $ancestor 'RA'
+    }
+    $gitAncestors = Get-SandboxGrantAncestors $gitDir
+    foreach ($ancestor in $gitAncestors) {
+        Add-SandboxGrantRow $rows $seen $ancestor 'RA'
+    }
+
+    $runtime = Resolve-SandboxPath $RuntimeRoot
+    $versionDir = Join-Path $runtime $RuntimeVersion
+    Add-SandboxGrantRow $rows $seen $runtime 'RA'
+    Add-SandboxGrantRow $rows $seen $versionDir '(OI)(CI)RX'
+    Add-SandboxGrantRow $rows $seen (Join-Path $versionDir '.running') '(OI)(CI)M'
+
+    if ($null -ne $ReadList) {
+        $profile = Get-SandboxProfileRoot
+        foreach ($entry in @($ReadList)) {
+            if ($null -eq $entry) { continue }
+            $raw = Get-ObjectProperty $entry 'path'
+            if ($null -eq $raw) { $raw = '' }
+            $entryPath = Resolve-SandboxPath ([string]$raw)
+            Add-SandboxGrantRow $rows $seen $entryPath '(OI)(CI)RX'
+            if ($profile -and (Test-SandboxPathUnder $entryPath $profile)) {
+                $chain = Get-SandboxProfileGrantChain $entryPath $profile
+                foreach ($ancestor in $chain) {
+                    Add-SandboxGrantRow $rows $seen $ancestor 'RA'
+                }
+            }
+        }
+    }
+    Write-Output -NoEnumerate $rows.ToArray()
+}
+
+function Format-SandboxIcaclsError($Output) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Output)) {
+        if ($null -eq $item) { continue }
+        $text = ([string]$item).Trim()
+        if ($text.Length -gt 0) { $lines.Add($text) }
+    }
+    if ($lines.Count -eq 0) { return '<no output>' }
+    return ($lines.ToArray() -join '; ')
+}
+
+function Remove-SandboxGrants {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Ledger
+    )
+    $none = New-Object object[] 0
+    if ($null -eq $Ledger) {
+        Write-Output -NoEnumerate $none
+        return
+    }
+    $grants = Get-ObjectProperty $Ledger 'grants'
+    $grantList = @()
+    if ($null -ne $grants) { $grantList = @($grants) }
+    if ($grantList.Count -eq 0) {
+        Write-Output -NoEnumerate $none
+        return
+    }
+    $sid = [string](Get-ObjectProperty $Ledger 'sid')
+    if ([string]::IsNullOrWhiteSpace($sid)) {
+        throw 'sandbox: ledger has no sid'
+    }
+    # No /T. A missing path is already gone, so it counts as removed.
+    $failed = New-Object System.Collections.Generic.List[object]
+    foreach ($grant in $grantList) {
+        $path = Get-ObjectProperty $grant 'path'
+        if ($null -eq $path) { continue }
+        $pathText = [string]$path
+        if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
+        if (-not (Test-Path -LiteralPath $pathText)) { continue }
+        $spec = Get-ObjectProperty $grant 'spec'
+        $output = @(& icacls.exe $pathText /remove ('*' + $sid) 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $failed.Add([pscustomobject]@{
+                path = $pathText
+                spec = $spec
+                error = (Format-SandboxIcaclsError $output)
+            })
+        }
+    }
+    Write-Output -NoEnumerate $failed.ToArray()
+}
+
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants
