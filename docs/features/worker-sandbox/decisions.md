@@ -54,3 +54,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T07:41:24Z [decision] checkin: on-problems
 - 2026-11-15T07:41:25Z [stage] plan -> build
 - 2026-11-15T07:47:13Z [dismiss] comprehension (sandbox-readlist preflight): acceptance runs all of skills/delegate/tests — that folder runs in ~3 s; settled in plan review 3
+- 2026-11-15T08:10:26Z [stop] sandbox-grants: preflight size gate says split, borderline (480-620 lines, 20-28 min; limit 20 min / 600 lines); readiness: no Blockers, fixes pinned in the task file
