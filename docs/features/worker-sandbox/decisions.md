@@ -72,3 +72,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T22:26:20Z [fix-up] sandbox-run-fns: 1 files, 7 lines — rename $home to $runHome in New-SandboxRun ($HOME is read-only; every real run threw after writing the ledger)
 - 2026-11-15T22:38:48Z [stop] sandbox-run-harness preflight: size split verdict (22-35 worker min, 260-380 lines); lead recommends no split (the proposed harness-only half has no test; recent actuals land at or below the low end: run-fns est 22-32, actual 17); acceptance-scope Major also flagged; readiness gaps pinned in the task file
 - 2026-11-15T22:42:56Z [resume] user: launch sandbox-run-harness as one task (cohesive unit; size verdict overridden by lead judgment)
+- 2026-11-15T23:13:09Z [dismiss] comprehension (sandbox-run-checks preflight): narrow the acceptance command — the full skills/delegate/tests run takes about 16 s and doubles as a regression check; the narrow filter is given for iterating
