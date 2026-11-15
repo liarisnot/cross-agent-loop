@@ -846,3 +846,579 @@ Describe 'read list and environment' {
         }
     }
 }
+
+Describe 'grant list and ledger' {
+    BeforeAll {
+        $script:GrantRoot = Join-Path $TestDrive 'grant-root'
+        $script:GrantCursor = Join-Path $TestDrive 'grant-cursor'
+        $env:XAGENT_SANDBOX_ROOT = $script:GrantRoot
+        $env:XAGENT_CURSOR_ROOT = $script:GrantCursor
+        New-Item -ItemType Directory -Force -Path $script:GrantRoot, $script:GrantCursor | Out-Null
+        Import-Module $script:ModulePath -Force
+
+        $script:GrantRepoParent = Join-Path $TestDrive 'grant-repos'
+        $script:GrantRepoName = 'widget'
+        $script:GrantRepo = Join-Path $script:GrantRepoParent $script:GrantRepoName
+        $script:GrantWorktree = Join-Path $script:GrantRepoParent ($script:GrantRepoName + '.xagent\task-1')
+        $script:GrantRuntime = Join-Path $TestDrive 'grant-runtime'
+        $script:GrantVersion = '2026.04.05-abc123'
+        $script:GrantWtName = 'wt-a'
+        $script:GrantReadEntry = Join-Path $TestDrive 'grant-read-tool'
+        $git = Join-Path $script:GrantRepo '.git'
+        foreach ($dir in @('objects', 'refs', 'info', 'hooks', 'logs', 'worktrees\wt-a', 'worktrees\wt-b')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $git $dir) | Out-Null
+        }
+        foreach ($file in @('config', 'HEAD', 'packed-refs')) {
+            Set-Content -LiteralPath (Join-Path $git $file) -Value 'x' -Encoding ascii
+        }
+        New-Item -ItemType Directory -Force -Path $script:GrantWorktree, (Join-Path $script:GrantRuntime $script:GrantVersion), $script:GrantReadEntry | Out-Null
+
+        function Resolve-GrantPath([string]$Path) {
+            if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+            return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        }
+
+        function Test-GrantUnder([string]$Candidate, [string]$Folder) {
+            if ([string]::IsNullOrEmpty($Candidate) -or [string]::IsNullOrEmpty($Folder)) { return $false }
+            if ([string]::Equals($Candidate, $Folder, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+            return $Candidate.StartsWith($Folder.TrimEnd('\', '/') + '\', [StringComparison]::OrdinalIgnoreCase)
+        }
+
+        function Get-GrantProfileRoot {
+            if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { return $null }
+            return [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\', '/')
+        }
+
+        function Get-GrantAncestors([string]$Path) {
+            $list = New-Object System.Collections.Generic.List[string]
+            $full = Resolve-GrantPath $Path
+            if (-not [string]::IsNullOrEmpty($full)) {
+                $current = [IO.Path]::GetDirectoryName($full)
+                while (-not [string]::IsNullOrEmpty($current)) {
+                    $root = [IO.Path]::GetPathRoot($current)
+                    if ([string]::IsNullOrEmpty($root)) { break }
+                    if ([string]::Equals($current.TrimEnd('\', '/'), $root.TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) { break }
+                    $list.Add((Resolve-GrantPath $current))
+                    $next = [IO.Path]::GetDirectoryName($current)
+                    if ([string]::IsNullOrEmpty($next) -or [string]::Equals($next, $current, [StringComparison]::OrdinalIgnoreCase)) { break }
+                    $current = $next
+                }
+            }
+            foreach ($item in $list) { $item }
+        }
+
+        function Get-ProfileGrantChain([string]$EntryPath, [string]$ProfileRoot) {
+            $up = New-Object System.Collections.Generic.List[string]
+            $current = [IO.Path]::GetDirectoryName($EntryPath)
+            while (-not [string]::IsNullOrEmpty($current)) {
+                $norm = Resolve-GrantPath $current
+                if (-not (Test-GrantUnder $norm $ProfileRoot)) { break }
+                $up.Add($norm)
+                if ([string]::Equals($norm, $ProfileRoot, [StringComparison]::OrdinalIgnoreCase)) { break }
+                $next = [IO.Path]::GetDirectoryName($current)
+                if ([string]::IsNullOrEmpty($next) -or [string]::Equals($next, $current, [StringComparison]::OrdinalIgnoreCase)) { break }
+                $current = $next
+            }
+            for ($i = $up.Count - 1; $i -ge 0; $i--) { $up[$i] }
+        }
+
+        function Add-ExpectedGrant($Rows, $Seen, [string]$Path, [string]$Spec) {
+            $full = Resolve-GrantPath $Path
+            if ([string]::IsNullOrEmpty($full)) { return }
+            if ($Seen.Add($full + '|' + $Spec)) {
+                $Rows.Add([pscustomobject]@{ path = $full; spec = $Spec })
+            }
+        }
+
+        function New-ExpectedGrantRows {
+            param(
+                [string]$Repo,
+                [string]$Worktree,
+                [string]$WtName,
+                [string]$RuntimeRoot,
+                [string]$RuntimeVersion,
+                $ReadList,
+                [switch]$ReadOnly
+            )
+            $rows = New-Object System.Collections.Generic.List[object]
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            $worktreeSpec = if ($ReadOnly) { '(OI)(CI)RX' } else { '(OI)(CI)M' }
+            $worktreeFull = Resolve-GrantPath $Worktree
+            Add-ExpectedGrant $rows $seen $worktreeFull $worktreeSpec
+            Add-ExpectedGrant $rows $seen (Join-Path $worktreeFull '.xagent\sandbox') '(OI)(CI)M'
+
+            $gitDir = Resolve-GrantPath (Join-Path (Resolve-GrantPath $Repo) '.git')
+            Add-ExpectedGrant $rows $seen $gitDir 'RX'
+            if (Test-Path -LiteralPath $gitDir -PathType Container) {
+                $sorted = New-Object System.Collections.Generic.List[System.IO.FileSystemInfo]
+                foreach ($child in @(Get-ChildItem -LiteralPath $gitDir -Force)) { $sorted.Add($child) }
+                if ($sorted.Count -gt 1) {
+                    $sorted.Sort([System.Comparison[System.IO.FileSystemInfo]]{
+                        param($Left, $Right)
+                        [StringComparer]::OrdinalIgnoreCase.Compare($Left.Name, $Right.Name)
+                    })
+                }
+                foreach ($child in $sorted) {
+                    if ([string]::Equals($child.Name, 'worktrees', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    $childSpec = if ($child.PSIsContainer) { '(OI)(CI)RX' } else { 'RX' }
+                    Add-ExpectedGrant $rows $seen $child.FullName $childSpec
+                }
+            }
+            Add-ExpectedGrant $rows $seen (Join-Path $gitDir 'worktrees') 'RA'
+            Add-ExpectedGrant $rows $seen (Join-Path $gitDir "worktrees\$WtName") '(OI)(CI)M'
+            foreach ($ancestor in @(Get-GrantAncestors $worktreeFull)) { Add-ExpectedGrant $rows $seen $ancestor 'RA' }
+            foreach ($ancestor in @(Get-GrantAncestors $gitDir)) { Add-ExpectedGrant $rows $seen $ancestor 'RA' }
+
+            $runtime = Resolve-GrantPath $RuntimeRoot
+            $versionDir = Join-Path $runtime $RuntimeVersion
+            Add-ExpectedGrant $rows $seen $runtime 'RA'
+            Add-ExpectedGrant $rows $seen $versionDir '(OI)(CI)RX'
+            Add-ExpectedGrant $rows $seen (Join-Path $versionDir '.running') '(OI)(CI)M'
+
+            if ($null -ne $ReadList) {
+                $profile = Get-GrantProfileRoot
+                foreach ($entry in @($ReadList)) {
+                    if ($null -eq $entry) { continue }
+                    $raw = $entry.path
+                    if ($null -eq $raw) { $raw = '' }
+                    $entryPath = Resolve-GrantPath ([string]$raw)
+                    Add-ExpectedGrant $rows $seen $entryPath '(OI)(CI)RX'
+                    if ($profile -and (Test-GrantUnder $entryPath $profile)) {
+                        foreach ($ancestor in @(Get-ProfileGrantChain $entryPath $profile)) {
+                            Add-ExpectedGrant $rows $seen $ancestor 'RA'
+                        }
+                    }
+                }
+            }
+            return ,$rows.ToArray()
+        }
+
+        function Format-GrantRows($Rows) {
+            foreach ($row in @($Rows)) { '{0} | {1}' -f $row.path, $row.spec }
+        }
+    }
+
+    AfterAll {
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+        Import-Module $script:ModulePath -Force
+    }
+
+    It 'lists every worker grant and changes only the worktree spec for a read-only run' {
+        $under = InModuleScope Sandbox -Parameters @{ Path = [string]$TestDrive } {
+            param($Path)
+            $profile = Get-SandboxProfileRoot
+            if (-not $profile) { return $false }
+            Test-SandboxPathUnder (Resolve-SandboxPath $Path) $profile
+        }
+        if (-not $under) { Set-ItResult -Skipped -Because 'TestDrive not under the user profile'; return }
+
+        $packed = InModuleScope Sandbox -Parameters @{
+            Repo = $script:GrantRepo
+            Worktree = $script:GrantWorktree
+            WtName = $script:GrantWtName
+            RuntimeRoot = $script:GrantRuntime
+            RuntimeVersion = $script:GrantVersion
+            ReadEntry = $script:GrantReadEntry
+        } {
+            param($Repo, $Worktree, $WtName, $RuntimeRoot, $RuntimeVersion, $ReadEntry)
+            $read = Test-SandboxReadList -Entries @([pscustomobject]@{ path = $ReadEntry })
+            $worker = Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName $WtName -RuntimeRoot $RuntimeRoot -RuntimeVersion $RuntimeVersion -ReadList $read
+            $readOnly = Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName $WtName -RuntimeRoot $RuntimeRoot -RuntimeVersion $RuntimeVersion -ReadList $read -ReadOnly
+            [pscustomobject]@{ Read = $read; Worker = $worker; ReadOnly = $readOnly }
+        }
+        $readEntries = @($packed.Read)
+        $workerRows = @($packed.Worker)
+        $readOnlyRows = @($packed.ReadOnly)
+        $expected = New-ExpectedGrantRows -Repo $script:GrantRepo -Worktree $script:GrantWorktree -WtName $script:GrantWtName -RuntimeRoot $script:GrantRuntime -RuntimeVersion $script:GrantVersion -ReadList $readEntries
+        $expectedReadOnly = New-ExpectedGrantRows -Repo $script:GrantRepo -Worktree $script:GrantWorktree -WtName $script:GrantWtName -RuntimeRoot $script:GrantRuntime -RuntimeVersion $script:GrantVersion -ReadList $readEntries -ReadOnly
+        @(Format-GrantRows $workerRows) | Should -Be @(Format-GrantRows $expected)
+        @(Format-GrantRows $readOnlyRows) | Should -Be @(Format-GrantRows $expectedReadOnly)
+
+        $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($row in $workerRows) {
+            $keys.Add($row.path + '|' + $row.spec) | Should -BeTrue -Because "$($row.path) $($row.spec)"
+        }
+
+        $worktreePath = Resolve-GrantPath $script:GrantWorktree
+        $changed = 0
+        $workerRows.Count | Should -Be $readOnlyRows.Count
+        for ($i = 0; $i -lt $workerRows.Count; $i++) {
+            $readOnlyRows[$i].path | Should -Be $workerRows[$i].path
+            if ([string]::Equals($workerRows[$i].path, $worktreePath, [StringComparison]::OrdinalIgnoreCase)) {
+                $workerRows[$i].spec | Should -Be '(OI)(CI)M'
+                $readOnlyRows[$i].spec | Should -Be '(OI)(CI)RX'
+                $changed++
+            } else {
+                $readOnlyRows[$i].spec | Should -Be $workerRows[$i].spec
+            }
+        }
+        $changed | Should -Be 1
+
+        $gitDir = Resolve-GrantPath (Join-Path $script:GrantRepo '.git')
+        foreach ($child in @(Get-ChildItem -LiteralPath $gitDir -Force)) {
+            if ([string]::Equals($child.Name, 'worktrees', [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $childPath = Resolve-GrantPath $child.FullName
+            $spec = if ($child.PSIsContainer) { '(OI)(CI)RX' } else { 'RX' }
+            $hits = @($workerRows | Where-Object { [string]::Equals($_.path, $childPath, [StringComparison]::OrdinalIgnoreCase) -and $_.spec -eq $spec })
+            $hits.Count | Should -Be 1 -Because $child.Name
+        }
+        $wtb = Resolve-GrantPath (Join-Path $gitDir 'worktrees\wt-b')
+        @($workerRows | Where-Object { [string]::Equals($_.path, $wtb, [StringComparison]::OrdinalIgnoreCase) -or $_.path.StartsWith($wtb + '\', [StringComparison]::OrdinalIgnoreCase) }).Count | Should -Be 0
+        $wta = Resolve-GrantPath (Join-Path $gitDir 'worktrees\wt-a')
+        $wta | Should -Be (Resolve-GrantPath (Join-Path $script:GrantRepo '.git\worktrees\wt-a'))
+        $wtaHits = @($workerRows | Where-Object { [string]::Equals($_.path, $wta, [StringComparison]::OrdinalIgnoreCase) })
+        $wtaHits.Count | Should -Be 1
+        $wtaHits[0].spec | Should -Be '(OI)(CI)M'
+
+        $ancestorPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($ancestor in @(Get-GrantAncestors $worktreePath)) { [void]$ancestorPaths.Add($ancestor) }
+        foreach ($ancestor in @(Get-GrantAncestors $gitDir)) { [void]$ancestorPaths.Add($ancestor) }
+        foreach ($ancestor in $ancestorPaths) {
+            $hits = @($workerRows | Where-Object { $_.spec -eq 'RA' -and [string]::Equals($_.path, $ancestor, [StringComparison]::OrdinalIgnoreCase) })
+            $hits.Count | Should -Be 1 -Because $ancestor
+        }
+        $drive = [IO.Path]::GetPathRoot($worktreePath)
+        $workerRows.path | Should -Not -Contain $drive.TrimEnd('\', '/')
+        $workerRows.path | Should -Not -Contain $drive
+
+        $profile = Get-GrantProfileRoot
+        $entryPath = Resolve-GrantPath ([string]$readEntries[0].path)
+        $chain = @(Get-ProfileGrantChain $entryPath $profile)
+        $chain.Count | Should -BeGreaterThan 0
+        $chain[0] | Should -Be $profile
+        foreach ($ancestor in $chain) {
+            $hits = @($workerRows | Where-Object { $_.spec -eq 'RA' -and [string]::Equals($_.path, $ancestor, [StringComparison]::OrdinalIgnoreCase) })
+            $hits.Count | Should -Be 1 -Because "read-list ancestor $ancestor"
+        }
+        $entryHits = @($workerRows | Where-Object { $_.spec -eq '(OI)(CI)RX' -and [string]::Equals($_.path, $entryPath, [StringComparison]::OrdinalIgnoreCase) })
+        $entryHits.Count | Should -Be 1
+    }
+
+    It 'rejects a worktree name that is not a leaf' {
+        foreach ($name in @('', '.', '..', 'a\b', 'a/b')) {
+            $message = InModuleScope Sandbox -Parameters @{ Name = $name } {
+                param($Name)
+                try {
+                    Get-SandboxGrantList -Repo 'D:\repo' -Worktree 'D:\wt' -WtName $Name -RuntimeRoot 'D:\rt' -RuntimeVersion 'v' -ReadList $null | Out-Null
+                    return $null
+                } catch {
+                    return $_.Exception.Message
+                }
+            }
+            $message | Should -Be "sandbox: invalid worktree name '$name'"
+        }
+    }
+
+    It 'treats a null or empty read list alike and grants an empty .git' {
+        $bare = InModuleScope Sandbox -Parameters @{
+            Repo = $script:GrantRepo
+            Worktree = $script:GrantWorktree
+            WtName = $script:GrantWtName
+            RuntimeRoot = $script:GrantRuntime
+            RuntimeVersion = $script:GrantVersion
+        } {
+            param($Repo, $Worktree, $WtName, $RuntimeRoot, $RuntimeVersion)
+            $fromNull = Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName $WtName -RuntimeRoot $RuntimeRoot -RuntimeVersion $RuntimeVersion -ReadList $null
+            $fromEmpty = Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName $WtName -RuntimeRoot $RuntimeRoot -RuntimeVersion $RuntimeVersion -ReadList @()
+            [pscustomobject]@{ FromNull = $fromNull; FromEmpty = $fromEmpty }
+        }
+        $expected = New-ExpectedGrantRows -Repo $script:GrantRepo -Worktree $script:GrantWorktree -WtName $script:GrantWtName -RuntimeRoot $script:GrantRuntime -RuntimeVersion $script:GrantVersion -ReadList $null
+        @(Format-GrantRows $bare.FromNull) | Should -Be @(Format-GrantRows $expected)
+        @(Format-GrantRows $bare.FromEmpty) | Should -Be @(Format-GrantRows $expected)
+        $readPath = Resolve-GrantPath $script:GrantReadEntry
+        @($bare.FromNull).path | Should -Not -Contain $readPath
+        @($bare.FromEmpty).path | Should -Not -Contain $readPath
+
+        $parent = Join-Path $TestDrive 'empty-git-parent'
+        $repo = Join-Path $parent 'emptyrepo'
+        $worktree = Join-Path $parent 'emptyrepo.xagent\task-1'
+        $runtime = Join-Path $TestDrive 'empty-runtime'
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo '.git'), $worktree, (Join-Path $runtime 'ver') | Out-Null
+        $got = InModuleScope Sandbox -Parameters @{
+            Repo = $repo
+            Worktree = $worktree
+            RuntimeRoot = $runtime
+        } {
+            param($Repo, $Worktree, $RuntimeRoot)
+            Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName 'wt-a' -RuntimeRoot $RuntimeRoot -RuntimeVersion 'ver' -ReadList @()
+        }
+        $expectedEmpty = New-ExpectedGrantRows -Repo $repo -Worktree $worktree -WtName 'wt-a' -RuntimeRoot $runtime -RuntimeVersion 'ver' -ReadList @()
+        @(Format-GrantRows $got) | Should -Be @(Format-GrantRows $expectedEmpty)
+        $gitDir = Resolve-GrantPath (Join-Path $repo '.git')
+        $under = @($got | Where-Object { $_.path.StartsWith($gitDir + '\', [StringComparison]::OrdinalIgnoreCase) })
+        @(Format-GrantRows $under) | Should -Be @(
+            ((Resolve-GrantPath (Join-Path $gitDir 'worktrees')) + ' | RA')
+            ((Resolve-GrantPath (Join-Path $gitDir 'worktrees\wt-a')) + ' | (OI)(CI)M')
+        )
+        @($got | Where-Object { [string]::Equals($_.path, $gitDir, [StringComparison]::OrdinalIgnoreCase) }).spec | Should -Be 'RX'
+    }
+
+    It 'round-trips the slot ledger for liveness and runtime version' {
+        $sandboxDir = Join-Path $script:GrantRoot 'sandbox'
+        if (Test-Path -LiteralPath $sandboxDir) { Remove-Item -LiteralPath $sandboxDir -Recurse -Force }
+        $ledgerPath = Join-Path $sandboxDir 'slot-S.json'
+        $packed = InModuleScope Sandbox -Parameters @{
+            Path = $ledgerPath
+            Worktree = $script:GrantWorktree
+            Version = $script:GrantVersion
+        } {
+            param($Path, $Worktree, $Version)
+            $parent = Split-Path -Parent $Path
+            $parentExisted = Test-Path -LiteralPath $parent
+            $start = (Get-Process -Id $PID).StartTime
+            $one = [ordered]@{
+                slot = 'S'
+                sid = 'S-1-15-2-1'
+                pid = $PID
+                startTime = $start
+                runtimeVersion = $Version
+                worktree = $Worktree
+                grants = @([pscustomobject]@{ path = 'D:\one'; spec = 'RX' })
+                note = 'kept'
+            }
+            Write-SandboxLedger -Path $Path -Ledger $one
+            $read = Read-SandboxLedger -Path $Path
+            $text = [IO.File]::ReadAllText($Path)
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            $none = [pscustomobject]@{
+                slot = 'S'
+                sid = 'S-1-15-2-1'
+                pid = $PID
+                startTime = $start
+                runtimeVersion = $Version
+                worktree = $Worktree
+                grants = @()
+                extra = 'object'
+            }
+            $none.PSObject.Properties['grants'].Value = New-Object object[] 0
+            $nonePath = Join-Path $parent 'slot-T.json'
+            Write-SandboxLedger -Path $nonePath -Ledger $none
+            $readNone = Read-SandboxLedger -Path $nonePath
+            [pscustomobject]@{
+                ParentExisted = $parentExisted
+                Stamp = $start.ToUniversalTime().ToString('o')
+                Read = $read
+                None = $readNone
+                Text = $text
+                Bom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+                Live = (Test-LedgerProcessLive -LedgerPath $Path)
+                Versions = (Get-LedgerRuntimeVersions -SandboxDir $parent)
+            }
+        }
+        $packed.ParentExisted | Should -BeFalse
+        $packed.Bom | Should -BeFalse
+        $packed.Text.EndsWith("`n") | Should -BeTrue
+        $packed.Text | Should -Match ([regex]::Escape($packed.Stamp))
+        $packed.Read.slot | Should -Be 'S'
+        $packed.Read.sid | Should -Be 'S-1-15-2-1'
+        $packed.Read.pid | Should -Be $PID
+        $packed.Read.runtimeVersion | Should -Be $script:GrantVersion
+        $packed.Read.worktree | Should -Be $script:GrantWorktree
+        $packed.Read.note | Should -Be 'kept'
+        $packed.Read.grants -is [System.Array] | Should -BeTrue
+        @($packed.Read.grants).Count | Should -Be 1
+        $packed.Read.grants[0].path | Should -Be 'D:\one'
+        $packed.Read.grants[0].spec | Should -Be 'RX'
+        $gotStamp = if ($packed.Read.startTime -is [datetime]) {
+            $packed.Read.startTime.ToUniversalTime().ToString('o')
+        } else {
+            ([datetime][string]$packed.Read.startTime).ToUniversalTime().ToString('o')
+        }
+        $gotStamp | Should -Be $packed.Stamp
+        $packed.None.grants -is [System.Array] | Should -BeTrue
+        @($packed.None.grants).Count | Should -Be 0
+        $packed.None.extra | Should -Be 'object'
+        $packed.Live | Should -BeTrue
+        @($packed.Versions) | Should -Contain $script:GrantVersion
+    }
+
+    It 'names the first missing ledger field and does not write the file' {
+        $path = Join-Path $TestDrive 'missing-field\slot-S.json'
+        $message = InModuleScope Sandbox -Parameters @{ Path = $path } {
+            param($Path)
+            $ledger = @{
+                sid = 'S-1-15-2-1'
+                pid = 1
+                startTime = [datetime]::UtcNow
+                runtimeVersion = 'v'
+                worktree = 'D:\wt'
+            }
+            try {
+                Write-SandboxLedger -Path $Path -Ledger $ledger
+                return $null
+            } catch {
+                return $_.Exception.Message
+            }
+        }
+        $message | Should -Be "sandbox: ledger is missing field 'slot'"
+        Test-Path -LiteralPath $path | Should -BeFalse
+
+        $later = Join-Path $TestDrive 'missing-later\slot-S.json'
+        $laterMessage = InModuleScope Sandbox -Parameters @{ Path = $later } {
+            param($Path)
+            $ledger = @{
+                slot = 'S'
+                sid = 'S-1-15-2-1'
+                pid = 1
+                worktree = 'D:\wt'
+                grants = @()
+            }
+            try {
+                Write-SandboxLedger -Path $Path -Ledger $ledger
+                return $null
+            } catch {
+                return $_.Exception.Message
+            }
+        }
+        $laterMessage | Should -Be "sandbox: ledger is missing field 'startTime'"
+        Test-Path -LiteralPath $later | Should -BeFalse
+    }
+
+    It 'returns null for a missing or broken ledger and forces grants to an array' {
+        $missing = InModuleScope Sandbox -Parameters @{ Path = (Join-Path $TestDrive 'no-such-ledger.json') } {
+            param($Path)
+            Read-SandboxLedger -Path $Path
+        }
+        $missing | Should -BeNullOrEmpty
+        $brokenPath = Join-Path $TestDrive 'broken-ledger.json'
+        [IO.File]::WriteAllText($brokenPath, '{')
+        $broken = InModuleScope Sandbox -Parameters @{ Path = $brokenPath } {
+            param($Path)
+            Read-SandboxLedger -Path $Path
+        }
+        $broken | Should -BeNullOrEmpty
+
+        $singlePath = Join-Path $TestDrive 'single-grant.json'
+        $singleJson = @"
+{
+  "slot": "S",
+  "sid": "S-1-5-18",
+  "pid": 4,
+  "startTime": "2026-01-02T03:04:05.0000000Z",
+  "runtimeVersion": "v",
+  "worktree": "D:\\wt",
+  "note": "solo",
+  "grants": { "path": "D:\\a", "spec": "RX" }
+}
+"@
+        [IO.File]::WriteAllText($singlePath, $singleJson, [Text.UTF8Encoding]::new($false))
+        $absentPath = Join-Path $TestDrive 'absent-grants.json'
+        [IO.File]::WriteAllText($absentPath, '{"slot":"S","sid":"S-1-5-18","pid":4,"startTime":"2026-01-02T03:04:05.0000000Z","runtimeVersion":"v","worktree":"D:\\wt"}', [Text.UTF8Encoding]::new($false))
+        $nullPath = Join-Path $TestDrive 'null-grants.json'
+        [IO.File]::WriteAllText($nullPath, '{"slot":"S","sid":"S-1-5-18","pid":4,"startTime":"2026-01-02T03:04:05.0000000Z","runtimeVersion":"v","worktree":"D:\\wt","grants":null}', [Text.UTF8Encoding]::new($false))
+        $parsed = InModuleScope Sandbox -Parameters @{ Single = $singlePath; Absent = $absentPath; NullGrants = $nullPath } {
+            param($Single, $Absent, $NullGrants)
+            [pscustomobject]@{
+                Single = Read-SandboxLedger -Path $Single
+                Absent = Read-SandboxLedger -Path $Absent
+                NullGrants = Read-SandboxLedger -Path $NullGrants
+            }
+        }
+        $parsed.Single.grants -is [System.Array] | Should -BeTrue
+        @($parsed.Single.grants).Count | Should -Be 1
+        $parsed.Single.grants[0].path | Should -Be 'D:\a'
+        $parsed.Single.grants[0].spec | Should -Be 'RX'
+        $parsed.Single.note | Should -Be 'solo'
+        $parsed.Single.slot | Should -Be 'S'
+        $parsed.Absent.grants -is [System.Array] | Should -BeTrue
+        @($parsed.Absent.grants).Count | Should -Be 0
+        $parsed.Absent.worktree | Should -Be 'D:\wt'
+        $parsed.NullGrants.grants -is [System.Array] | Should -BeTrue
+        @($parsed.NullGrants.grants).Count | Should -Be 0
+    }
+
+    It 'returns no failures when there is nothing to remove' {
+        $packed = InModuleScope Sandbox {
+            $thrown = $null
+            try {
+                Remove-SandboxGrants -Ledger ([pscustomobject]@{
+                    sid = ''
+                    grants = @([pscustomobject]@{ path = 'D:\a'; spec = 'R' })
+                }) | Out-Null
+            } catch {
+                $thrown = $_.Exception.Message
+            }
+            $nullResult = Remove-SandboxGrants -Ledger $null
+            $empty = Remove-SandboxGrants -Ledger ([pscustomobject]@{ sid = ''; grants = @() })
+            $missing = Remove-SandboxGrants -Ledger ([pscustomobject]@{ sid = 'S-1-5-18' })
+            [pscustomobject]@{
+                NullCount = $(if ($null -eq $nullResult) { -1 } else { @($nullResult).Count })
+                EmptyCount = $(if ($null -eq $empty) { -1 } else { @($empty).Count })
+                MissingCount = $(if ($null -eq $missing) { -1 } else { @($missing).Count })
+                Thrown = $thrown
+            }
+        }
+        $packed.NullCount | Should -Be 0
+        $packed.EmptyCount | Should -Be 0
+        $packed.MissingCount | Should -Be 0
+        $packed.Thrown | Should -Be 'sandbox: ledger has no sid'
+    }
+
+    It 'returns the one grant icacls cannot remove' {
+        $folder = Join-Path $TestDrive 'grant-remove'
+        $file1 = Join-Path $folder 'file1.txt'
+        $file2 = Join-Path $folder 'file2.txt'
+        $file3 = Join-Path $folder 'file3.txt'
+        $missing = Join-Path $folder 'missing.txt'
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+        try {
+            foreach ($file in @($file1, $file2, $file3)) {
+                Set-Content -LiteralPath $file -Value 'x' -Encoding ascii
+                $grantOut = @(& icacls.exe $file /grant '*S-1-15-2-1:(R)' 2>&1)
+                if ($LASTEXITCODE -ne 0) { throw "icacls grant failed ($LASTEXITCODE): $grantOut" }
+            }
+            $denyOut = @(& icacls.exe $file2 /deny '*S-1-3-4:(WDAC)' 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "icacls deny failed ($LASTEXITCODE): $denyOut" }
+
+            $ledgerPath = Join-Path $script:GrantRoot 'sandbox\slot-S.json'
+            $failed = InModuleScope Sandbox -Parameters @{
+                Path = $ledgerPath
+                File1 = $file1
+                File2 = $file2
+                File3 = $file3
+                Missing = $missing
+                Worktree = $script:GrantWorktree
+                Version = $script:GrantVersion
+            } {
+                param($Path, $File1, $File2, $File3, $Missing, $Worktree, $Version)
+                $ledger = [ordered]@{
+                    slot = 'S'
+                    sid = 'S-1-15-2-1'
+                    pid = $PID
+                    startTime = (Get-Process -Id $PID).StartTime
+                    runtimeVersion = $Version
+                    worktree = $Worktree
+                    grants = @(
+                        [pscustomobject]@{ path = $File1; spec = 'R' }
+                        [pscustomobject]@{ path = $File2; spec = 'R' }
+                        [pscustomobject]@{ path = $Missing; spec = 'R' }
+                        [pscustomobject]@{ path = $File3; spec = 'R' }
+                    )
+                }
+                Write-SandboxLedger -Path $Path -Ledger $ledger
+                $read = Read-SandboxLedger -Path $Path
+                Remove-SandboxGrants -Ledger $read
+            }
+            $failedRows = @($failed)
+            $failedRows.Count | Should -Be 1
+            $failedRows[0].path | Should -Be $file2
+            $failedRows[0].spec | Should -Be 'R'
+            $failedRows[0].error | Should -Not -BeNullOrEmpty
+            $failedRows[0].error | Should -Not -Be '<no output>'
+            $failedRows[0].error | Should -Match 'Access is denied'
+            @($failedRows.path) | Should -Not -Contain $missing
+            @($failedRows.path) | Should -Not -Contain $file1
+            @($failedRows.path) | Should -Not -Contain $file3
+            foreach ($file in @($file1, $file3)) {
+                $listed = (@(& icacls.exe $file 2>&1) | ForEach-Object { "$_" }) -join "`n"
+                $listed | Should -Not -Match 'S-1-15-2-1'
+                $listed | Should -Not -Match 'ALL APPLICATION PACKAGES'
+            }
+        } finally {
+            if (Test-Path -LiteralPath $folder) {
+                Remove-Item -LiteralPath $folder -Recurse -Force
+            }
+        }
+    }
+}
