@@ -2,7 +2,7 @@
 
 Copied from https://github.com/google/elephant-goldfish-model at commit `b7d9e27` (2026-11-09).
 Apache License 2.0 (see `LICENSE-egm`). "Not an officially supported Google product."
-Every file is unmodified upstream text except `drift_report.md` and `standards.json`, which are ours.
+Every file is unmodified upstream text except `drift_report.md`, `standards.json` and `task-size-standard.md`, which are ours.
 
 | File | Use |
 |---|---|
@@ -17,5 +17,6 @@ Every file is unmodified upstream text except `drift_report.md` and `standards.j
 | `drift_report.md` | **Ours, modified from upstream `skills/egm-drift-report/SKILL.md`** (header says how): final check of a design against the whole feature diff |
 | `implementation-readiness-standard.md`, `zoom-out-standard.md`, `feature-spec-standard.md` | Standards appended to a persona (upstream `resources/document_standards/`) |
 | `standards.json` | **Ours.** The default standard per persona, used when the caller passes no `-Standard`. Personas without an entry get none |
+| `task-size-standard.md` | **Ours.** Passed with `comprehension` on a worker task preflight: a size and time estimate with a `fits`/`split` verdict, and a check that the acceptance command runs only the task's own tests |
 
 The script passes `Mode: REVIEW`, the standard (under a heading that says it is the one the persona refers to), and the target document. Personas are read-only, and the harness enforces this too (Cursor ask mode, rule files removed, and a tracked-changes check on the worktree).

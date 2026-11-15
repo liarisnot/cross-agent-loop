@@ -16,7 +16,7 @@ The plan has a `summary`, then `phases`, then each phase's `tasks`. Each phase h
 - `title`
 - `dependsOn`: task ids
 - `files`: files, folders (ending in `/`) or globs that the task may touch
-- `test`: the exact, non-interactive test command
+- `test`: the exact, non-interactive test command. It runs only the tests for what this task changes (its test file, or a Pester filter on its `Describe` names), not the whole suite. The worker runs it as its acceptance command and `verify` runs it again.
 - `profile`: `code` or `code-hard`
 - `brief`: one paragraph, which the task file expands
 
@@ -27,6 +27,9 @@ The plan has a `summary`, then `phases`, then each phase's `tasks`. Each phase h
 - Every task is a worker task. Architecture is settled in the design. Cross-cutting changes become worker tasks with broad `files`.
 - Steps that `delegate` never delegates (secrets, credentials, deploys) are listed in the plan summary as steps for the user. They are not tasks.
 - The last phase's test is the full suite. Sign-off runs the same command.
+- Every phase's test runs the full suite (or its fast subset). After the merge, it catches what the narrow task tests miss.
+- **Size each task to about 20 worker minutes or 600 lines of code and tests at most.** Past that, high-reasoning models (`code-hard`) slow down sharply: a 1,840-line `code-hard` task took about 44 minutes on 2026-11-14 (`docs/test-plan.md`). Split a big task along a seam where one task's output is a stable interface for the next (native layer, then the module functions that call it, then the integration), each with its own files and tests. Split rather than drop a `code-hard` task to a cheaper model.
+- Anything the design leaves for the worker to discover (undocumented platform behaviour, a protocol to probe) is a probe for the design stage, not part of a timed task.
 
 ## Import and check
 

@@ -31,11 +31,13 @@ delegate.ps1 -Agent cursor -Model <model> -Profile <profile> -Feature <name> -Ba
 Do this after the task file is written and before the worker command above. Run it when `delegate`'s preflight rules call for it, on the task file, following the cap rule in SKILL.md. Skip a trivial edit. For a small mechanical task, comprehension alone is enough. When both lenses are called for, run:
 
 ```text
-delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Model <worker model> -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pc -TaskFile <task file>
+delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Model <worker model> -Standard task-size-standard.md -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pc -TaskFile <task file>
 delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Standard implementation-readiness-standard.md -Feature <name> -Repo <repo> -Base feature/<name> -TaskId <delegateTaskId>-pr -TaskFile <task file>
 ```
 
-`<worker model>` is that task's `model` from `schedule` (Composer 2.5 for `code`, Grok 4.7 high for `code-hard`). The standard file is in `<delegate dir>/personas/`.
+`<worker model>` is that task's `model` from `schedule` (Composer 2.5 for `code`, Grok 4.7 high for `code-hard`). The standard files are in `<delegate dir>/personas/`.
+
+Read the comprehension report's **Size estimate**. A `split` verdict, or your own judgment that the task is over about 20 worker minutes or 600 lines, is a needed plan change: make a [problem stop](#problem-stop) that shows the estimate and the proposed split. Do not launch the worker. A Major finding about the acceptance command's scope is a plan change too, so include it in the same stop.
 
 Clean up each lens:
 

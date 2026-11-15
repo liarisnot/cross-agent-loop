@@ -94,12 +94,14 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
 You're the *elephant*: you hold the whole conversation's context, so you can't see what your task file leaves unsaid. The workers are *goldfish*: they see only the task file. Before delegating, have a goldfish with no context check the task file:
 
 ```bash
-pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Repo <repo> -TaskId <id>-pc -TaskFile <task.md>
+pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona comprehension -Standard task-size-standard.md -Repo <repo> -TaskId <id>-pc -TaskFile <task.md>
 pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Model deepseek-v41-flash-1017-medium -Repo <repo> -TaskId <id>-pr -TaskFile <task.md>
 ```
 
 - **When:** tasks touching more than two files, `code-hard` tasks, and interface or validation changes. Skip it for trivial edits. Measured on real build tasks (2026-11-11): comprehension on Composer takes about 15–30 seconds and 15–30k tokens; readiness on DeepSeek about 100–135 seconds and 100–125k tokens (other-models pool). Readiness is the one that finds real gaps; for a small, mechanical task, comprehension alone is enough.
 - **comprehension** paraphrases the task. If its paraphrase doesn't match what you meant, that's the most important finding. **implementation_readiness** applies the "zero-decision rule": does the task leave design choices to the worker?
+- **Size gate.** With `-Standard task-size-standard.md`, comprehension also estimates the task's lines, files and worker minutes, and checks that the acceptance command runs only the task's own tests. A `split` verdict (over about 20 worker minutes or 600 lines) means: don't launch it; split it into tasks of its proposed size, each with its own tests. Big tasks cost far more than their size on high-reasoning models: on 2026-11-14 a 1,840-line `code-hard` task on Grok 4.7 high ran about 44 minutes and hit its timeout (root cause in `docs/test-plan.md`). The estimate is a guess; check it against your own sense of the task.
+- **Narrow acceptance commands.** A task's acceptance command runs only the tests for what the task changes (its test file, or a Pester filter). The lead runs the full suite after merging. A worker running a 7-minute suite it can't affect is pure cost.
 - The report goes to `reviewFile` (Markdown, findings with Blocker/Major/Nit severity). Read it from the file.
 - **Pass a document by path.** Point the task file at a committed file and its line range; the reviewer reads it with its file tools. For anything not committed, use `-TargetFile`.
 - **Triage, don't obey blindly.** EGM's standard was written for design docs and over-asks on small tasks (exact helper names, error strings, phase plans, file-level allowlists). Fix findings where two reasonable workers could build *different behaviour or interfaces*. Ignore pure over-specification.
