@@ -31,3 +31,5 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T00:13:43Z [dismiss] comprehension p2 cm2: fixtures/ in sandbox-run files - intended for its own container-test fixtures; phase 4 owns fake-cursor and depends on phase 3
 - 2026-11-15T00:13:43Z [dismiss] comprehension p2 cm3,cm5,cm6: Sandbox tag, six headings, lens/council canary invocation - covered by the design the briefs point to and existing tests
 - 2026-11-15T00:17:27Z [decision] review plan-3: declined by the user
+- 2026-11-15T00:17:27Z [gate] plan-approved: "approve plan"
+- 2026-11-15T00:17:27Z [decision] checkin: on-problems
