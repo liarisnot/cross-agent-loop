@@ -37,3 +37,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T03:58:15Z [fix-up] kill-tree: 1 files, 1 lines — tree test also asserts the deepest (grandchild) pid is gone
 - 2026-11-15T05:38:12Z [fix-up] sandbox-core: 1 files, 12 lines — Sandbox.Tests.ps1 restores XAGENT_* env vars and unloads the module in AfterAll
 - 2026-11-15T05:52:39Z [stage] build -> plan: apply the fixes, time estimate, split tasks and narrower acceptance test
+- 2026-11-15T06:01:43Z [dismiss] comprehension: TEST REPOS rule missing from sandbox-access — it creates no repo or worktree; its refusal test checks paths only
