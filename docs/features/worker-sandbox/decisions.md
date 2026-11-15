@@ -48,3 +48,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T06:21:04Z [stage] build -> plan: make all 3 changes: split sandbox-access in two
 - 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-grants size claim doubtful — readiness estimates 300-430 lines, 15-22 min; the build-time size gate checks again
 - 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-readlist Decided wording — the task file's Decided list replaces the brief boilerplate
+- 2026-11-15T06:25:57Z [dismiss] implementation_readiness: drop fixtures/ from readlist and grants — harmless scope, no effect
