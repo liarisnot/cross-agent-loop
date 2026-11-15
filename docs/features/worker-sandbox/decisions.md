@@ -34,3 +34,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T00:17:27Z [gate] plan-approved: "approve plan"
 - 2026-11-15T00:17:27Z [decision] checkin: on-problems
 - 2026-11-15T00:17:28Z [stage] plan -> build
+- 2026-11-15T03:58:15Z [fix-up] kill-tree: 1 files, 1 lines — tree test also asserts the deepest (grandchild) pid is gone
