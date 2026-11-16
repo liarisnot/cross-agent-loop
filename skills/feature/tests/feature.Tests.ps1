@@ -2466,13 +2466,91 @@ Describe 'feature.ps1 finish' {
 }
 
 Describe 'feature.ps1 doctor' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @('Get-DoctorSandboxDetail'))
+    }
+
+    It 'builds the sandbox detail' {
+        $emptyLetters = @{
+            reserved = $false
+            runtime  = $null
+            slots    = [string[]]::new(0)
+            states   = @{}
+        }
+        $support1 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @()
+        }
+        Get-DoctorSandboxDetail $support1 | Should -Be 'build 26300; cursor not found; letters not reserved (run delegate.ps1 -SandboxCheck -Reserve with three free letters)'
+
+        $support2 = @{
+            ok            = $true
+            build         = 26300
+            cursorVersion = '2026.11.13-eacade1'
+            uv            = '1.52.1'
+            patternCount  = 1
+            letters       = @{
+                reserved = $true
+                runtime  = 'Z'
+                slots    = @('Y', 'X')
+                states   = @{ Z = 'ours'; Y = 'ours' }
+            }
+            problems      = @()
+        }
+        Get-DoctorSandboxDetail $support2 | Should -Be 'build 26300; cursor 2026.11.13-eacade1; uv 1.52.1; pattern 1; letters Z,Y,X (Z=ours, Y=ours, X=?)'
+
+        $support3 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @('a', 'b')
+        }
+        (Get-DoctorSandboxDetail $support3).StartsWith('problems: a | b; build 26300') | Should -BeTrue
+
+        $longProblem = 'x' * 400
+        $support4 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @($longProblem)
+        }
+        (Get-DoctorSandboxDetail $support4).Length | Should -Be 300
+    }
+
     It 'reports prerequisites' -Tag 'Slow' {
-        $r = Invoke-Feature @('doctor') -WorkingDirectory $TestDrive
+        $sandboxRoot = Join-Path $TestDrive ("sandbox-{0}" -f [guid]::NewGuid())
+        $cursorRoot = Join-Path $TestDrive ("cursor-{0}" -f [guid]::NewGuid())
+        $logDir = Join-Path $TestDrive ("log-{0}" -f [guid]::NewGuid())
+        $prevSandbox = $env:XAGENT_SANDBOX_ROOT
+        $prevCursor = $env:XAGENT_CURSOR_ROOT
+        $prevLog = $env:XAGENT_LOG_DIR
+        try {
+            $env:XAGENT_SANDBOX_ROOT = $sandboxRoot
+            $env:XAGENT_CURSOR_ROOT = $cursorRoot
+            $env:XAGENT_LOG_DIR = $logDir
+            $r = Invoke-Feature @('doctor') -WorkingDirectory $TestDrive
+        }
+        finally {
+            if ($null -eq $prevSandbox) { Remove-Item Env:XAGENT_SANDBOX_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_SANDBOX_ROOT = $prevSandbox }
+            if ($null -eq $prevCursor) { Remove-Item Env:XAGENT_CURSOR_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_CURSOR_ROOT = $prevCursor }
+            if ($null -eq $prevLog) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prevLog }
+        }
         $r.ExitCode | Should -Be 0
         $r.Json.ok | Should -BeTrue
-        @($r.Json.checks).Count | Should -Be 9
+        @($r.Json.checks).Count | Should -Be 10
         $names = @($r.Json.checks | ForEach-Object { $_.name })
-        $names | Should -Be @('powershell', 'git', 'delegate', 'cursor-cli', 'cursor-login', 'models', 'pester', 'python', 'log-dir')
+        $names | Should -Be @('powershell', 'git', 'delegate', 'cursor-cli', 'cursor-login', 'models', 'pester', 'python', 'log-dir', 'sandbox')
         # Checks that hold on any machine able to run this suite (PowerShell 7.4+, git, the repo's own skills, Pester).
         foreach ($n in @('powershell', 'git', 'delegate', 'pester')) {
             ($r.Json.checks | Where-Object { $_.name -eq $n }).ok | Should -BeTrue -Because "$n check should pass here"
@@ -2489,6 +2567,17 @@ Describe 'feature.ps1 doctor' {
         ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/feature\.ps1 \*\)$' }).Count | Should -Be 1
         ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/delegate\.ps1 \*\)$' }).Count | Should -Be 1
         $r.Raw | Should -Not -Match '@'
+        $sandboxCheck = $r.Json.checks | Where-Object { $_.name -eq 'sandbox' } | Select-Object -First 1
+        $sandboxCheck.required | Should -BeFalse
+        $sandboxCheck.ok | Should -BeFalse
+        $sandboxCheck.detail | Should -Not -BeNullOrEmpty
+        $build = [Environment]::OSVersion.Version.Build
+        if ($build -ge 26300) {
+            $expectedSandboxDetail = "build $build; cursor not found; letters not reserved (run delegate.ps1 -SandboxCheck -Reserve with three free letters)"
+            $sandboxCheck.detail | Should -Be $expectedSandboxDetail
+        } else {
+            Set-ItResult -Inconclusive -Because "build $build is below 26300"
+        }
     }
 }
 

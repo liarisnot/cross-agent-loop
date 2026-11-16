@@ -2617,6 +2617,56 @@ function Get-DoctorPermissionRules {
     )
 }
 
+function Get-DoctorSandboxDetail($Support) {
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $problems = @($Support.problems)
+    if ($null -eq $Support.cursorVersion) {
+        $problems = @($problems | Where-Object { $_ -notlike 'Cursor CLI not found at *' })
+    }
+    if ($problems.Count -gt 0) {
+        $parts.Add('problems: ' + ($problems -join ' | '))
+    }
+    $parts.Add("build $($Support.build)")
+    if ($null -eq $Support.cursorVersion) {
+        $parts.Add('cursor not found')
+    } else {
+        $parts.Add("cursor $($Support.cursorVersion)")
+    }
+    if ($Support.uv) {
+        $parts.Add("uv $($Support.uv)")
+    }
+    if ($null -ne $Support.patternCount) {
+        $parts.Add("pattern $($Support.patternCount)")
+    }
+    $letters = $Support.letters
+    if (-not $letters.reserved) {
+        $parts.Add('letters not reserved (run delegate.ps1 -SandboxCheck -Reserve with three free letters)')
+    } else {
+        $runtimeRaw = $letters.runtime
+        $slot0Raw = if ($letters.slots -and $letters.slots.Length -gt 0) { $letters.slots[0] } else { $null }
+        $slot1Raw = if ($letters.slots -and $letters.slots.Length -gt 1) { $letters.slots[1] } else { $null }
+        $runtime = if ([string]::IsNullOrEmpty($runtimeRaw)) { '-' } else { [string]$runtimeRaw.ToUpper() }
+        $slot0 = if ([string]::IsNullOrEmpty($slot0Raw)) { '-' } else { [string]$slot0Raw.ToUpper() }
+        $slot1 = if ([string]::IsNullOrEmpty($slot1Raw)) { '-' } else { [string]$slot1Raw.ToUpper() }
+        $states = $letters.states
+        if ($null -eq $states) { $states = @{} }
+        function Get-SandboxDoctorLetterState([string]$Raw, [hashtable]$StateMap) {
+            if ([string]::IsNullOrEmpty($Raw)) { return '?' }
+            if ($StateMap.ContainsKey($Raw)) { return $StateMap[$Raw] }
+            return '?'
+        }
+        $stateText = @(
+            "$runtime=$(Get-SandboxDoctorLetterState $runtimeRaw $states)",
+            "$slot0=$(Get-SandboxDoctorLetterState $slot0Raw $states)",
+            "$slot1=$(Get-SandboxDoctorLetterState $slot1Raw $states)"
+        ) -join ', '
+        $parts.Add("letters $runtime,$slot0,$slot1 ($stateText)")
+    }
+    $detail = $parts -join '; '
+    if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
+    return $detail
+}
+
 function Invoke-DoctorFeature {
     $checks = [System.Collections.Generic.List[object]]::new()
     $permissionRules = @()
@@ -2784,6 +2834,20 @@ function Invoke-DoctorFeature {
             $checks.Add(@{ name = 'log-dir'; ok = $true; required = $true; detail = $logDir }) | Out-Null
         } catch {
             $checks.Add(@{ name = 'log-dir'; ok = $false; required = $true; detail = $_.Exception.Message }) | Out-Null
+        }
+
+        # sandbox
+        try {
+            $sandboxModule = Join-Path ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate'))) 'scripts/Sandbox.psm1'
+            $null = Import-Module $sandboxModule -Force -ErrorAction Stop -WarningAction SilentlyContinue
+            $support = Test-SandboxSupport
+            $sandboxOk = $support.ok -and $support.letters.reserved
+            $sandboxDetail = Get-DoctorSandboxDetail $support
+            $checks.Add(@{ name = 'sandbox'; ok = $sandboxOk; required = $false; detail = $sandboxDetail }) | Out-Null
+        } catch {
+            $sandboxDetail = 'sandbox: ' + $_.Exception.Message
+            if ($sandboxDetail.Length -gt 300) { $sandboxDetail = $sandboxDetail.Substring(0, 300) }
+            $checks.Add(@{ name = 'sandbox'; ok = $false; required = $false; detail = $sandboxDetail }) | Out-Null
         }
 
         $ready = $true
