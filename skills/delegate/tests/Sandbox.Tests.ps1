@@ -2532,9 +2532,17 @@ Describe 'run lifecycle' -Tag Sandbox {
                 [Parameter(Mandatory)][string]$Name,
                 [Parameter(Mandatory)][string]$Body,
                 [switch]$ReadOnly,
-                [int]$TimeoutMs = 60000
+                [int]$TimeoutMs = 60000,
+                [string]$Worktree,
+                [string]$WtName
             )
-            $xagentDir = Join-Path $script:RunWorktree '.xagent'
+            if ([string]::IsNullOrWhiteSpace($Worktree)) {
+                $Worktree = $script:RunWorktree
+                $WtName = $script:RunWtName
+            } elseif ([string]::IsNullOrWhiteSpace($WtName)) {
+                throw 'Invoke-RunScript -WtName is required with -Worktree'
+            }
+            $xagentDir = Join-Path $Worktree '.xagent'
             New-Item -ItemType Directory -Force -Path $xagentDir | Out-Null
             $scriptFile = Join-Path $xagentDir ($Name + '.ps1')
             [IO.File]::WriteAllText($scriptFile, $Body, [Text.UTF8Encoding]::new($false))
@@ -2556,8 +2564,8 @@ Describe 'run lifecycle' -Tag Sandbox {
                     Slot = $slot
                     Runtime = $script:RunRuntime
                     Repo = $script:RunRepo
-                    Worktree = $script:RunWorktree
-                    WtName = $script:RunWtName
+                    Worktree = $Worktree
+                    WtName = $WtName
                 }
                 if ($ReadOnly) { $runArgs['ReadOnly'] = $true }
                 $run = New-SandboxRun @runArgs
@@ -2585,6 +2593,66 @@ Describe 'run lifecycle' -Tag Sandbox {
                 notes = $notes
                 run = $run
                 slot = $slot
+            }
+        }
+
+        function Get-RunAccessOutcomeFunction {
+            return @'
+function Get-RunAccessOutcome([string]$Path) {
+    try {
+        $null = [IO.File]::ReadAllBytes($Path)
+        return 'ok'
+    } catch {
+        $current = $_.Exception
+        while ($null -ne $current) {
+            if ($current -is [System.UnauthorizedAccessException] -or $current -is [System.Security.SecurityException]) {
+                return 'denied'
+            }
+            $current = $current.InnerException
+        }
+        $message = [string]$_.Exception.Message
+        if ($message -match '(?i)denied') { return 'denied' }
+        return 'error'
+    }
+}
+'@
+        }
+
+        function New-RunSideWorktree {
+            param([Parameter(Mandatory)][string]$Name)
+            $path = Join-Path $script:RunTestRoot "repo.xagent\$Name"
+            Invoke-RunGit -ArgumentList @('-C', $script:RunRepo, 'worktree', 'add', $path)
+            try {
+                $gitText = [IO.File]::ReadAllText((Join-Path $path '.git'))
+                if ($gitText -notmatch '(?m)^gitdir:\s*(.+?)\s*$') { throw "worktree .git has no gitdir: $gitText" }
+                $wtName = [IO.Path]::GetFileName($Matches[1].Trim())
+                if ([string]::IsNullOrWhiteSpace($wtName) -or $wtName -eq '.' -or $wtName -eq '..') {
+                    throw "unexpected worktree name '$wtName'"
+                }
+                return [pscustomobject]@{ Path = $path; WtName = $wtName }
+            } catch {
+                Remove-RunSideWorktree -Path $path
+                throw
+            }
+        }
+
+        function Remove-RunSideWorktree {
+            param([string]$Path)
+            if ([string]::IsNullOrWhiteSpace($Path)) { return }
+            try { & git -C $script:RunRepo worktree remove --force $Path 2>&1 | Out-Null } catch { }
+            if (Test-Path -LiteralPath $Path) {
+                Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                        if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                            $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+                        }
+                    }
+                try { Remove-Item -LiteralPath $Path -Recurse -Force } catch { }
+                try { & git -C $script:RunRepo worktree prune 2>&1 | Out-Null } catch { }
+            }
+            $leaf = Split-Path $Path -Leaf
+            if (-not [string]::IsNullOrWhiteSpace($leaf)) {
+                try { & git -C $script:RunRepo branch -D $leaf 2>&1 | Out-Null } catch { }
             }
         }
     }
@@ -2962,6 +3030,228 @@ Describe 'run lifecycle' -Tag Sandbox {
                     Remove-Item -LiteralPath $ledgerPath -Force -ErrorAction SilentlyContinue
                 }
             } catch { }
+        }
+    }
+
+    It 'the canary passes and leaves nothing behind' -Skip:$script:RunSkip {
+        # Network is part of the canary. An offline machine fails this test; the assertion stays.
+        $savedProfile = InModuleScope Sandbox { $script:LoginProfile }
+        $savedCursor = InModuleScope Sandbox { $script:CursorRoot }
+        $canaryProfile = Join-Path $TestDrive 'run-life-canary-profile'
+        New-Item -ItemType Directory -Force -Path $canaryProfile | Out-Null
+        # Get-SandboxRuntime with no -CursorRoot uses the module cursor root. The harness
+        # leaves that folder empty and keeps node.exe in the fake cursor the cache was built from.
+        $fakeCursor = Join-Path $TestDrive 'run-life-fake-cursor'
+        $repoXagent = Join-Path $script:RunTestRoot 'repo.xagent'
+        try {
+            InModuleScope Sandbox -Parameters @{ Profile = $canaryProfile; Cursor = $fakeCursor } {
+                param($Profile, $Cursor)
+                $script:LoginProfile = $Profile
+                $script:CursorRoot = $Cursor
+            }
+            $c = Invoke-SandboxCanary -Repo $script:RunRepo
+            $because = ($c | ConvertTo-Json -Depth 5)
+            $c.ok | Should -BeTrue -Because $because
+            $c.results -is [System.Array] | Should -BeTrue -Because $because
+            $c.cleanup -is [System.Array] | Should -BeTrue -Because $because
+            $names = @($c.results | ForEach-Object { $_.name })
+            $names | Should -Be @(
+                'read-profile-canary',
+                'read-repo-canary',
+                'list-profile',
+                'git-status',
+                'git-diff',
+                'git-log',
+                'node-pipe',
+                'network',
+                'no-leak'
+            ) -Because $because
+            $canaryDirs = @(Get-ChildItem -LiteralPath $repoXagent -Force -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'canary-*' })
+            @($canaryDirs).Count | Should -Be 0 -Because $because
+            $listed = @(& git -C $script:RunRepo worktree list 2>&1)
+            @($listed | Where-Object { "$_" -match 'canary-' }).Count | Should -Be 0 -Because $because
+            $profileLeft = @(Get-ChildItem -LiteralPath $canaryProfile -Force -Filter 'xagent-canary-*.txt' -ErrorAction SilentlyContinue)
+            $repoLeft = @(Get-ChildItem -LiteralPath $repoXagent -Force -Filter 'xagent-canary-*.txt' -ErrorAction SilentlyContinue)
+            @($profileLeft).Count | Should -Be 0 -Because $because
+            @($repoLeft).Count | Should -Be 0 -Because $because
+            $sandboxDir = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox'
+            $ledgers = @(Get-ChildItem -LiteralPath $sandboxDir -Force -Filter 'slot-*.json' -ErrorAction SilentlyContinue)
+            @($ledgers).Count | Should -Be 0 -Because $because
+            $idle = Join-Path $sandboxDir 'idle'
+            $map = Get-TestSubstMap
+            (Test-SameLetterTarget $map[$script:RunLetters[1]] $idle) | Should -BeTrue -Because $because
+            (Test-SameLetterTarget $map[$script:RunLetters[2]] $idle) | Should -BeTrue -Because $because
+        } finally {
+            InModuleScope Sandbox -Parameters @{ Profile = $savedProfile; Cursor = $savedCursor } {
+                param($Profile, $Cursor)
+                $script:LoginProfile = $Profile
+                $script:CursorRoot = $Cursor
+            }
+        }
+    }
+
+    It 'a read-list entry under a profile-like path runs node with require' -Skip:$script:RunSkip {
+        $folder = [IO.Path]::GetFullPath((Join-Path $TestDrive 'run-life-readlist'))
+        $configPath = Join-Path $env:XAGENT_SANDBOX_ROOT 'sandbox.json'
+        $readAdded = $false
+        $savedJson = $null
+        try {
+            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            $nodeSource = Join-Path (Join-Path $script:RunRuntime.root $script:RunRuntime.version) 'node.exe'
+            Copy-Item -LiteralPath $nodeSource -Destination (Join-Path $folder 'node.exe') -Force
+            [IO.File]::WriteAllText((Join-Path $folder 'lib.js'), "module.exports='lib-ok'", [Text.UTF8Encoding]::new($false))
+
+            $savedJson = [IO.File]::ReadAllText($configPath)
+            $cfg = $savedJson | ConvertFrom-Json
+            $runtime = [string]$cfg.letters.runtime
+            $slots = @($cfg.letters.slots | ForEach-Object { [string]$_ })
+            $entry = @{ path = $folder; addToPath = $true } | ConvertTo-Json -Compress
+            $updated = @"
+{
+  "letters": { "runtime": "$runtime", "slots": ["$($slots[0])", "$($slots[1])"] },
+  "read": [$entry]
+}
+"@
+            [IO.File]::WriteAllText($configPath, $updated, [Text.UTF8Encoding]::new($false))
+            $readAdded = $true
+
+            $tick = [char]96
+            $js = 'console.log(require(String.raw' + $tick + $folder + '\lib.js' + $tick + '))'
+            $nodeLit = (Join-Path $folder 'node.exe').Replace("'", "''")
+            $jsLit = $js.Replace("'", "''")
+            # Node 24 realpathSync lstats the drive root. The grant chain stops at the profile, so
+            # --preserve-symlinks keeps require from walking above the folders it was given.
+            $body = @"
+`$nodeOut = & '$nodeLit' --preserve-symlinks -e '$jsLit'
+`$nodeText = "`$nodeOut".Trim()
+Write-Output "lib=`$nodeText"
+exit 0
+"@
+            $r = Invoke-RunScript -Name 'readlist' -Body $body
+            $because = "stderr: $($r.stderr)`nstdout: $($r.stdout)"
+            $r.timedOut | Should -BeFalse -Because $because
+            $r.exitCode | Should -Be 0 -Because $because
+            $lines = @($r.stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+            $lines | Should -Be @('lib=lib-ok') -Because $because
+            $r.notes -is [array] | Should -BeTrue -Because $because
+            @($r.notes).Count | Should -Be 0 -Because $because
+            # The folder is under the profile, so the run adds RA on each ancestor from the
+            # profile root down and records it. Stop-SandboxRun removes those entries.
+            (Get-IcaclsText $env:USERPROFILE) | Should -Not -Match ([regex]::Escape([string]$r.run.sid)) -Because $because
+        } finally {
+            if ($readAdded -and $null -ne $savedJson) {
+                try { [IO.File]::WriteAllText($configPath, $savedJson, [Text.UTF8Encoding]::new($false)) } catch { }
+            }
+        }
+    }
+
+    It 'concurrent runs cannot read each other''s worktrees' -Skip:$script:RunSkip {
+        $side = $null
+        $slotA = $null
+        $runA = $null
+        $hA = $null
+        $stoppedA = $false
+        $stdoutPath = $null
+        $stderrPath = $null
+        try {
+            $side = New-RunSideWorktree -Name 'task-2'
+            $slotA = Get-SandboxSlot
+            $letterA = [string]$slotA.letter
+            $xagentDir = Join-Path $script:RunWorktree '.xagent'
+            New-Item -ItemType Directory -Force -Path $xagentDir | Out-Null
+            $parentBody = @(
+                '$ErrorActionPreference = ''Stop'''
+                '[IO.File]::WriteAllText((Join-Path $env:USERPROFILE ''a-ready.txt''), ''ready'')'
+                'Start-Sleep -Seconds 600'
+            ) -join "`n"
+            [IO.File]::WriteAllText((Join-Path $xagentDir 'a-live.ps1'), $parentBody, [Text.UTF8Encoding]::new($false))
+            $outDir = Join-Path $TestDrive 'run-life-out'
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $stdoutPath = Join-Path $outDir 'a-live.out'
+            $stderrPath = Join-Path $outDir 'a-live.err'
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+            $runA = New-SandboxRun -Slot $slotA -Runtime $script:RunRuntime -Repo $script:RunRepo -Worktree $script:RunWorktree -WtName $script:RunWtName
+            $fileArg = '{0}:\.xagent\a-live.ps1' -f $runA.slot
+            $hA = Start-SandboxProcess -Run $runA -Exe 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fileArg
+            ) -StdoutPath $stdoutPath -StderrPath $stderrPath
+
+            $readyPath = Join-Path $script:RunWorktree '.xagent\sandbox\home\a-ready.txt'
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $ready = $false
+            do {
+                if (Test-Path -LiteralPath $readyPath) { $ready = $true; break }
+                if ($clock.Elapsed.TotalMilliseconds -ge 30000) { break }
+                Start-Sleep -Milliseconds 200
+            } while ($true)
+            $readyDetail = @(
+                ('stderr: ' + (Read-RunOutputText $stderrPath))
+                ('stdout: ' + (Read-RunOutputText $stdoutPath))
+            ) -join "`n"
+            $ready | Should -BeTrue -Because $readyDetail
+
+            $readme = (Join-Path $script:RunWorktree 'README.txt').Replace("'", "''")
+            $byLetter = ('{0}:\README.txt' -f $letterA).Replace("'", "''")
+            $body = (Get-RunAccessOutcomeFunction) + "`n" + @"
+Write-Output ('byPath=' + (Get-RunAccessOutcome '$readme'))
+Write-Output ('byLetter=' + (Get-RunAccessOutcome '$byLetter'))
+exit 0
+"@
+            # A has already called New-SandboxRun. Get-SandboxSlot inside this Invoke-RunScript
+            # sees A's ledger, whose pid is this live Pester process, and treats that slot as busy.
+            # The mutex is re-entrant on this thread, so the mutex alone would not make the slot busy.
+            $rB = Invoke-RunScript -Name 'peer-read' -Body $body -Worktree $side.Path -WtName $side.WtName
+            $because = "stderr: $($rB.stderr)`nstdout: $($rB.stdout)"
+            $rB.timedOut | Should -BeFalse -Because $because
+            $rB.exitCode | Should -Be 0 -Because $because
+            $lines = @($rB.stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+            $lines | Should -Be @('byPath=denied', 'byLetter=denied') -Because $because
+
+            [XagentSandbox]::Kill($hA)
+            $null = [XagentSandbox]::Finish($hA)
+            $notesA = Stop-SandboxRun -Run $runA -Slot $slotA -Handle $hA
+            $stoppedA = $true
+            $notesA -is [array] | Should -BeTrue
+            @($notesA).Count | Should -Be 0 -Because ($notesA -join '; ')
+        } finally {
+            if (-not $stoppedA -and $null -ne $slotA) {
+                try { if ($null -ne $hA) { [XagentSandbox]::Kill($hA) } } catch { }
+                try { Stop-SandboxRun -Run $runA -Slot $slotA -Handle $hA | Out-Null } catch { }
+            }
+            if ($null -ne $side) { Remove-RunSideWorktree -Path $side.Path }
+            try {
+                Remove-Item -LiteralPath (Join-Path $script:RunWorktree '.xagent\a-live.ps1') -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+    }
+
+    It 'a later run in the same slot cannot read the previous run''s worktree' -Skip:$script:RunSkip {
+        # Get-SandboxSlot tries slots in order. After run 1 releases its slot, run 2 lands
+        # on slots[0] again. This fails if that ordering changes.
+        $side = $null
+        try {
+            $r1 = Invoke-RunScript -Name 'same-slot-1' -Body "Write-Output 'held'`nexit 0"
+            $because1 = "stderr: $($r1.stderr)`nstdout: $($r1.stdout)"
+            $r1.timedOut | Should -BeFalse -Because $because1
+            $r1.exitCode | Should -Be 0 -Because $because1
+
+            $side = New-RunSideWorktree -Name 'task-2'
+            $readme = (Join-Path $script:RunWorktree 'README.txt').Replace("'", "''")
+            $body = (Get-RunAccessOutcomeFunction) + "`n" + @"
+Write-Output ('prev=' + (Get-RunAccessOutcome '$readme'))
+exit 0
+"@
+            $r2 = Invoke-RunScript -Name 'same-slot-2' -Body $body -Worktree $side.Path -WtName $side.WtName
+            $because2 = "stderr: $($r2.stderr)`nstdout: $($r2.stdout)"
+            $r2.timedOut | Should -BeFalse -Because $because2
+            $r2.exitCode | Should -Be 0 -Because $because2
+            ([string]$r2.run.slot) | Should -Be ([string]$r1.run.slot) -Because $because2
+            $lines = @($r2.stdout -split "\r?\n" | Where-Object { $_ -ne '' })
+            $lines | Should -Be @('prev=denied') -Because $because2
+        } finally {
+            if ($null -ne $side) { Remove-RunSideWorktree -Path $side.Path }
         }
     }
 }

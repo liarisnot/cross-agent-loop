@@ -1220,6 +1220,113 @@ function ConvertTo-SandboxIcaclsSpec([string]$Spec) {
     return $Spec
 }
 
+# icacls /grant and /remove ask NTFS to refresh inheritance, so they rewrite every
+# descendant. RA is not inheritable: it only needs to be on that one folder. On the
+# profile root the icacls walk rewrites the whole user tree. Set this folder's DACL
+# alone, without SE_DACL_AUTO_INHERIT_REQ.
+function Initialize-SandboxAclType {
+    if ('XagentSandboxAcl' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class XagentSandboxAcl {
+    const int DACL_SECURITY_INFORMATION = 0x4;
+    const uint READ_CONTROL = 0x00020000;
+    const uint WRITE_DAC = 0x00040000;
+    const uint SHARE_ALL = 0x7;
+    const uint OPEN_EXISTING = 3;
+    const uint BACKUP = 0x02000000;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("ntdll.dll")]
+    static extern int NtSetSecurityObject(IntPtr Handle, int SecurityInformation, IntPtr SecurityDescriptor);
+
+    public static void SetDacl(string path, byte[] securityDescriptor) {
+        if (securityDescriptor == null || securityDescriptor.Length == 0) throw new ArgumentException("securityDescriptor");
+        IntPtr descriptor = Marshal.AllocHGlobal(securityDescriptor.Length);
+        Marshal.Copy(securityDescriptor, 0, descriptor, securityDescriptor.Length);
+        IntPtr handle = CreateFileW(path, READ_CONTROL | WRITE_DAC, SHARE_ALL, IntPtr.Zero, OPEN_EXISTING, BACKUP, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) {
+            Marshal.FreeHGlobal(descriptor);
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            int status = NtSetSecurityObject(handle, DACL_SECURITY_INFORMATION, descriptor);
+            if (status != 0) throw new InvalidOperationException("NtSetSecurityObject 0x" + status.ToString("X8"));
+        } finally {
+            Marshal.FreeHGlobal(descriptor);
+            CloseHandle(handle);
+        }
+    }
+}
+'@
+}
+
+function Read-SandboxSecurityDescriptor([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    $sec = if ($item.PSIsContainer) {
+        New-Object System.Security.AccessControl.DirectorySecurity $Path, 'Access'
+    } else {
+        New-Object System.Security.AccessControl.FileSecurity $Path, 'Access'
+    }
+    $bytes = $sec.GetSecurityDescriptorBinaryForm()
+    return (New-Object System.Security.AccessControl.RawSecurityDescriptor ($bytes, 0))
+}
+
+function Write-SandboxSecurityDescriptor([string]$Path, $Sd) {
+    Initialize-SandboxAclType
+    $flags = $Sd.ControlFlags
+    $flags = $flags -band (-bnot [System.Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInheritRequired)
+    $Sd.SetFlags($flags)
+    $raw = New-Object byte[] $Sd.BinaryLength
+    $Sd.GetBinaryForm($raw, 0)
+    [XagentSandboxAcl]::SetDacl($Path, $raw)
+}
+
+# FILE_READ_ATTRIBUTES (0x80), the mask icacls "(RA)" writes. Not inherited.
+function Add-SandboxAttributeAce([string]$Path, [string]$Sid) {
+    $sd = Read-SandboxSecurityDescriptor $Path
+    if ($null -eq $sd.DiscretionaryAcl) {
+        $sd.DiscretionaryAcl = New-Object System.Security.AccessControl.RawAcl (2, 1)
+    }
+    foreach ($ace in $sd.DiscretionaryAcl) {
+        if ($ace -isnot [System.Security.AccessControl.KnownAce]) { continue }
+        if ($ace.SecurityIdentifier.Value -ne $Sid) { continue }
+        if ($ace.AccessMask -eq 128 -and $ace.AceFlags -eq [System.Security.AccessControl.AceFlags]::None -and
+            $ace.AceType -eq [System.Security.AccessControl.AceType]::AccessAllowed) {
+            return
+        }
+    }
+    $id = New-Object System.Security.Principal.SecurityIdentifier $Sid
+    $newAce = New-Object System.Security.AccessControl.CommonAce (
+        [System.Security.AccessControl.AceFlags]::None,
+        [System.Security.AccessControl.AceQualifier]::AccessAllowed,
+        128, $id, $false, $null)
+    [void]$sd.DiscretionaryAcl.InsertAce($sd.DiscretionaryAcl.Count, $newAce)
+    Write-SandboxSecurityDescriptor $Path $sd
+}
+
+function Remove-SandboxSidAces([string]$Path, [string]$Sid) {
+    $sd = Read-SandboxSecurityDescriptor $Path
+    if ($null -eq $sd.DiscretionaryAcl) { return }
+    $removed = $false
+    for ($i = $sd.DiscretionaryAcl.Count - 1; $i -ge 0; $i--) {
+        $ace = $sd.DiscretionaryAcl[$i]
+        if ($ace -isnot [System.Security.AccessControl.KnownAce]) { continue }
+        if ($ace.SecurityIdentifier.Value -ne $Sid) { continue }
+        $sd.DiscretionaryAcl.RemoveAce($i)
+        $removed = $true
+    }
+    if (-not $removed) { return }
+    Write-SandboxSecurityDescriptor $Path $sd
+}
+
 function Format-SandboxIcaclsError($Output) {
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($item in @($Output)) {
@@ -1261,6 +1368,18 @@ function Remove-SandboxGrants {
         if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
         if (-not (Test-Path -LiteralPath $pathText)) { continue }
         $spec = Get-ObjectProperty $grant 'spec'
+        if ([string]$spec -eq 'RA') {
+            try {
+                Remove-SandboxSidAces -Path $pathText -Sid $sid
+            } catch {
+                $failed.Add([pscustomobject]@{
+                    path = $pathText
+                    spec = $spec
+                    error = $_.Exception.Message
+                })
+            }
+            continue
+        }
         $output = @(& icacls.exe $pathText /remove ('*' + $sid) 2>&1)
         if ($LASTEXITCODE -ne 0) {
             $failed.Add([pscustomobject]@{
@@ -1681,6 +1800,14 @@ function New-SandboxRun {
         $pathText = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
         if (-not (Test-Path -LiteralPath $pathText)) { continue }
+        if ([string]$row.spec -eq 'RA') {
+            try {
+                Add-SandboxAttributeAce -Path $pathText -Sid $sid
+            } catch {
+                throw "sandbox: grant failed on ${pathText}: $($_.Exception.Message)"
+            }
+            continue
+        }
         $spec = ConvertTo-SandboxIcaclsSpec ([string]$row.spec)
         $output = @(& icacls.exe $pathText /grant ("*${sid}:${spec}") 2>&1)
         if ($LASTEXITCODE -ne 0) {
@@ -1825,4 +1952,450 @@ function Stop-SandboxRun {
     Write-Output -NoEnumerate $notes.ToArray()
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun
+function Format-SandboxCanaryOutput($Output) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Output)) {
+        if ($null -eq $item) { continue }
+        $text = ([string]$item).Trim()
+        if ($text.Length -gt 0) { $lines.Add($text) }
+    }
+    return ($lines.ToArray() -join '; ')
+}
+
+function ConvertTo-SandboxPsLiteral([string]$Text) {
+    if ($null -eq $Text) { return '' }
+    return $Text.Replace("'", "''")
+}
+
+function Get-SandboxCanaryWorktreeName([string]$Worktree) {
+    $gitFile = Join-Path $Worktree '.git'
+    $gitText = [IO.File]::ReadAllText($gitFile)
+    if ($gitText -notmatch '(?m)^gitdir:\s*(.+?)\s*$') {
+        throw 'sandbox: canary worktree failed: worktree .git has no gitdir'
+    }
+    $name = [IO.Path]::GetFileName($Matches[1].Trim())
+    if ([string]::IsNullOrWhiteSpace($name) -or $name -eq '.' -or $name -eq '..' -or $name.Contains('\') -or $name.Contains('/')) {
+        throw "sandbox: canary worktree failed: unexpected worktree name '$name'"
+    }
+    return $name
+}
+
+function Read-SandboxSharedText([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $reader = New-Object IO.StreamReader($stream, [Text.UTF8Encoding]::new($false), $true)
+    try {
+        return $reader.ReadToEnd()
+    } finally {
+        $reader.Dispose()
+    }
+}
+
+# Paths are written into single-quoted script text. The script is built after New-SandboxRun
+# so the runtime letter and version exist. It always prints eight JSON lines and exits 0.
+function New-SandboxCanaryScript {
+    param(
+        [Parameter(Mandatory)][string]$ProfileCanary,
+        [Parameter(Mandatory)][string]$RepoCanary,
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$NodeExe
+    )
+    $text = @'
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
+$ProgressPreference = 'SilentlyContinue'
+
+function Get-CanaryFirstLine([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $parts = $Text -split '\r?\n', 2
+    if ($null -eq $parts -or @($parts).Count -eq 0) { return '' }
+    return [string]$parts[0]
+}
+
+function Get-CanaryFailure($ErrorRecord) {
+    $current = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $current = $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $current = $ErrorRecord
+    }
+    while ($null -ne $current) {
+        if ($current -is [System.UnauthorizedAccessException] -or $current -is [System.Security.SecurityException]) {
+            return 'denied'
+        }
+        $current = $current.InnerException
+    }
+    $message = ''
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        if ($null -ne $ErrorRecord.Exception) { $message = [string]$ErrorRecord.Exception.Message }
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $message = [string]$ErrorRecord.Message
+    } else {
+        $message = [string]$ErrorRecord
+    }
+    if ($message -match '(?i)denied') { return 'denied' }
+    return 'error'
+}
+
+function Get-CanaryErrorDetail($ErrorRecord) {
+    $message = ''
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord] -and $null -ne $ErrorRecord.Exception) {
+        $message = [string]$ErrorRecord.Exception.Message
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $message = [string]$ErrorRecord.Message
+    } else {
+        $message = [string]$ErrorRecord
+    }
+    return (Get-CanaryFirstLine $message)
+}
+
+function Write-CanaryLine([string]$Name, [string]$Outcome, [string]$Detail) {
+    if ($null -eq $Detail) { $Detail = '' }
+    $line = [ordered]@{ name = $Name; outcome = $Outcome; detail = $Detail } | ConvertTo-Json -Compress
+    Write-Output $line
+}
+
+function Invoke-CanaryRead([string]$Name, [string]$Path) {
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        $count = 0
+        if ($null -ne $bytes) { $count = $bytes.Length }
+        Write-CanaryLine $Name 'ok' ('read ' + $count + ' bytes')
+    } catch {
+        Write-CanaryLine $Name (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+    }
+}
+
+Invoke-CanaryRead 'read-profile-canary' '__PROFILE_CANARY__'
+Invoke-CanaryRead 'read-repo-canary' '__REPO_CANARY__'
+
+try {
+    $names = @(Get-ChildItem -LiteralPath '__PROFILE_PATH__' -Force | ForEach-Object { [string]$_.Name })
+    $first = ''
+    if ($names.Count -gt 0 -and $null -ne $names[0]) { $first = [string]$names[0] }
+    Write-CanaryLine 'list-profile' 'ok' $first
+} catch {
+    Write-CanaryLine 'list-profile' (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+}
+
+function Invoke-CanaryGit([string]$Name, [string[]]$GitArgs) {
+    try {
+        $output = @(& git @GitArgs 2>&1)
+        $code = $LASTEXITCODE
+        $text = (@($output) | ForEach-Object { "$_" }) -join "`n"
+        $first = Get-CanaryFirstLine $text
+        if ($code -ne 0) {
+            $outcome = 'error'
+            if ($first -match '(?i)denied') { $outcome = 'denied' }
+            if ([string]::IsNullOrEmpty($first)) { $first = "exit $code" }
+            Write-CanaryLine $Name $outcome $first
+            return
+        }
+        Write-CanaryLine $Name 'ok' $first
+    } catch {
+        Write-CanaryLine $Name (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+    }
+}
+
+Invoke-CanaryGit 'git-status' @('status', '--porcelain')
+Invoke-CanaryGit 'git-diff' @('diff')
+Invoke-CanaryGit 'git-log' @('log', '-1', '--format=%H')
+
+try {
+    $nodeExe = '__NODE_EXE__'
+    $js = 'const c=require(''child_process'').spawn(process.execPath,[''-e'',''console.log(\"piped-ok\")''],{stdio:''pipe''});let o='''';c.stdout.on(''data'',d=>o+=d);c.on(''close'',()=>console.log(o.trim()))'
+    $nodeOut = & $nodeExe -e $js
+    $code = $LASTEXITCODE
+    $text = "$nodeOut".Trim()
+    $first = Get-CanaryFirstLine $text
+    if ($code -ne 0) {
+        $outcome = 'error'
+        if ($first -match '(?i)denied') { $outcome = 'denied' }
+        if ([string]::IsNullOrEmpty($first)) { $first = "exit $code" }
+        Write-CanaryLine 'node-pipe' $outcome $first
+    } elseif ($text -eq 'piped-ok') {
+        Write-CanaryLine 'node-pipe' 'ok' 'piped-ok'
+    } else {
+        Write-CanaryLine 'node-pipe' 'error' $first
+    }
+} catch {
+    Write-CanaryLine 'node-pipe' (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+}
+
+try {
+    $response = Invoke-WebRequest https://example.com -UseBasicParsing -TimeoutSec 30
+    $status = [int]$response.StatusCode
+    if ($status -eq 200) {
+        Write-CanaryLine 'network' 'ok' '200'
+    } else {
+        Write-CanaryLine 'network' 'error' ([string]$status)
+    }
+} catch {
+    Write-CanaryLine 'network' (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+}
+
+exit 0
+'@
+    return $text.
+        Replace('__PROFILE_CANARY__', (ConvertTo-SandboxPsLiteral $ProfileCanary)).
+        Replace('__REPO_CANARY__', (ConvertTo-SandboxPsLiteral $RepoCanary)).
+        Replace('__PROFILE_PATH__', (ConvertTo-SandboxPsLiteral $ProfilePath)).
+        Replace('__NODE_EXE__', (ConvertTo-SandboxPsLiteral $NodeExe))
+}
+
+function Read-SandboxCanaryChecks([string]$Text) {
+    $map = @{}
+    foreach ($line in @($Text -split '\r?\n')) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or -not $trimmed.StartsWith('{')) { continue }
+        try {
+            $obj = $trimmed | ConvertFrom-Json
+        } catch {
+            continue
+        }
+        $name = [string](Get-ObjectProperty $obj 'name')
+        if ([string]::IsNullOrWhiteSpace($name) -or $map.ContainsKey($name)) { continue }
+        $map[$name] = $obj
+    }
+    return $map
+}
+
+function New-SandboxCanaryEntry([string]$Name, [string]$Expect, [string]$Outcome, [bool]$Ok, [string]$Detail) {
+    if ($null -eq $Detail) { $Detail = '' }
+    return [pscustomobject]@{
+        name = $Name
+        expect = $Expect
+        outcome = $Outcome
+        ok = $Ok
+        detail = $Detail
+    }
+}
+
+function Invoke-SandboxCanary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo
+    )
+
+    $repoFull = $null
+    $worktree = $null
+    $worktreeAdded = $false
+    $profileCanary = $null
+    $repoCanary = $null
+    $secret = $null
+    $slot = $null
+    $run = $null
+    $h = $null
+    $stdoutPath = $null
+    $stderrPath = $null
+    $stdoutText = ''
+    $stderrText = ''
+    $timedOut = $false
+    $exitCode = 0
+    $thrown = $null
+    $cleanup = New-Object System.Collections.Generic.List[string]
+    $utf8 = [Text.UTF8Encoding]::new($false)
+
+    try {
+        $runtime = Get-SandboxRuntime
+        $rand = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $repoFull = Resolve-SandboxPath $Repo
+        $repoParent = Split-Path $repoFull -Parent
+        $repoLeaf = Split-Path $repoFull -Leaf
+        $xagentDir = Join-Path $repoParent ($repoLeaf + '.xagent')
+        if (-not (Test-Path -LiteralPath $xagentDir)) {
+            New-Item -ItemType Directory -Force -Path $xagentDir | Out-Null
+        }
+        $worktree = Join-Path $xagentDir ('canary-' + $rand)
+
+        try {
+            $gitOut = @(& git -C $repoFull worktree add --detach $worktree 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "sandbox: canary worktree failed: $(Format-SandboxCanaryOutput $gitOut)"
+            }
+        } catch {
+            $message = $_.Exception.Message
+            if ($message -like 'sandbox: canary worktree failed:*') { throw }
+            throw "sandbox: canary worktree failed: $message"
+        }
+        $worktreeAdded = $true
+        $wtName = Get-SandboxCanaryWorktreeName $worktree
+
+        $secret = 'xagent-canary-' + [guid]::NewGuid().ToString('N')
+        $profileCanary = Join-Path $script:LoginProfile ('xagent-canary-' + $rand + '.txt')
+        $repoCanary = Join-Path $xagentDir ('xagent-canary-' + $rand + '.txt')
+        [IO.File]::WriteAllText($profileCanary, $secret, $utf8)
+        [IO.File]::WriteAllText($repoCanary, $secret, $utf8)
+
+        $slot = Get-SandboxSlot -TimeoutSec 60
+        $run = New-SandboxRun -Slot $slot -Runtime $runtime -Repo $repoFull -Worktree $worktree -WtName $wtName
+
+        $runtimeLetter = [string](Get-ObjectProperty $run 'runtimeLetter')
+        $runtimeVersion = [string](Get-ObjectProperty $runtime 'version')
+        $nodeExe = '{0}:\{1}\node.exe' -f $runtimeLetter, $runtimeVersion
+        $scriptText = New-SandboxCanaryScript -ProfileCanary $profileCanary -RepoCanary $repoCanary -ProfilePath $script:LoginProfile -NodeExe $nodeExe
+        $scriptDir = Join-Path $worktree '.xagent'
+        New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
+        [IO.File]::WriteAllText((Join-Path $scriptDir 'canary.ps1'), $scriptText, $utf8)
+
+        $stdoutPath = Join-Path $scriptDir 'canary.out'
+        $stderrPath = Join-Path $scriptDir 'canary.err'
+        $fileArg = '{0}:\.xagent\canary.ps1' -f $run.slot
+        $h = Start-SandboxProcess -Run $run -Exe 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fileArg
+        ) -StdoutPath $stdoutPath -StderrPath $stderrPath
+
+        $finished = [XagentSandbox]::Wait($h, 120000)
+        if (-not $finished) {
+            $timedOut = $true
+            [XagentSandbox]::Kill($h)
+        }
+        $exitCode = [XagentSandbox]::Finish($h)
+    } catch {
+        $thrown = $_
+    } finally {
+        if ($null -ne $slot) {
+            try {
+                $stopNotes = Stop-SandboxRun -Run $run -Slot $slot -Handle $h
+                if ($null -ne $stopNotes) {
+                    foreach ($note in @($stopNotes)) {
+                        if ($null -eq $note) { continue }
+                        $noteText = [string]$note
+                        if ($noteText.Length -eq 0) { continue }
+                        $cleanup.Add("clean-up: stop run: $noteText")
+                    }
+                }
+            } catch {
+                $cleanup.Add("clean-up: stop run: $($_.Exception.Message)")
+            }
+        }
+
+        try {
+            $problems = New-Object System.Collections.Generic.List[string]
+            foreach ($path in @($profileCanary, $repoCanary)) {
+                if ([string]::IsNullOrWhiteSpace([string]$path)) { continue }
+                if (-not (Test-Path -LiteralPath $path)) { continue }
+                try {
+                    $item = Get-Item -LiteralPath $path -Force
+                    $item.IsReadOnly = $false
+                    Remove-Item -LiteralPath $path -Force
+                } catch {
+                    $problems.Add($_.Exception.Message)
+                }
+            }
+            if ($problems.Count -gt 0) { throw ($problems.ToArray() -join '; ') }
+        } catch {
+            $cleanup.Add("clean-up: delete canaries: $($_.Exception.Message)")
+        }
+
+        # Read before worktree remove deletes canary.out and canary.err.
+        try { $stdoutText = Read-SandboxSharedText $stdoutPath } catch { $stdoutText = '' }
+        try { $stderrText = Read-SandboxSharedText $stderrPath } catch { $stderrText = '' }
+
+        if ($worktreeAdded -and -not [string]::IsNullOrWhiteSpace([string]$repoFull)) {
+            try {
+                $removeOut = @(& git -C $repoFull worktree remove --force $worktree 2>&1)
+                if ($LASTEXITCODE -ne 0) {
+                    $joined = Format-SandboxCanaryOutput $removeOut
+                    if ([string]::IsNullOrWhiteSpace($joined)) { $joined = "exit $LASTEXITCODE" }
+                    throw $joined
+                }
+            } catch {
+                $cleanup.Add("clean-up: worktree remove: $($_.Exception.Message)")
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$worktree) -and (Test-Path -LiteralPath $worktree)) {
+            try {
+                Get-ChildItem -LiteralPath $worktree -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                        $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+                    }
+                }
+                $rootItem = Get-Item -LiteralPath $worktree -Force
+                if ($rootItem.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                    $rootItem.Attributes = $rootItem.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+                }
+                Remove-Item -LiteralPath $worktree -Recurse -Force
+                if (Test-Path -LiteralPath $worktree) {
+                    throw "folder still present: $worktree"
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$repoFull)) {
+                    $pruneOut = @(& git -C $repoFull worktree prune 2>&1)
+                    if ($LASTEXITCODE -ne 0) {
+                        $joined = Format-SandboxCanaryOutput $pruneOut
+                        if ([string]::IsNullOrWhiteSpace($joined)) { $joined = "exit $LASTEXITCODE" }
+                        throw $joined
+                    }
+                }
+            } catch {
+                $cleanup.Add("clean-up: delete folder: $($_.Exception.Message)")
+            }
+        }
+    }
+
+    if ($null -ne $thrown) { throw $thrown }
+
+    $checks = Read-SandboxCanaryChecks $stdoutText
+    $order = @(
+        @{ name = 'read-profile-canary'; expect = 'denied' }
+        @{ name = 'read-repo-canary'; expect = 'denied' }
+        @{ name = 'list-profile'; expect = 'denied' }
+        @{ name = 'git-status'; expect = 'ok' }
+        @{ name = 'git-diff'; expect = 'ok' }
+        @{ name = 'git-log'; expect = 'ok' }
+        @{ name = 'node-pipe'; expect = 'ok' }
+        @{ name = 'network'; expect = 'ok' }
+    )
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $order) {
+        $name = [string]$item.name
+        $expect = [string]$item.expect
+        if ($checks.ContainsKey($name)) {
+            $printed = $checks[$name]
+            $outcome = [string](Get-ObjectProperty $printed 'outcome')
+            $detail = Get-ObjectProperty $printed 'detail'
+            if ($null -eq $detail) { $detail = '' } else { $detail = [string]$detail }
+            $rows.Add((New-SandboxCanaryEntry $name $expect $outcome ($outcome -eq $expect) $detail))
+        } else {
+            $rows.Add((New-SandboxCanaryEntry $name $expect 'missing' $false ''))
+        }
+    }
+
+    $leaked = $false
+    if ([string]::IsNullOrEmpty($secret)) {
+        $leaked = $true
+    } else {
+        if ($stdoutText.IndexOf($secret, [StringComparison]::Ordinal) -ge 0) { $leaked = $true }
+        if ($stderrText.IndexOf($secret, [StringComparison]::Ordinal) -ge 0) { $leaked = $true }
+    }
+    if ($leaked) {
+        $rows.Add((New-SandboxCanaryEntry 'no-leak' 'absent' 'present' $false 'secret found in stdout|stderr'))
+    } else {
+        $rows.Add((New-SandboxCanaryEntry 'no-leak' 'absent' 'absent' $true 'secret not in output'))
+    }
+
+    if ($timedOut -or $exitCode -ne 0) {
+        $runOutcome = if ($timedOut) { 'timeout' } else { "exit $exitCode" }
+        $rows.Add((New-SandboxCanaryEntry 'run' 'exit 0' $runOutcome $false $runOutcome))
+    }
+
+    $allOk = $true
+    foreach ($row in $rows) {
+        if (-not $row.ok) { $allOk = $false }
+    }
+    if ($cleanup.Count -gt 0) { $allOk = $false }
+
+    # Build the arrays here. Returning them through a parameter would unwrap 0- and 1-element arrays.
+    $storedResults = New-Object object[] $rows.Count
+    for ($i = 0; $i -lt $rows.Count; $i++) { $storedResults[$i] = $rows[$i] }
+    $storedCleanup = New-Object string[] $cleanup.Count
+    for ($i = 0; $i -lt $cleanup.Count; $i++) { $storedCleanup[$i] = [string]$cleanup[$i] }
+    return [pscustomobject]@{
+        ok = [bool]$allOk
+        results = $storedResults
+        cleanup = $storedCleanup
+    }
+}
+
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxCanary
