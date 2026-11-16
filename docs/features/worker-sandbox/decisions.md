@@ -84,3 +84,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-16T05:20:09Z [decision] phase 4 test passed: scripts/test.ps1 (full, with Slow) 307 passed, 0 failed, 1 not run (Live); no letters or test roots left behind
 - 2026-11-16T05:24:16Z [decision] sandbox-docs preflight: size fits (12-20 min). Readiness: README structure, parameter table rows, the stale secret-variable paragraph, the two no-report retry places and test quoting were open; lead pinned all of them.
 - 2026-11-16T05:25:32Z [fix-up] sandbox-docs lead fix-up (3 files changed, 3 insertions(+), 3 deletions(-)): de-duplicated the sandbox: sentence at the two no-report retries (my pin made it repeat), and listed the full read-list refusal rules in delegate SKILL.md
+- 2026-11-16T06:30:09Z [decision] phase 5 test passed: scripts/test.ps1 (full) 308 passed, 0 failed, 1 not run (Live). User chose drive letters Z,Y,X for the real reservation.
