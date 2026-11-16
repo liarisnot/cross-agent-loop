@@ -2616,9 +2616,9 @@ Describe 'Stop-ProcessTree' {
     }
 
     It 'kills a two-level child process tree' {
-        if ((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue) -eq $null) {
-            Set-ItResult -Skipped -Because 'process queries (CIM) are not available here, as inside the sandbox'; return
-        }
+        $cimOk = $true
+        try { $null = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop } catch { $cimOk = $false }
+        if (-not $cimOk) { Set-ItResult -Skipped -Because 'process queries (CIM) are not available here, as inside the sandbox'; return }
         function Test-ProcessAlive {
             param([int]$Id)
             try {
