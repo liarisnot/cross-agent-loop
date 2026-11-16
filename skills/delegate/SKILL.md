@@ -38,6 +38,10 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Repo D:/pa
 | `-TimeoutSec` | default 900; the process tree is killed on timeout. **A timed-out run loses its session** (Cursor writes `session_id` and usage only at the end), so it can't be resumed: size this to the work, counting how long the test suite takes. To continue after a timeout, rerun the same `-TaskId` without `-Resume`: the worktree and its uncommitted changes are reused; hand over the original task with `-TargetFile` and say what's left |
 | `-Cleanup` | removes the worktree and deletes the branch only if it's merged; also removes every read-only worktree `<TaskId>-<label>`, restoring rule files first. Pass `-Repo` |
 | `-Cleanup -Discard` | throws away an **unmerged** worker branch (e.g. a failed attempt), saving its diff as a patch in the run logs first |
+| `-NoSandbox` | run Cursor outside the AppContainer (only when the user asks) |
+| `-SandboxCheck` | check sandbox support; with `-Repo` runs the canary; use `-Reserve` or `-Release` to manage drive letters |
+| `-Reserve` | three drive letters, comma-separated (`D`–`Z`); the first is the runtime letter, the other two are slots |
+| `-Release` | remove reserved letters, slot containers and the runtime cache (only when the user asks) |
 
 To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId` (or the same id with different `-Seat`s for read-only runs). Set the Bash tool `timeout` above `-TimeoutSec`. Short runs (preflights, reviews) can stay in the foreground.
 
@@ -51,9 +55,9 @@ $p = Start-Process pwsh -ArgumentList $a -WindowStyle Hidden -RedirectStandardOu
 
 Then watch with the Monitor tool: a loop that prints the summary and exits once `summary.json` is non-empty, or prints a failure line once the launcher pid is gone without one (poll every 20 s; re-arm after the 30-minute expiry). The summary file holds the same JSON line as a foreground run. A detached worker keeps running if Claude Code exits; stop it early with the pid in `<logs>.pid`. Use a new summary file name per round so an old one isn't read as the new result.
 
-The script prints **one compact JSON line**: `ok, violation, profile, model, usage, agent, seat, feature, taskId, worktree, branch, baseSha, exitCode, timedOut, seconds, cliStatus, sessionId, result, reviewFile, changes, diffStat, stderrTail, logs`. `baseSha` is the commit the worktree was created from (diff against it). Full logs are in `<repo>/.xagent/runs/<taskId>/`. While a run is live, `<logs>.pid` holds `{pid, startTime, childPid, childStartTime, feature}`.
+The script prints **one compact JSON line**: `ok, violation, profile, model, usage, agent, seat, feature, taskId, worktree, branch, baseSha, exitCode, timedOut, seconds, cliStatus, sessionId, result, reviewFile, changes, diffStat, stderrTail, logs, sandboxed, sandbox, skillDir, sandboxNotes`. `baseSha` is the commit the worktree was created from (diff against it). `sandboxed` is true or false. `sandbox` holds container, slot, runtime letter and version, and whether `node.exe` was patched. `skillDir` is the folder `delegate.ps1` ran from. `sandboxNotes` lists clean-up steps that failed, and is empty when all went well. Full logs are in `<repo>/.xagent/runs/<taskId>/`. While a run is live, `<logs>.pid` holds `{pid, startTime, childPid, childStartTime, feature}`.
 
-**Worker environment.** Known secret variables (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `ANTHROPIC_*`, `OPENAI_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`) are removed before launch. This is best effort: files on disk and the network stay reachable, so never give workers anything secret.
+**Worker environment.** For sandboxed runs the environment is built from scratch with only the variables a run needs, so no secret variable reaches the worker. The denylist still applies to `-NoSandbox` runs. The network and the user's registry, including user environment variables, stay reachable, so never give workers anything secret there.
 
 ## Models (`models.json`)
 
@@ -137,8 +141,46 @@ Three model families (Claude as lead, Grok and GLM via Cursor) argue a decision.
 
 Council notes: Grok tends to put a preamble before its JSON (the script extracts it anyway). Headroom may compress long fields in tool output (`<<ccr:…>>`); read the specific fields from the `.stdout.json` log when you need the full text.
 
+## Sandbox
+
+By default every Cursor worker, review lens and council seat runs in a Windows AppContainer. A run can reach:
+
+- its worktree (workers read/write; read-only runs read only);
+- that repo's `.git` data needed for `git status` and `git diff` (no `git add`, `commit`, or hooks changes);
+- its run home under `<worktree>\.xagent\sandbox` (profile, app data and temp for the slot);
+- `C:\Windows` and `C:\Program Files` (Windows grants these to all AppContainers);
+- paths on the optional read list in `%LOCALAPPDATA%\xagent\sandbox.json` (per-user toolchains you opt in);
+- the network (internet on; the host's `localhost` is blocked).
+
+Everything else on disk is denied, including the user's profile, other repos and other drives.
+
+**First use.** On the first sandboxed run, `delegate.ps1` fails with `sandbox: no drive letters reserved` and suggests three free letters. Ask the user to approve three drive letters, then run:
+
+```bash
+pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -SandboxCheck -Reserve <a>,<b>,<c> -Repo <repo>
+```
+
+That reserves the letters, maps them, creates the slot containers and runs the canary when `-Repo` is set. Retry the original run.
+
+**Release.** Run `-SandboxCheck -Release` only when the user asks. It removes the letter mappings, slot containers and runtime cache, and keeps the read list.
+
+**Read list.** Edit `%LOCALAPPDATA%\xagent\sandbox.json` to add toolchain folders under your profile. Each entry can set `addToPath: true`. Refused entries: the profile root itself; anything under `~\.ssh`, `~\.aws`, `~\.gnupg`, `~\.cursor`, `~\AppData\Roaming` or `%LOCALAPPDATA%\cursor-agent`; anything under the sandbox's own folder; and paths that do not exist. A refused entry fails the run with `sandbox: read-list entry '<path>' <reason>; edit sandbox.json`, and `doctor` reports it first.
+
+**Limits.**
+
+- `taskkill.exe` hangs inside the container; use `Stop-Process -Force` or `.Kill($true)` in scripts.
+- SSH git remotes need `~\.ssh`, which is blocked; HTTPS remotes work.
+- Host `localhost` services are not reachable unless an admin loopback exemption was granted for a slot (not part of the default setup).
+- Workers must not `git add` or `git commit`; the lead commits.
+
+**Node read-list limit.** A Node.js tool started from a read-list entry under the user profile fails on `require`, because Node resolves real paths through `C:\`, which the sandbox cannot read. Run such tools with `node --preserve-symlinks`. Granting read access on `C:\` is deliberately not done.
+
+**Registry reads.** The sandbox does not block reading the user's registry, including user environment variables (`HKCU\Environment`). Do not keep secrets in user environment variables. This is an accepted risk.
+
+**Unsandboxed runs.** Pass `-NoSandbox` only when the user asks. The summary records `sandboxed: false`.
+
 ## Rules
 
 - Never delegate secrets, credentials, deploy or publish steps, or anything outside the repo.
 - Workers must not commit or push. If one did, review its commits as part of the diff (`git -C <wt> log <baseSha>..`).
-- If `ok` is false: read `stderrTail` and the log files, then retry once.
+- If `ok` is false: read `stderrTail` and the log files, then retry once unless `error` starts with `sandbox:`. That is a setup problem: report it to the user and do not retry.

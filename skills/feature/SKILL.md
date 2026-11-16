@@ -213,7 +213,7 @@ Use `plan: <outcome>` instead of `design: <outcome>` outside `design` and `desig
 delegate.ps1 -Cleanup -Profile council -Repo <repo> -TaskId <run id>
 ```
 
-A failed seat (`ok: false` or `timedOut: true`): read `stderrTail` and the logs under `<repo>/.xagent/runs/<run id>/`, then retry once with the same command. After a timeout, do not pass `-Resume`. A usage-limit message is a problem stop at once (see [Failed delegate.ps1 runs](#failed-delegateps1-runs)).
+A failed seat (`ok: false` or `timedOut: true`): read `stderrTail` and the logs under `<repo>/.xagent/runs/<run id>/`, then retry once with the same command. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. After a timeout, do not pass `-Resume`. A usage-limit message is a problem stop at once (see [Failed delegate.ps1 runs](#failed-delegateps1-runs)).
 
 ## Rules for every stage
 
@@ -234,6 +234,6 @@ Before any `delegate.ps1` run that does not come from `feature.ps1 schedule` (pr
 
 ## Failed delegate.ps1 runs
 
-If `ok` is false or `timedOut` is true, read `stderrTail` and the logs, then retry once with the same command. After a timeout, do not pass `-Resume`. A usage-limit message (in `stderrTail`, `error`, or the summary) is a problem stop at once: do not retry it, do not switch models, and do not wait on a timer. In `build`, follow the problem-stop steps in `stages/build.md`. In any other stage, log it with `feature.ps1 decision -Repo <repo> -Name <name> -Kind stop -Text "<what was running>: usage limit"`, report it, and end the turn.
+If `ok` is false or `timedOut` is true, read `stderrTail` and the logs, then retry once with the same command. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. After a timeout, do not pass `-Resume`. A usage-limit message (in `stderrTail`, `error`, or the summary) is a problem stop at once: do not retry it, do not switch models, and do not wait on a timer. In `build`, follow the problem-stop steps in `stages/build.md`. In any other stage, log it with `feature.ps1 decision -Repo <repo> -Name <name> -Kind stop -Text "<what was running>: usage limit"`, report it, and end the turn.
 
 In `build`, a worker or a task preflight that fails again after that one retry is handled in `stages/build.md`: set the task to `failed`, and if that task's `failures` in `status.tasks` is then 2, make a problem stop. Review lenses, after the one retry, follow the ladder in `stages/design-review.md`. The sign-off lens follows the ladder in `stages/signoff.md`.
