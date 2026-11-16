@@ -163,6 +163,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Check') {
         exit 0
     }
     if ($Reserve) {
+        # pwsh -File passes "Z,Y,X" as one string, not an array: split it here.
+        $Reserve = [string[]]@($Reserve | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         try {
             Set-SandboxLetters -Letters $Reserve | Out-Null
         } catch {

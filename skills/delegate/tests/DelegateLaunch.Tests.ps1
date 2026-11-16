@@ -482,6 +482,20 @@ Describe 'delegate parameter sets' {
         $r.Json.error | Should -Be '-Reserve and -Release cannot be used together' -Because $because
     }
 
+    It 'splits a comma-separated -Reserve passed through pwsh -File' {
+        # pwsh -File hands "a,b,c" over as one string. The repo's own drive is in use, so the
+        # reservation stops at the in-use check before mapping anything, with that letter named.
+        $drive = (Split-Path $script:RepoRoot -Qualifier).TrimEnd(':').ToUpperInvariant()
+        if ($drive -lt 'D') { Set-ItResult -Skipped -Because "the repo drive $drive is outside D-Z"; return }
+        $others = @(90..68 | ForEach-Object { [string][char]$_ } | Where-Object { $_ -ne $drive } | Select-Object -First 2)
+        $root = Join-Path $TestDrive 'split-root'
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxCheck', '-Reserve', "$drive,$($others[0]),$($others[1])") -ExtraEnv (Get-ChildEnv $script:SafeCursor $root $script:SafeLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -Be "sandbox: letter ${drive}: is in use" -Because $because
+    }
+
     It 'rejects -SandboxCheck -NoSandbox' {
         $r = Invoke-DelegateChild -ArgumentList @('-SandboxCheck', '-NoSandbox') -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
         $because = Format-DelegateResult $r
