@@ -366,3 +366,53 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
 4. **Acceptance command wider than the task:** the full fast suite (6.7 min) instead of the task's own tests (3 s). The phase test already runs the full suite after each phase.
 
 **Changes adopted (user, 2026-11-14):** the comprehension preflight gives a time and size estimate; a task estimated over ~20 min or ~600 changed lines goes back to be split (split by layer, so `code-hard` tasks stay on Grok high); a task's acceptance command (which `verify` also runs) covers only its own tests, and the full suite runs as the phase test. Rejected: telling the worker its time limit (the user doubted it would help). Committed on `main` as `8cb3a3a` (new `skills/delegate/personas/task-size-standard.md`, plus `delegate` SKILL.md and `feature` `plan.md`/`build.md`). **The G6 freeze moved** from `6ca02a1` to `8cb3a3a` (`skills/` differs only in those five files), so the rest of this build uses the size gate. Then back to `plan`: plan review 3 (`reviews/plan-3.md`) found the first three-way split of `sandbox-run` still over budget in its middle task (both lenses: 700-1,000 lines, 30-50 min), so phase 3 became four `code-hard` tasks. Review of the merged code: sound; one lead fix-up (the test file left `XAGENT_*` env vars pointing into a deleted TestDrive for later test files in the same run).
+
+### Phases 3-5 and the phase-5 checks (2026-11-15)
+
+- **Phase 3 (7 tasks after three plan-time splits; `code-hard`, Grok 4.7 high):** all merged. Phase test: fast suite 257 passed. Actual worker minutes against the comprehension preflight's estimate:
+
+  | Task | Estimate (min) | Actual (min) |
+  |---|---|---|
+  | sandbox-run-fns | 22-32 | 17 |
+  | sandbox-run-harness | 22-35 | 23 |
+  | sandbox-run-checks | 18-28 | 15 |
+  | sandbox-canary | 25-40 | 42 |
+  | sandbox-slots | 18-26 | 22 |
+
+  Grok's actuals land at or below the estimate's low end, except the canary.
+- **Bugs the phase-3 workers found and fixed:**
+  - `icacls` needs `(RA)` with parentheses.
+  - `icacls` cannot grant a bare RA on a folder without propagating it. The canary task replaced it with `NtSetSecurityObject`, adding one non-inheriting ACE.
+  - The lead fixed one bug: an assignment to PowerShell's read-only `$home`.
+- **Phase-3 probes (lead):**
+  - Cursor `--version` worked (1.6 s).
+  - `cursor -p` in a slot replied OK (7.3 s), using `--workspace <real path>` with the working folder at `<slot>:\`.
+  - ComfyUI's per-user Python, started from a read-list entry, printed `1`.
+  - Found: Node tools started from a read-list entry under the profile fail on `require` without `--preserve-symlinks`, because Node's realpath `lstat`s `C:\`. The user deferred granting RA on `C:\` (option C, 2026-11-15).
+  - Found: `HKCU\Environment` is readable from the container. The user accepted this as a risk (option A, 2026-11-15).
+- **G7 (two-part task file), compared with `fb-stages`:**
+  - Every phase-3 and phase-4 task used the "Decided / Yours to decide" file. Readiness review found 1 blocker and several majors each time, mostly gaps between the task file and code it pointed at: the login copy, parameter sets, exact strings. The lead pinned them before launch, in one preflight round each, with no second preflight round and no worker review round.
+  - Every worker passed its own acceptance command on the first run. Lead fix-ups were small: 1-3 lines each, in run-fns, kill-tree and sandbox-docs.
+  - `fb-stages` (feature-skill build, single-part task files) needed review rounds after the worker. G7's cost moved to preflight instead.
+  - Verdict: keep the two-part layout for `code-hard` tasks. The template change waits for the process rework (HANDOFF Open items).
+- **Phase 4:**
+  - `delegate-wiring` (Grok 4.7 high, 36 min) was kept as one task against a "split" size verdict, the lead's call under the user's 2026-11-15 rule.
+  - `doctor-check` (Composer 2.5, 97 s).
+  - Phase test: full suite 307 passed.
+- **Phase 5:**
+  - `sandbox-docs` (Composer 2.5, 38 s); the lead de-duplicated one sentence.
+  - Phase test: full suite 308 passed.
+- **Lead checks, phase 5, with the live `D:\cross-agent-loop\skills\delegate`:**
+  - **First use (CUJ 1):** reserved Z,Y,X (the user's choice). The documented `-Reserve Z,Y,X` failed, because `pwsh -File` passes it as one string. Fixed in `delegate.ps1`, with a test (`8ed0883`). Then `-SandboxCheck -Repo D:\cross-agent-loop` passed: support ok, runtime patched, all 9 canary checks ok (3 denied, git/node/network ok, no leak), no clean-up notes.
+  - **Live canary (G1, CUJ 3):** a real Cursor worker (Composer 2.5) was told to read both canaries. The `Live` test passed in 30 s.
+  - **In-sandbox suite (CUJ 2):** a sandboxed worker ran `scripts/test.ps1 -Fast`.
+    - Run 1: 243 passed, 5 failed. Windows wrote its shell caches into the worktree under a literal `%SystemDrive%` folder, because the container environment had no `SystemDrive`. Fixed by adding `SystemDrive` and `ProgramData` (`3121100`). Five tests assumed a host (icacls, CIM, `IsAppContainer`, the real log folder).
+    - Run 3: 245 passed, 0 failed, 25 skipped (container-only), worktree clean, `sandboxNotes` empty.
+  - **Overhead:** `delegate.ps1` wall time with an instant fake Cursor, 5 runs each, median 2.95 s sandboxed vs 1.24 s unsandboxed: +1.7 s, against a target of 5 s. Grant removal is included. The first run of a Cursor version took 3.66 s.
+  - **Token refresh:** after the probes, the live test and 3 sandboxed suite runs, `cursor-agent status` outside the sandbox still shows logged in. The design's one-day check is due 2026-11-16 after 16:30 local.
+  - **Seen in passing:** Cursor tries to add itself to the user PATH via `reg.exe add HKCU\Environment`. It is denied, but the error message quotes the user's whole PATH into the run's stderr log (the accepted registry-read risk).
+- **Not run by hand, covered by tests instead:**
+  - timeout kill of a process tree (CUJ 7; `Sandbox.Tests.ps1` "Kill ends the whole process tree");
+  - crash recovery (CUJ 6; the abandoned-mutex and live-ledger tests);
+  - sandbox failures (CUJ 5; `DelegateLaunch.Tests.ps1` forced-failure and zeroed-pattern cases).
+- **Not yet run:** the read-only canary as a `review` lens and a `council` seat (G2, CUJ 4), and the `delegate` regression with the sandbox on (G4). Both need the skill junctions pointed at the live skills, which happens after sign-off; the build still runs on the frozen copy.

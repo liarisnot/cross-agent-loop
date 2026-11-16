@@ -41,16 +41,20 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Machine setup done (2026-11-12):** junction `~/.claude/skills/feature` to `skills/feature`, and the `feature.ps1` allow rule (junction path) in `~/.claude/settings.json`. `doctor` reports ready through the junction.
 4. **Design write-back done (2026-11-13, approved by the user):** the D19 decisions (reconcile `name`, `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, `in-review` not checked, `branch-missing` at any stage, router-handled entry rows, council ids `<name12>-dc<k>`/`-pc<k>`) are folded into `docs/designs/feature-skill.md` as a post-lock amendment.
    - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
-5. **`worker-sandbox` feature, in `design-review` (2026-11-14).** Design `docs/designs/worker-sandbox.md`, all sections approved by the user, on branch `feature/worker-sandbox` (not pushed). Mechanism: a Windows **AppContainer** per worktree, chosen by the user over a restricted account, WSL2, or both. A feasibility probe on this machine passed: isolation, git, Pester, a full Cursor run. Probe scripts and debugging findings are in `docs/designs/worker-sandbox-probe/`.
-   - **Key facts:** Cursor's bundled Node (libuv 1.52.1) hangs in an AppContainer on any piped child spawn. The fix is a one-string patch on a copy of `node.exe`, until libuv 1.53 ships in Node (nodejs/node#66374). Worktrees and the run home are exposed as `subst` drive letters, because Node `lstat`s the drive root. `taskkill.exe` hangs inside the container. Windows 11 build 26300 or later is required.
-   - **G3 was amended:** network access is on or off per run, not a host allow-list.
-   - **Review round 1 done (2026-11-14, consolidated preset, all 10 lenses first try in 24 min):** synthesis `docs/features/worker-sandbox/reviews/design-1.md` (8 Blockers, 30 Majors, Nits). Several items are author decisions (B3, B4, B5, B6, M1, M5, M8, M13, M31).
-   - **Round 2 (re-audit of phases 7 and 9) done and resolved** (`design-2.md`, `resolution-2.md`). The design changed after round 1: one permanent AppContainer per reserved slot letter, a slot ledger, and per-run grants.
-   - **Design locked 2026-11-14** at `6ca02a1`, the commit to freeze from (G6). The feature is in stage `plan`.
-   - **Plan approved 2026-11-14** after two plan-review rounds (`plan-1.md`, `plan-2.md`; round 3 was declined by the user). The plan has 5 phases and 7 tasks (`plan.md`), check-ins are on-problems, and the feature is in stage `build`.
-   - **Next:** before phase 1, with the user's OK: `git worktree add --detach D:\cross-agent-loop.frozen 6ca02a1`, then point both skill junctions at its `skills\delegate` and `skills\feature`.
-   - **Then:** build. Full-suite tasks run with `-TimeoutSec 2700` and verify with `-TimeoutSec 2400`. Before the first build task, freeze `delegate` and `feature` (G6): point both junctions at a `main` worktree `D:\cross-agent-loop.frozen`, with the user's OK. The first `code-hard` task tries the two-part "Decided / Yours to decide" template (G7).
-   - **Machine change made:** Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules` (the user ran it as admin).
+5. **`worker-sandbox` feature: build done (2026-11-15), waiting for sign-off.** Design `docs/designs/worker-sandbox.md`, branch `feature/worker-sandbox` (not pushed). Every `cursor` worker, review lens and council seat now runs in a Windows AppContainer by default (`-NoSandbox` opts out). All 13 tasks are merged, and the full suite passes (308). Phase-5 lead checks are in `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks".
+   - **Machine state:** drive letters Z (runtime), Y and X (slots) are reserved in `%LOCALAPPDATA%\xagent\sandbox.json` (the user's choice). They are mapped with `subst`, which does not survive a reboot; the next run maps them again. Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules`.
+   - **Still open before sign-off:** the token-refresh check (`cursor-agent status` outside the sandbox after 2026-11-16 16:30 local). After sign-off, point the skill junctions back at `D:\cross-agent-loop\skills\`, remove `D:\cross-agent-loop.frozen`, then run the read-only canary as a lens and a council seat, plus the `delegate` regression, with the sandbox on.
+   - **Design write-back at sign-off:**
+     - RA on folders goes through `NtSetSecurityObject`, and `icacls` needs `(RA)`;
+     - `SystemDrive` and `ProgramData` were added to the container environment;
+     - `delegate.ps1` splits a comma-separated `-Reserve`;
+     - `doctor`'s sandbox check is `ok` only when letters are reserved;
+     - two accepted limits: Node read-list tools need `--preserve-symlinks` (RA on `C:\` deferred), and `HKCU\Environment` is readable (accepted risk).
+   - **Key facts:**
+     - Cursor's bundled Node (libuv 1.52.1) hangs in an AppContainer on any piped child spawn, so a copy of `node.exe` gets a one-string patch until libuv 1.53 (nodejs/node#66374).
+     - Worktrees and the run home are `subst` drive letters, because Node `lstat`s the drive root.
+     - `taskkill.exe` hangs inside the container.
+     - The sandbox needs Windows 11 build 26300 or later.
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
@@ -60,7 +64,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 
 ## Open items
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
-- **Worker sandboxing** is now the `worker-sandbox` feature (Next item 5). Until it ships, workers still run with `--force` and can read the machine's files.
+- **Worker sandboxing** is built (`worker-sandbox`, Next item 5) and waits for sign-off. The skill junctions still point at the frozen copy, so live runs are unsandboxed until they are switched back.
 - **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
