@@ -32,6 +32,8 @@ pwsh -NoProfile -File <skills dir>/delegate/scripts/delegate.ps1 -SandboxCheck -
 
 `<skills dir>` is the folder `### Installation` installs the skills into. With `-Repo`, the command also runs the sandbox canary in a detached worktree. Add per-user toolchain paths in `%LOCALAPPDATA%\xagent\sandbox.json` if workers need them.
 
+**In File Explorer** the three reserved drives (for example Z, Y and X) show the name of the drive they live on, such as "OS". They belong to the sandbox: the first is the Cursor runtime, the other two are run slots, mapped with `subst` into `%LOCALAPPDATA%\xagent\sandbox`. Windows can't give a `subst` drive its own name or icon without clearing the host drive's label, so they keep it. `-SandboxCheck -Release` removes them.
+
 ### What it blocks
 
 - Reading or writing outside the worktree, the run home, installed system tools and paths on the read list.
