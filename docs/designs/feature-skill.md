@@ -4,6 +4,7 @@
 *   **Status:** Approved (locked 2026-11-11)
 *   **Date:** 2026-11-09 (revised 2026-11-11 after review stages 5–9)
 *   **Amended:** 2026-11-13, after the build. The build's task files settled details this design left open or got wrong, and they are written back here: `reconcile`'s output and finished-run rule, the second-failure stop off the feature branch, the entry rows the router handles itself, and on-request council ids. No goal, gate or stage changed.
+*   **Amended:** 2026-11-15: worker sandboxing shipped (docs/designs/worker-sandbox.md). No goal, gate or stage changed.
 
 --------------------------------------------------------------------------------
 
@@ -658,7 +659,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 | Risk | Mitigation | What remains |
 |---|---|---|
 | **Workers change files** with permission checks bypassed (`--force`) | `verify` checks the changed files against the declared scope. The lead reviews every diff, file by file. Merges go only into `feature/<name>`. | — |
-| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`). No secrets, credentials or deploys go to workers. | **Unmitigated in v1:** the denylist is best effort. Files on disk (`~/.ssh`, `~/.aws/credentials`, `~/.npmrc`, other repos) and the network stay reachable. Don't use v1 on a machine whose files hold secrets you can't risk. Worker sandboxing is the first item after v1. |
+| **Workers can read any file and reach the network**, which diff review cannot see | `delegate.ps1` launches workers with known secret variables removed from the environment (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `AWS_*`, `AZURE_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `ANTHROPIC_*`, `OPENAI_*`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`). No secrets, credentials or deploys go to workers. | **Mitigated by `worker-sandbox`:** runs are confined to their worktree in an AppContainer; network stays on, and the Cursor token in the run home is an accepted risk (see `docs/designs/worker-sandbox.md`, Risks & Mitigations). |
 | **Reviewers load project instructions** from CLI rule files | Rule files are removed from read-only worktrees | — |
 | **The diff review is compressed by the Headroom proxy** | Per-file diffs, and a compression marker means "not reviewed" | — |
 | **The Cursor allowance runs out** | Any usage limit is a problem stop. The user resumes when the allowance is back. | The build waits. |
@@ -675,7 +676,7 @@ Side mode means a second active feature in its own lead worktree (`<repo>.xagent
 
 ## Future Improvements
 
-*   **Worker sandboxing (high priority, first after v1):** run workers under a restricted Windows account, in Windows Sandbox or in a VM, so a worker cannot read the rest of the machine or reach the network freely.
+*   **Worker sandboxing:** done in `worker-sandbox`.
 *   **Plugin packaging:** a `.claude-plugin/plugin.json` and a marketplace entry, so others install with `claude plugin install`, and `${CLAUDE_PLUGIN_ROOT}` replaces the base-directory paths.
 *   **Side mode:** a second active feature in its own lead worktree, with `promote` and overlap warnings between features ([Alternative F](#alternative-f-side-mode-in-v1)).
 *   **Deploy stage:** an optional stage after sign-off, run by the lead with its own approval gate, using secret references only.

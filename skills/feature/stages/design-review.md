@@ -26,7 +26,7 @@ delegate.ps1 -Agent cursor -Profile review -Persona <persona> -Model <model> -Fe
 
 Pass `-Standard <standard>` on that command only when `standard` is not null. `-Persona` is the persona name. `-Standard` is a file name in `<delegate dir>/personas/`.
 
-A failed run (`ok: false` or `timedOut: true`) follows "Failed delegate.ps1 runs" in SKILL.md: read `stderrTail`, retry once with the same command, and do not pass `-Resume` after a timeout. Then follow [Failed reviewers](#failed-reviewers). A usage-limit message is a problem stop at once.
+A failed run (`ok: false` or `timedOut: true`) follows "Failed delegate.ps1 runs" in SKILL.md: read `stderrTail`, retry once with the same command, and do not pass `-Resume` after a timeout. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. Then follow [Failed reviewers](#failed-reviewers). A usage-limit message is a problem stop at once.
 
 ### Task file
 
@@ -79,7 +79,7 @@ feature.ps1 commit-records -Repo <repo> -Name <name> -Message "review: design-<n
 
 ### Failed reviewers
 
-A lens run that ends without a report is retried once, with the same model. The retry ladder is not recorded. After a resume it starts again from the first attempt.
+A run that fails with `ok: false` and an `error` starting with `sandbox:` is not retried: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. A lens run that ends without a report is retried once, with the same model. The retry ladder is not recorded. After a resume it starts again from the first attempt.
 
 If it fails again, rerun it once on the other judgement model and log a decision. A Grok model (`grok-4.7-medium` or `grok-4.7-high`) is rerun as `glm-5.2-high`. A GLM model (`glm-5.2-high`) is rerun as `grok-4.7-medium`. A lens that ran on `composer-2.5` or `deepseek-v41-flash-1017-medium` is rerun once on `glm-5.2-high`.
 

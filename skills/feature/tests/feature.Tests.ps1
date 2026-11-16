@@ -76,6 +76,29 @@ Describe 'templates' {
         $text | Should -Match '## Acceptance criteria'
         $text | Should -Match '## Context'
     }
+
+    It 'task.md keeps its six headings and the sandbox line' {
+        $text = Get-Content -Raw -LiteralPath (Join-Path $script:TemplatesDir 'task.md')
+        $lines = $text -split "\r?\n"
+        $headings = @($lines | Where-Object { $_ -match '^#' })
+        $headings | Should -BeExactly @(
+            '# Task <id>: <title>'
+            '## Goal'
+            '## Scope'
+            '## Constraints'
+            '## Acceptance criteria'
+            '## Context'
+        )
+        $sandboxLine = @'
+You run in a sandbox: only this worktree, your home and temp folders, and installed tools are readable, and you cannot commit. Don't work around access errors; report them. `taskkill.exe` hangs here: use `Stop-Process -Force`.
+'@
+        $text.Contains($sandboxLine.TrimEnd()) | Should -BeTrue
+        $constraintsIdx = [array]::IndexOf($lines, '## Constraints')
+        $acceptanceIdx = [array]::IndexOf($lines, '## Acceptance criteria')
+        $sandboxIdx = $lines.IndexOf($sandboxLine.TrimEnd())
+        $sandboxIdx | Should -BeGreaterThan $constraintsIdx
+        $sandboxIdx | Should -BeLessThan $acceptanceIdx
+    }
 }
 
 Describe 'fixtures' {

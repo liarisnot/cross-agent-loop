@@ -40,7 +40,7 @@ delegate.ps1 -Agent cursor -Profile review -Persona drift_report -Model <model> 
 
 `<model>` is that run's `model`. Do not pass `-Standard`. Pass `-KeepRuleFiles` on that command if `status.diffTouchesRuleFiles` is true. The reviewer runs in a worktree detached at `feature/<name>`. It is given the locked design and the diff file by path.
 
-If it ends without a report, retry once with the same model. If that fails, run it once on `glm-5.2-high` and log a decision:
+A run that fails with `ok: false` and an `error` starting with `sandbox:` is not retried: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. If it ends without a report, retry once with the same model. If that fails, run it once on `glm-5.2-high` and log a decision:
 
 ```text
 feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "<id>: rerun on glm-5.2-high"

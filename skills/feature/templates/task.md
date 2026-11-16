@@ -10,6 +10,7 @@ Do not change anything else, and do not commit or push.
 
 ## Constraints
 No new dependencies unless the brief says so. Follow the existing style.
+You run in a sandbox: only this worktree, your home and temp folders, and installed tools are readable, and you cannot commit. Don't work around access errors; report them. `taskkill.exe` hangs here: use `Stop-Process -Force`.
 
 ## Acceptance criteria
 This command passes, run from the repository root:
