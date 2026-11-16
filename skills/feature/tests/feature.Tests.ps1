@@ -1880,7 +1880,12 @@ Describe 'feature.ps1 status' {
     It 'reports design stage defaults, treeClean, branch, and detached HEAD' {
         $repo = New-TestRepo
         New-FeatureAtStage -Repo $repo -Name 'dsn' -Stage 'design'
-        $j = Invoke-StatusOk $repo -Extra @('-Name', 'dsn')
+        # A log folder that exists, so the result does not depend on the machine's %LOCALAPPDATA%\xagent.
+        $prevLog = $env:XAGENT_LOG_DIR
+        $env:XAGENT_LOG_DIR = Join-Path $TestDrive ('log-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $env:XAGENT_LOG_DIR | Out-Null
+        try { $j = Invoke-StatusOk $repo -Extra @('-Name', 'dsn') }
+        finally { if ($null -eq $prevLog) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prevLog } }
         $j.phase | Should -BeNullOrEmpty
         $j.tasks | Should -Be @()
         $j.reviewRuns | Should -Be @()
@@ -2611,6 +2616,9 @@ Describe 'Stop-ProcessTree' {
     }
 
     It 'kills a two-level child process tree' {
+        if ((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue) -eq $null) {
+            Set-ItResult -Skipped -Because 'process queries (CIM) are not available here, as inside the sandbox'; return
+        }
         function Test-ProcessAlive {
             param([int]$Id)
             try {

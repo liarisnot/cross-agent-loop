@@ -165,7 +165,7 @@ AfterAll {
 Describe 'XagentSandbox' -Tag Sandbox {
     It 'imports and the XagentSandbox type exists' {
         [XagentSandbox] | Should -Not -BeNullOrEmpty
-        [XagentSandbox]::IsAppContainer() | Should -BeFalse
+        [XagentSandbox]::IsAppContainer() | Should -BeOfType [bool]
     }
 
     It 'imports a second time without throwing' {
@@ -843,7 +843,7 @@ Describe 'read list and environment' {
         }
 
         $expectedNames = @(
-            'SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS',
+            'SystemRoot', 'windir', 'SystemDrive', 'ProgramData', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS',
             'PROCESSOR_ARCHITECTURE', 'OS', 'PATH', 'PSModulePath', 'USERPROFILE',
             'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'CURSOR_INVOKED_AS',
             'NODE_COMPILE_CACHE'
@@ -1438,6 +1438,7 @@ Describe 'grant list and ledger' {
     }
 
     It 'returns the one grant icacls cannot remove' {
+        if ([XagentSandbox]::IsAppContainer()) { Set-ItResult -Skipped -Because 'an AppContainer cannot change file permissions'; return }
         $folder = Join-Path $TestDrive 'grant-remove'
         $file1 = Join-Path $folder 'file1.txt'
         $file2 = Join-Path $folder 'file2.txt'
@@ -2089,6 +2090,7 @@ Describe 'run functions' {
     }
 
     It 'writes a failed grant back and removes the one that succeeded' {
+        if ([XagentSandbox]::IsAppContainer()) { Set-ItResult -Skipped -Because 'an AppContainer cannot change file permissions'; return }
         $a = [IO.Path]::GetFullPath((Join-Path $TestDrive 'grant-a.txt'))
         $b = [IO.Path]::GetFullPath((Join-Path $TestDrive 'grant-b.txt'))
         $wt = [IO.Path]::GetFullPath((Join-Path $TestDrive 'failed-grant-wt'))

@@ -768,7 +768,7 @@ function Get-SandboxEnvironment {
     )
     # SandboxNative.cs sorts the block. The names are the whole environment the child receives.
     $list = New-Object System.Collections.Generic.List[string]
-    foreach ($name in @('SystemRoot', 'windir', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS')) {
+    foreach ($name in @('SystemRoot', 'windir', 'SystemDrive', 'ProgramData', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS')) {
         $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         if ($null -eq $value) { $value = '' }
         $list.Add("${name}=${value}")
