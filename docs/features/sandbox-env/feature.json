@@ -1,0 +1,7 @@
+{
+  "name": "sandbox-env",
+  "stage": "design",
+  "checkin": "on-problems",
+  "designDoc": "docs/designs/sandbox-env.md",
+  "gates": {}
+}
