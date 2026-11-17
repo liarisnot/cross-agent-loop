@@ -15,7 +15,15 @@
     - Every prompt, stdout and stderr is logged to <repo>\.xagent\runs\<TaskId>\.
     - The worker is told not to commit or push; the lead reviews and merges.
     - Antigravity (agy) is disabled unless models.json sets agy.enabled (T0: its FAQ forbids
-      wrapping agy in third-party agents on consumer plans).
+      wrapping agy in third-party agents on consumer plans). When enabled, agy runs only with -NoSandbox.
+    - Cursor workers, review lenses and council seats run in a Windows AppContainer by default.
+      A run can reach its worktree (read-only runs can only read it), its run home, and that repo's
+      git data. Everything else on disk is denied. Drive letters and the optional read list live in
+      sandbox.json under $env:XAGENT_SANDBOX_ROOT, or %LOCALAPPDATA%\xagent when that variable is unset.
+    - -NoSandbox runs Cursor as the user account, outside the AppContainer.
+    - -SandboxCheck [-Repo <repo>] [-Reserve a,b,c | -Release] checks the sandbox, reserves three
+      drive letters (the first is the runtime letter), or releases them. It prints one JSON object
+      and does not start a worker.
 
   Layout:
     <repo>\.xagent\runs\<TaskId>\<stamp>-<Seat|Agent>.{prompt.txt,stdout.json,stderr.txt,pid}
@@ -30,26 +38,78 @@
   pwsh -NoProfile -File delegate.ps1 -Agent cursor -Profile review -Persona zoom_out -Model grok-4.7-medium -Repo D:\proj -TaskId r1-zo -TaskFile t.md
   pwsh -NoProfile -File delegate.ps1 -Agent cursor -Profile council -Seat glm -Repo D:\proj -TaskId c1 -TaskFile q.md
   pwsh -NoProfile -File delegate.ps1 -Cleanup -Repo D:\proj -TaskId add-mul
+  pwsh -NoProfile -File delegate.ps1 -Agent cursor -Repo D:\proj -TaskId add-mul -TaskFile t.md -NoSandbox
+  pwsh -NoProfile -File delegate.ps1 -SandboxCheck
+  pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Repo D:\proj
+  pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Reserve Z,Y,X -Repo D:\proj
+  pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Release
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
+    [Parameter(ParameterSetName = 'Run')]
     [ValidateSet('cursor', 'agy')] [string]$Agent,
-    [Parameter(Mandatory)] [string]$Repo,
-    [Parameter(Mandatory)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,48}$')] [string]$TaskId,
+
+    [Parameter(Mandatory, ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Check')]
+    [string]$Repo,
+
+    [Parameter(Mandatory, ParameterSetName = 'Run')]
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,48}$')] [string]$TaskId,
+
+    [Parameter(ParameterSetName = 'Run')]
     [string]$TaskFile,
+
+    [Parameter(ParameterSetName = 'Run')]
     [string]$Base = 'HEAD',
+
+    [Parameter(ParameterSetName = 'Run')]
     [string]$Resume,
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidateSet('code', 'code-hard', 'review', 'council')] [string]$Profile = 'code',
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidatePattern('^[a-z_]+$')] [string]$Persona,   # review profile: personas/<name>.md (EGM goldfish)
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidatePattern('^[A-Za-z0-9._-]+\.md$')] [string]$Standard,   # review: a file in personas/ (default: personas/standards.json)
+
+    [Parameter(ParameterSetName = 'Run')]
     [string[]]$TargetFile,                             # extra files copied into the worktree's .xagent/
+
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$KeepRuleFiles,                            # read-only runs: keep AGENTS.md, .cursor/ etc. (they are the target)
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidatePattern('^[a-z0-9]+$')] [string]$Seat,    # names the read-only worktree and logs (council: grok|glm)
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidatePattern('^[a-z0-9][a-z0-9-]*$')] [string]$Feature,   # written to runs.jsonl and the pid file
+
+    [Parameter(ParameterSetName = 'Run')]
     [string]$Model,
+
+    [Parameter(ParameterSetName = 'Run')]
     [ValidateRange(30, 3600)] [int]$TimeoutSec = 900,
+
+    [Parameter(ParameterSetName = 'Run')]
     [switch]$Cleanup,
-    [switch]$Discard   # with -Cleanup: remove an UNMERGED worker worktree+branch, saving its diff to the run logs
+
+    [Parameter(ParameterSetName = 'Run')]
+    [switch]$Discard,   # with -Cleanup: remove an UNMERGED worker worktree+branch, saving its diff to the run logs
+
+    [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Check')]
+    [switch]$NoSandbox,
+
+    [Parameter(Mandatory, ParameterSetName = 'Check')]
+    [switch]$SandboxCheck,
+
+    [Parameter(ParameterSetName = 'Check')]
+    [string[]]$Reserve,
+
+    [Parameter(ParameterSetName = 'Check')]
+    [switch]$Release
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,6 +137,75 @@ function Restore-RuleFiles([string]$dir) {
     # put back any tracked rule file that is missing from the worktree
     $missing = @(& git -C $dir ls-files --deleted 2>$null | Where-Object { $_ -match $ruleFilePattern })
     if ($missing.Count -gt 0) { & git -C $dir checkout HEAD -- @missing 2>&1 | Out-Null }
+}
+
+function Import-DelegateSandbox {
+    try {
+        Import-Module -Name (Join-Path $PSScriptRoot 'Sandbox.psm1') -Force -ErrorAction Stop
+    } catch {
+        Fail "sandbox: cannot load Sandbox.psm1: $($_.Exception.Message)"
+    }
+}
+
+# ---------- sandbox check ----------
+# Runs before $Repo is resolved and before the -Agent and -TaskFile guards.
+if ($PSCmdlet.ParameterSetName -eq 'Check') {
+    if ($Reserve -and $Release) { Fail '-Reserve and -Release cannot be used together' }
+    if ($NoSandbox) { Fail '-NoSandbox cannot be used with -SandboxCheck' }
+    Import-DelegateSandbox
+    if ($Release) {
+        try {
+            $released = Remove-SandboxLetters
+        } catch {
+            Fail $_.Exception.Message
+        }
+        @{ ok = $true; release = $released } | ConvertTo-Json -Depth 6 -Compress
+        exit 0
+    }
+    if ($Reserve) {
+        # pwsh -File passes "Z,Y,X" as one string, not an array: split it here.
+        $Reserve = [string[]]@($Reserve | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        try {
+            Set-SandboxLetters -Letters $Reserve | Out-Null
+        } catch {
+            Fail $_.Exception.Message
+        }
+    }
+    $check = [ordered]@{ ok = $false; support = $null; runtime = $null; canary = $null }
+    $checkError = $null
+    try {
+        $support = Test-SandboxSupport
+        $check.support = $support
+        if ($support.ok) {
+            Initialize-SandboxLetters | Out-Null
+            $check.runtime = Get-SandboxRuntime
+            if (-not [string]::IsNullOrWhiteSpace($Repo)) {
+                $repoPath = (Resolve-Path -LiteralPath $Repo).Path
+                $check.canary = Invoke-SandboxCanary -Repo $repoPath
+            } else {
+                $check.canary = 'skipped (pass -Repo)'
+            }
+        } else {
+            $check.runtime = $null
+            $check.canary = 'skipped (support check failed)'
+        }
+    } catch {
+        $checkError = $_.Exception.Message
+        $check.error = $checkError
+    }
+    $supportOk = $false
+    if ($null -ne $check.support) { $supportOk = [bool]$check.support.ok }
+    $canaryOk = $false
+    if ($check.canary -eq 'skipped (pass -Repo)') {
+        $canaryOk = $true
+    } elseif ($null -ne $check.canary -and $check.canary -isnot [string]) {
+        $canaryProp = $check.canary.PSObject.Properties['ok']
+        if ($null -ne $canaryProp -and [bool]$canaryProp.Value) { $canaryOk = $true }
+    }
+    $check.ok = [bool]($supportOk -and $null -ne $check.runtime -and [string]::IsNullOrEmpty($checkError) -and $canaryOk)
+    $check | ConvertTo-Json -Depth 8 -Compress
+    if ($check.ok) { exit 0 }
+    exit 1
 }
 
 # ---------- resolve repo & worktree paths ----------
@@ -166,6 +295,7 @@ if (-not $Agent) { Fail '-Agent is required (cursor)' }
 if ($Agent -eq 'agy' -and -not ($cfg.PSObject.Properties['agy'] -and $cfg.agy.enabled)) {
     Fail "-Agent agy is disabled: $($cfg.agy.reason). Use -Agent cursor."
 }
+if ($Agent -eq 'agy' -and -not $NoSandbox) { Fail '-Agent agy runs only with -NoSandbox' }
 if (-not $TaskFile) { Fail '-TaskFile is required' }
 $TaskFile = (Resolve-Path -LiteralPath $TaskFile).Path
 
@@ -199,6 +329,26 @@ if ($isReview) {
     if ($std) {
         $stdFile = Join-Path $skillDir "personas\$std"
         if (-not (Test-Path -LiteralPath $stdFile)) { Fail "Standard not found: $stdFile" }
+    }
+}
+
+# ---------- sandbox setup (before any worktree, so a failure leaves none) ----------
+$cursorRoot = if ($env:XAGENT_CURSOR_ROOT) { $env:XAGENT_CURSOR_ROOT } else { Join-Path $env:LOCALAPPDATA 'cursor-agent' }
+$sandboxed = ($Agent -eq 'cursor' -and -not $NoSandbox)
+$runtime = $null
+if ($sandboxed) {
+    Import-DelegateSandbox
+    try {
+        $support = Test-SandboxSupport
+    } catch {
+        Fail $_.Exception.Message
+    }
+    if (-not $support.ok) { Fail ('sandbox: ' + (@($support.problems) -join '; ')) }
+    try {
+        Initialize-SandboxLetters | Out-Null
+        $runtime = Get-SandboxRuntime
+    } catch {
+        Fail $_.Exception.Message
     }
 }
 
@@ -283,17 +433,21 @@ Set-Content -LiteralPath "$logBase.prompt.txt" -Value ($prompt + "`n`n--- $taskN
 # ---------- build command ----------
 switch ($Agent) {
     'cursor' {
-        $launcher = Join-Path $env:LOCALAPPDATA 'cursor-agent\cursor-agent.ps1'
-        if (-not (Test-Path $launcher)) { Fail "Cursor CLI not found at $launcher" }
-        $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $cliArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher,
-                     '-p', '--trust', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
+        # Cursor arguments only. The unsandboxed path prefixes powershell.exe -File <launcher>.
+        # The sandboxed path runs <R>:\<version>\node.exe <R>:\<version>\index.js with these.
+        $cursorArgs = @('-p', '--trust', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
         # review: ask mode (read-only Q&A; plan mode made composer narrate without reporting)
         # council: plan mode (read-only analysis). Neither gets --force.
-        if ($isReview) { $cliArgs += @('--mode', 'ask') } elseif ($readOnly) { $cliArgs += @('--mode', 'plan') } else { $cliArgs += '--force' }
-        if ($Resume) { $cliArgs += @('--resume', $Resume) }
-        $cliArgs += $prompt
+        if ($isReview) { $cursorArgs += @('--mode', 'ask') } elseif ($readOnly) { $cursorArgs += @('--mode', 'plan') } else { $cursorArgs += '--force' }
+        if ($Resume) { $cursorArgs += @('--resume', $Resume) }
+        $cursorArgs += $prompt
         $env:CURSOR_INVOKED_AS = 'agent.cmd'
+        if (-not $sandboxed) {
+            $launcher = Join-Path $cursorRoot 'cursor-agent.ps1'
+            if (-not (Test-Path $launcher)) { Fail "Cursor CLI not found at $launcher" }
+            $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $cliArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher) + $cursorArgs
+        }
     }
     'agy' {
         # Reachable only with agy.enabled in models.json (e.g. a future API-key setup).
@@ -328,6 +482,11 @@ foreach ($name in @([Environment]::GetEnvironmentVariables().Keys)) {
 
 # ---------- run with timeout ----------
 $ruleFilesRemoved = @()
+$sandboxNotes = @()
+$run = $null
+$slot = $null
+$h = $null
+$launchError = $null
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $timedOut = $false; $exitCode = -1
 try {
@@ -335,24 +494,83 @@ try {
         $ruleFilesRemoved = @(Get-RuleFiles $wt)   # @(): a single file would otherwise come back as a string
         foreach ($rf in $ruleFilesRemoved) { Remove-Item -LiteralPath (Join-Path $wt $rf) -Force -ErrorAction SilentlyContinue }
     }
-    $proc = Start-Process -FilePath $exe -ArgumentList (($cliArgs | ForEach-Object { Quote $_ }) -join ' ') `
-        -WorkingDirectory $wt -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF -NoNewWindow -PassThru
-    try {
-        $me = Get-Process -Id $PID
-        [ordered]@{
-            pid = $PID; startTime = $me.StartTime.ToUniversalTime().ToString('o')
-            childPid = $proc.Id; childStartTime = $proc.StartTime.ToUniversalTime().ToString('o')
-            feature = $(if ($Feature) { $Feature } else { $null })
-        } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidF
-    } catch { }
-    $timedOut = -not $proc.WaitForExit($TimeoutSec * 1000)
-    if ($timedOut) { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null; $proc.WaitForExit(10000) | Out-Null }
-    $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
+    if ($sandboxed) {
+        $slot = Get-SandboxSlot -TimeoutSec 60
+        $wtName = [IO.Path]::GetFileName(((Get-Content -Raw -LiteralPath (Join-Path $wt '.git')) -replace '^gitdir:\s*', '').Trim())
+        $run = New-SandboxRun -Slot $slot -Runtime $runtime -Repo $Repo -Worktree $wt -WtName $wtName -ReadOnly:$readOnly
+        $sandboxExe = "$($run.runtimeLetter):\$($run.runtimeVersion)\node.exe"
+        $sandboxArgs = [string[]](@("$($run.runtimeLetter):\$($run.runtimeVersion)\index.js") + $cursorArgs)
+        $h = Start-SandboxProcess -Run $run -Exe $sandboxExe -Arguments $sandboxArgs -StdoutPath $stdoutF -StderrPath $stderrF
+        try {
+            $me = Get-Process -Id $PID
+            [ordered]@{
+                pid = $PID; startTime = $me.StartTime.ToUniversalTime().ToString('o')
+                childPid = $h.ProcessId; childStartTime = (Get-Process -Id $h.ProcessId).StartTime.ToUniversalTime().ToString('o')
+                feature = $(if ($Feature) { $Feature } else { $null })
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidF
+        } catch { }
+        $done = [XagentSandbox]::Wait($h, $TimeoutSec * 1000)
+        if ($done) {
+            $exitCode = [XagentSandbox]::Finish($h)
+        } else {
+            [XagentSandbox]::Kill($h)
+            [XagentSandbox]::Finish($h) | Out-Null
+            $timedOut = $true
+            $exitCode = -1
+        }
+    } else {
+        $proc = Start-Process -FilePath $exe -ArgumentList (($cliArgs | ForEach-Object { Quote $_ }) -join ' ') `
+            -WorkingDirectory $wt -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF -NoNewWindow -PassThru
+        try {
+            $me = Get-Process -Id $PID
+            [ordered]@{
+                pid = $PID; startTime = $me.StartTime.ToUniversalTime().ToString('o')
+                childPid = $proc.Id; childStartTime = $proc.StartTime.ToUniversalTime().ToString('o')
+                feature = $(if ($Feature) { $Feature } else { $null })
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidF
+        } catch { }
+        $timedOut = -not $proc.WaitForExit($TimeoutSec * 1000)
+        if ($timedOut) { try { $proc.Kill($true) } catch {}; $proc.WaitForExit(10000) | Out-Null }
+        $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
+    }
+} catch {
+    $launchError = $_.Exception.Message
 } finally {
     $sw.Stop()
+    if ($null -ne $slot) {
+        try {
+            $sandboxNotes = @(Stop-SandboxRun -Run $run -Slot $slot -Handle $h)
+        } catch {
+            $sandboxNotes += @("stop failed: $($_.Exception.Message)")
+        }
+    }
     Remove-Item -LiteralPath $pidF -Force -ErrorAction SilentlyContinue
     if (@($ruleFilesRemoved).Count -gt 0) { Restore-RuleFiles $wt }
 }
+if ($launchError) { Fail $launchError }
+
+$sandboxInfo = $null
+if ($sandboxed -and $null -ne $run) {
+    $sandboxInfo = [ordered]@{
+        container      = $run.container
+        slot           = $run.slot
+        runtimeLetter  = $run.runtimeLetter
+        runtimeVersion = $run.runtimeVersion
+        patched        = [bool]$run.patched
+    }
+}
+$flatNotes = New-Object System.Collections.Generic.List[string]
+foreach ($note in @($sandboxNotes)) {
+    if ($null -eq $note) { continue }
+    if ($note -is [System.Array]) {
+        foreach ($inner in @($note)) {
+            if ($null -ne $inner) { $flatNotes.Add([string]$inner) }
+        }
+    } else {
+        $flatNotes.Add([string]$note)
+    }
+}
+$sandboxNotes = $flatNotes.ToArray()
 
 # ---------- parse output ----------
 $raw = if (Test-Path $stdoutF) { Get-Content -Raw -LiteralPath $stdoutF } else { '' }
@@ -402,6 +620,10 @@ try {
     if ($Seat) { $rec.seat = $Seat }
     if ($Feature) { $rec.feature = $Feature }
     $rec.resumed = [bool]$Resume; $rec.seconds = [int]$sw.Elapsed.TotalSeconds; $rec.exitCode = $exitCode; $rec.timedOut = $timedOut; $rec.usage = $usage
+    $rec.sandboxed = [bool]$sandboxed
+    $rec.sandbox = $sandboxInfo
+    $rec.skillDir = $skillDir
+    $rec.sandboxNotes = @($sandboxNotes)
     Add-Content -LiteralPath (Join-Path $logDir 'runs.jsonl') -Value ($rec | ConvertTo-Json -Compress -Depth 4)
 } catch { }
 
@@ -452,6 +674,10 @@ Out-Summary @{
     reviewFile  = $reviewFile
     changes     = $changes
     diffStat    = $diffStat
-    stderrTail  = $stderrTail
-    logs        = $logBase
+    stderrTail   = $stderrTail
+    logs         = $logBase
+    sandboxed    = [bool]$sandboxed
+    sandbox      = $sandboxInfo
+    skillDir     = $skillDir
+    sandboxNotes = @($sandboxNotes)
 }

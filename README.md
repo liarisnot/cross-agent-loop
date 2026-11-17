@@ -10,7 +10,49 @@ Today the alternatives are Haiku sub-agents or manually copy-pasting instruction
 
 - **Local only** (for now): no cloud agents, no Cursor Cloud Agents API.
 - **Subscriptions**: Pro-level (~$20/mo) on Claude and Cursor for the automated loop.
-- **Platform**: Windows 11, PowerShell 7 + Git Bash.
+- **Platform**: Windows 11 build 26300 or later, PowerShell 7 + Git Bash.
+- **Pester**: 5.5 or later, installed for all users (needed to run the test suites).
+
+## Sandbox
+
+### Requirements
+
+- Windows 11 build 26300 or later (AppContainer support).
+- Pester 5.5+ for all users.
+- A Cursor CLI install under `%LOCALAPPDATA%\cursor-agent`.
+- Three free drive letters (`D`–`Z`) reserved on first use.
+
+### Setup
+
+The first sandboxed `delegate.ps1` run fails until drive letters are reserved. Approve three letters, then run:
+
+```text
+pwsh -NoProfile -File <skills dir>/delegate/scripts/delegate.ps1 -SandboxCheck -Reserve <a>,<b>,<c> -Repo <repo>
+```
+
+`<skills dir>` is the folder `### Installation` installs the skills into. With `-Repo`, the command also runs the sandbox canary in a detached worktree. Add per-user toolchain paths in `%LOCALAPPDATA%\xagent\sandbox.json` if workers need them.
+
+**In File Explorer** the three reserved drives (for example Z, Y and X) show the name of the drive they live on, such as "OS". They belong to the sandbox: the first is the Cursor runtime, the other two are run slots, mapped with `subst` into `%LOCALAPPDATA%\xagent\sandbox`. Windows can't give a `subst` drive its own name or icon without clearing the host drive's label, so they keep it. `-SandboxCheck -Release` removes them.
+
+### What it blocks
+
+- Reading or writing outside the worktree, the run home, installed system tools and paths on the read list.
+- The user's profile, other repos, other drives and `~\.ssh`.
+- Host `localhost` (unless an admin loopback exemption was added for a slot).
+- `git add`, `git commit` and hook or config changes under `.git`.
+- `taskkill.exe` inside the container (it hangs; use `Stop-Process -Force`).
+
+It does **not** block the network; reading the user's registry (including user environment variables — do not keep secrets there); or the Cursor login copied into each run's home for the session.
+
+### Uninstall
+
+When you no longer want sandboxing:
+
+```text
+pwsh -NoProfile -File <skills dir>/delegate/scripts/delegate.ps1 -SandboxCheck -Release
+```
+
+This removes the letter mappings, slot containers and runtime cache. It keeps the read list in `sandbox.json` and prints any loopback exemption still registered for a slot SID, with the admin command to remove it.
 
 ## Layout
 

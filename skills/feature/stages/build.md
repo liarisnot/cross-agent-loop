@@ -57,7 +57,7 @@ Then read each changed file's diff separately: `git -C <worktree> diff <baseSha>
 
 A usage-limit message is a problem stop at once. Do not retry it. There is no retry timer, no model fallback and no dollar estimate. The user resumes when the allowance is back. If the task is `preflight` or `running`, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`, then make the problem stop even when `failures` is 1.
 
-Every other failed run (`ok: false` or `timedOut: true`) takes the normal failed-run path. Read `stderrTail` and the logs, then retry once with the same command. After a timeout, do not pass `-Resume`: the worktree and its uncommitted changes are reused. If it fails again, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`. Run `feature.ps1 status -Repo <repo> -Name <name>` and read that task's `failures` in `status.tasks`. If `failures` is now 2, make a problem stop. This path covers workers and task preflights. Review lenses are not build tasks; they follow the ladder in `stages/design-review.md`.
+Every other failed run (`ok: false` or `timedOut: true`) takes the normal failed-run path. Read `stderrTail` and the logs, then retry once with the same command. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. A `sandbox:` error follows the usage-limit steps above: if the task is `preflight` or `running`, it is set `failed`, and a problem stop is made even when `failures` is 1. After a timeout, do not pass `-Resume`: the worktree and its uncommitted changes are reused. If it fails again, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`. Run `feature.ps1 status -Repo <repo> -Name <name>` and read that task's `failures` in `status.tasks`. If `failures` is now 2, make a problem stop. This path covers workers and task preflights. Review lenses are not build tasks; they follow the ladder in `stages/design-review.md`.
 
 ## Review rounds
 
@@ -93,7 +93,7 @@ delegate.ps1 -Agent cursor -Profile council -Seat grok -Feature <name> -Repo <re
 delegate.ps1 -Agent cursor -Profile council -Seat glm -Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k> -TaskFile <question file>
 ```
 
-Round 2 writes `<repo>/.xagent/features/<name>/<id>.council-<k>.r2.md` and adds `-Resume <that seat's sessionId>`, using that round-2 file as `-TaskFile`. A failed seat follows "Failed delegate.ps1 runs" in SKILL.md (read `stderrTail`, retry once, no `-Resume` after a timeout). A usage-limit message is a problem stop at once.
+Round 2 writes `<repo>/.xagent/features/<name>/<id>.council-<k>.r2.md` and adds `-Resume <that seat's sessionId>`, using that round-2 file as `-TaskFile`. A failed seat follows "Failed delegate.ps1 runs" in SKILL.md (read `stderrTail`, retry once, no `-Resume` after a timeout). If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. A usage-limit message is a problem stop at once.
 
 Clean up:
 

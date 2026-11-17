@@ -76,6 +76,29 @@ Describe 'templates' {
         $text | Should -Match '## Acceptance criteria'
         $text | Should -Match '## Context'
     }
+
+    It 'task.md keeps its six headings and the sandbox line' {
+        $text = Get-Content -Raw -LiteralPath (Join-Path $script:TemplatesDir 'task.md')
+        $lines = $text -split "\r?\n"
+        $headings = @($lines | Where-Object { $_ -match '^#' })
+        $headings | Should -BeExactly @(
+            '# Task <id>: <title>'
+            '## Goal'
+            '## Scope'
+            '## Constraints'
+            '## Acceptance criteria'
+            '## Context'
+        )
+        $sandboxLine = @'
+You run in a sandbox: only this worktree, your home and temp folders, and installed tools are readable, and you cannot commit. Don't work around access errors; report them. `taskkill.exe` hangs here: use `Stop-Process -Force`.
+'@
+        $text.Contains($sandboxLine.TrimEnd()) | Should -BeTrue
+        $constraintsIdx = [array]::IndexOf($lines, '## Constraints')
+        $acceptanceIdx = [array]::IndexOf($lines, '## Acceptance criteria')
+        $sandboxIdx = $lines.IndexOf($sandboxLine.TrimEnd())
+        $sandboxIdx | Should -BeGreaterThan $constraintsIdx
+        $sandboxIdx | Should -BeLessThan $acceptanceIdx
+    }
 }
 
 Describe 'fixtures' {
@@ -1857,7 +1880,12 @@ Describe 'feature.ps1 status' {
     It 'reports design stage defaults, treeClean, branch, and detached HEAD' {
         $repo = New-TestRepo
         New-FeatureAtStage -Repo $repo -Name 'dsn' -Stage 'design'
-        $j = Invoke-StatusOk $repo -Extra @('-Name', 'dsn')
+        # A log folder that exists, so the result does not depend on the machine's %LOCALAPPDATA%\xagent.
+        $prevLog = $env:XAGENT_LOG_DIR
+        $env:XAGENT_LOG_DIR = Join-Path $TestDrive ('log-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $env:XAGENT_LOG_DIR | Out-Null
+        try { $j = Invoke-StatusOk $repo -Extra @('-Name', 'dsn') }
+        finally { if ($null -eq $prevLog) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prevLog } }
         $j.phase | Should -BeNullOrEmpty
         $j.tasks | Should -Be @()
         $j.reviewRuns | Should -Be @()
@@ -2466,13 +2494,91 @@ Describe 'feature.ps1 finish' {
 }
 
 Describe 'feature.ps1 doctor' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @('Get-DoctorSandboxDetail'))
+    }
+
+    It 'builds the sandbox detail' {
+        $emptyLetters = @{
+            reserved = $false
+            runtime  = $null
+            slots    = [string[]]::new(0)
+            states   = @{}
+        }
+        $support1 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @()
+        }
+        Get-DoctorSandboxDetail $support1 | Should -Be 'build 26300; cursor not found; letters not reserved (run delegate.ps1 -SandboxCheck -Reserve with three free letters)'
+
+        $support2 = @{
+            ok            = $true
+            build         = 26300
+            cursorVersion = '2026.11.13-eacade1'
+            uv            = '1.52.1'
+            patternCount  = 1
+            letters       = @{
+                reserved = $true
+                runtime  = 'Z'
+                slots    = @('Y', 'X')
+                states   = @{ Z = 'ours'; Y = 'ours' }
+            }
+            problems      = @()
+        }
+        Get-DoctorSandboxDetail $support2 | Should -Be 'build 26300; cursor 2026.11.13-eacade1; uv 1.52.1; pattern 1; letters Z,Y,X (Z=ours, Y=ours, X=?)'
+
+        $support3 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @('a', 'b')
+        }
+        (Get-DoctorSandboxDetail $support3).StartsWith('problems: a | b; build 26300') | Should -BeTrue
+
+        $longProblem = 'x' * 400
+        $support4 = @{
+            ok            = $false
+            build         = 26300
+            cursorVersion = $null
+            uv            = $null
+            patternCount  = $null
+            letters       = $emptyLetters
+            problems      = @($longProblem)
+        }
+        (Get-DoctorSandboxDetail $support4).Length | Should -Be 300
+    }
+
     It 'reports prerequisites' -Tag 'Slow' {
-        $r = Invoke-Feature @('doctor') -WorkingDirectory $TestDrive
+        $sandboxRoot = Join-Path $TestDrive ("sandbox-{0}" -f [guid]::NewGuid())
+        $cursorRoot = Join-Path $TestDrive ("cursor-{0}" -f [guid]::NewGuid())
+        $logDir = Join-Path $TestDrive ("log-{0}" -f [guid]::NewGuid())
+        $prevSandbox = $env:XAGENT_SANDBOX_ROOT
+        $prevCursor = $env:XAGENT_CURSOR_ROOT
+        $prevLog = $env:XAGENT_LOG_DIR
+        try {
+            $env:XAGENT_SANDBOX_ROOT = $sandboxRoot
+            $env:XAGENT_CURSOR_ROOT = $cursorRoot
+            $env:XAGENT_LOG_DIR = $logDir
+            $r = Invoke-Feature @('doctor') -WorkingDirectory $TestDrive
+        }
+        finally {
+            if ($null -eq $prevSandbox) { Remove-Item Env:XAGENT_SANDBOX_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_SANDBOX_ROOT = $prevSandbox }
+            if ($null -eq $prevCursor) { Remove-Item Env:XAGENT_CURSOR_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_CURSOR_ROOT = $prevCursor }
+            if ($null -eq $prevLog) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prevLog }
+        }
         $r.ExitCode | Should -Be 0
         $r.Json.ok | Should -BeTrue
-        @($r.Json.checks).Count | Should -Be 9
+        @($r.Json.checks).Count | Should -Be 10
         $names = @($r.Json.checks | ForEach-Object { $_.name })
-        $names | Should -Be @('powershell', 'git', 'delegate', 'cursor-cli', 'cursor-login', 'models', 'pester', 'python', 'log-dir')
+        $names | Should -Be @('powershell', 'git', 'delegate', 'cursor-cli', 'cursor-login', 'models', 'pester', 'python', 'log-dir', 'sandbox')
         # Checks that hold on any machine able to run this suite (PowerShell 7.4+, git, the repo's own skills, Pester).
         foreach ($n in @('powershell', 'git', 'delegate', 'pester')) {
             ($r.Json.checks | Where-Object { $_.name -eq $n }).ok | Should -BeTrue -Because "$n check should pass here"
@@ -2489,5 +2595,177 @@ Describe 'feature.ps1 doctor' {
         ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/feature\.ps1 \*\)$' }).Count | Should -Be 1
         ($r.Json.permissionRules | Where-Object { $_ -match '/scripts/delegate\.ps1 \*\)$' }).Count | Should -Be 1
         $r.Raw | Should -Not -Match '@'
+        $sandboxCheck = $r.Json.checks | Where-Object { $_.name -eq 'sandbox' } | Select-Object -First 1
+        $sandboxCheck.required | Should -BeFalse
+        $sandboxCheck.ok | Should -BeFalse
+        $sandboxCheck.detail | Should -Not -BeNullOrEmpty
+        $build = [Environment]::OSVersion.Version.Build
+        if ($build -ge 26300) {
+            $expectedSandboxDetail = "build $build; cursor not found; letters not reserved (run delegate.ps1 -SandboxCheck -Reserve with three free letters)"
+            $sandboxCheck.detail | Should -Be $expectedSandboxDetail
+        } else {
+            Set-ItResult -Inconclusive -Because "build $build is below 26300"
+        }
+    }
+}
+
+Describe 'Stop-ProcessTree' {
+    BeforeAll {
+        . (Get-FeatureFunctionScript -Name @('Stop-ProcessTree'))
+        $script:treePids = [System.Collections.Generic.List[int]]::new()
+    }
+
+    It 'kills a two-level child process tree' {
+        $cimOk = $true
+        try { $null = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop } catch { $cimOk = $false }
+        if (-not $cimOk) { Set-ItResult -Skipped -Because 'process queries (CIM) are not available here, as inside the sandbox'; return }
+        function Test-ProcessAlive {
+            param([int]$Id)
+            try {
+                $null = [Diagnostics.Process]::GetProcessById($Id)
+                return $true
+            } catch [ArgumentException] {
+                return $false
+            }
+        }
+        function Get-DirectChildPids {
+            param([int]$ParentId)
+            @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ParentId" |
+                Where-Object { $_.Name -eq 'pwsh.exe' } |
+                ForEach-Object { [int]$_.ProcessId })
+        }
+        $pwshExe = (Get-Command -Name pwsh).Source
+        $grandScript = Join-Path $TestDrive 'sleep-grand.ps1'
+        Set-Content -LiteralPath $grandScript -Value 'Start-Sleep 120'
+        $leafScript = Join-Path $TestDrive 'sleep-leaf.ps1'
+        @"
+Start-Process -FilePath '$pwshExe' -ArgumentList '-NoProfile','-File','$grandScript' -WindowStyle Hidden
+Start-Sleep 120
+"@ | Set-Content -LiteralPath $leafScript
+        $childScript = Join-Path $TestDrive 'sleep-child.ps1'
+        @"
+Start-Process -FilePath '$pwshExe' -ArgumentList '-NoProfile','-File','$leafScript' -WindowStyle Hidden
+Start-Sleep 120
+"@ | Set-Content -LiteralPath $childScript
+        $outer = Start-Process -FilePath $pwshExe -ArgumentList @('-NoProfile', '-File', $childScript) -WindowStyle Hidden -PassThru
+        $script:treePids.Add($outer.Id) | Out-Null
+
+        $childId = $null
+        $childDeadline = [datetime]::UtcNow.AddSeconds(10)
+        while ([datetime]::UtcNow -lt $childDeadline) {
+            $childCandidates = @(Get-DirectChildPids -ParentId $outer.Id)
+            if ($childCandidates.Count -gt 0) {
+                $childId = $childCandidates[0]
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $childId | Should -Not -BeNullOrEmpty
+        $script:treePids.Add($childId) | Out-Null
+
+        $grandchildId = $null
+        $grandchildDeadline = [datetime]::UtcNow.AddSeconds(10)
+        while ([datetime]::UtcNow -lt $grandchildDeadline) {
+            $grandchildren = @(Get-DirectChildPids -ParentId $childId)
+            if ($grandchildren.Count -gt 0) {
+                $grandchildId = $grandchildren[0]
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $grandchildId | Should -Not -BeNullOrEmpty
+        $script:treePids.Add($grandchildId) | Out-Null
+
+        { Stop-ProcessTree -ProcessId $outer.Id } | Should -Not -Throw
+
+        $gone = $false
+        $waitUntil = [datetime]::UtcNow.AddSeconds(15)
+        while ([datetime]::UtcNow -lt $waitUntil) {
+            if (-not (Test-ProcessAlive $outer.Id) -and -not (Test-ProcessAlive $childId) -and -not (Test-ProcessAlive $grandchildId)) {
+                $gone = $true
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $gone | Should -BeTrue
+    }
+
+    It 'Stop-ProcessTree -ProcessId 999999 does not throw and emits nothing' {
+        $out = Stop-ProcessTree -ProcessId 999999 6>&1
+        $out | Should -BeNullOrEmpty
+    }
+
+    It 'does not throw when the process has already exited' {
+        $p = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-Command', 'exit 0') -WindowStyle Hidden -PassThru
+        $null = $p.WaitForExit(5000)
+        { Stop-ProcessTree -ProcessId $p.Id } | Should -Not -Throw
+    }
+
+    AfterAll {
+        foreach ($id in $script:treePids) {
+            try {
+                [Diagnostics.Process]::GetProcessById($id).Kill($true)
+            } catch {
+            }
+        }
+    }
+}
+
+Describe 'scripts/test.ps1' {
+    BeforeAll {
+        $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
+        $script:testRunner = Join-Path $script:repoRoot 'scripts/test.ps1'
+        $script:fixtureDir = Join-Path $TestDrive 'test-runner-fixture'
+        New-Item -ItemType Directory -Path $script:fixtureDir -Force | Out-Null
+        @"
+Describe 'fixture' {
+    It 'passes' { 1 | Should -Be 1 }
+    It 'fails' { 1 | Should -Be 2 }
+    It 'slow' -Tag 'Slow' { Set-Content (Join-Path `$PSScriptRoot 'slow-ran.txt') x }
+}
+"@ | Set-Content -LiteralPath (Join-Path $script:fixtureDir 'fixture.Tests.ps1') -Encoding utf8
+
+        function script:Invoke-TestRunner {
+            param([string[]]$ExtraArgs)
+            $stdoutF = [IO.Path]::GetTempFileName()
+            $stderrF = [IO.Path]::GetTempFileName()
+            try {
+                $argList = @('-NoProfile', '-File', $script:testRunner) + $ExtraArgs
+                $p = Start-Process -FilePath 'pwsh' -ArgumentList $argList -Wait -PassThru -NoNewWindow `
+                    -RedirectStandardOutput $stdoutF -RedirectStandardError $stderrF
+                $out = ''
+                if (Test-Path -LiteralPath $stdoutF) { $out += [IO.File]::ReadAllText($stdoutF) }
+                if (Test-Path -LiteralPath $stderrF) { $out += [IO.File]::ReadAllText($stderrF) }
+                return @{ ExitCode = $p.ExitCode; Output = $out }
+            } finally {
+                foreach ($f in @($stdoutF, $stderrF)) {
+                    if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+    }
+
+    It 'with -Fast excludes Slow tests and exits 1 when a test fails' {
+        $slowFile = Join-Path $script:fixtureDir 'slow-ran.txt'
+        if (Test-Path -LiteralPath $slowFile) { Remove-Item -LiteralPath $slowFile -Force }
+        $r = Invoke-TestRunner -ExtraArgs @('-Fast', '-Path', $script:fixtureDir)
+        $r.ExitCode | Should -Be 1
+        Test-Path -LiteralPath $slowFile | Should -BeFalse
+    }
+
+    It 'without -Fast runs Slow tests and exits 1 when a test fails' {
+        $slowFile = Join-Path $script:fixtureDir 'slow-ran.txt'
+        if (Test-Path -LiteralPath $slowFile) { Remove-Item -LiteralPath $slowFile -Force }
+        $r = Invoke-TestRunner -ExtraArgs @('-Path', $script:fixtureDir)
+        $r.ExitCode | Should -Be 1
+        Test-Path -LiteralPath $slowFile | Should -BeTrue
+        Remove-Item -LiteralPath $slowFile -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'with no existing test folders prints no test folders and exits 0' {
+        $missing = Join-Path $TestDrive 'empty-test-folder'
+        $r = Invoke-TestRunner -ExtraArgs @('-Fast', '-Path', $missing)
+        $r.ExitCode | Should -Be 0
+        $r.Output | Should -Match 'no test folders'
     }
 }

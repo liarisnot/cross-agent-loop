@@ -1,0 +1,97 @@
+# Decisions: worker-sandbox
+
+Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by feature.ps1.
+
+- 2026-11-14T08:03:29Z [stage] design -> design-review
+- 2026-11-14T21:06:52Z [decision] design-1 D1: launch node.exe index.js directly (probed config; no promote-staged)
+- 2026-11-14T21:06:53Z [decision] design-1 D2: per-run grants only, no shared capabilities
+- 2026-11-14T21:06:53Z [decision] design-1 D3: three reserved drive letters (runtime + 2 slots), per-slot mutex, -Release
+- 2026-11-14T21:06:54Z [decision] design-1 D4: read list kept, fully specified (MyApp/ComfyUI per-user Python)
+- 2026-11-14T21:06:55Z [decision] design-1 D5: G7 two-part template moves to the phase-3 code-hard task
+- 2026-11-14T21:06:56Z [decision] design-1 D6: freeze by junction swap to D:/cross-agent-loop.frozen; skillDir field
+- 2026-11-14T21:06:57Z [decision] design-1 D7: G3 restated (network on); permanent per-slot containers; host-localhost exemption proven by probe 2026-11-14, not granted
+- 2026-11-14T21:06:57Z [decision] design-1 D8: token refresh measured first; read-only token if login breaks
+- 2026-11-14T21:06:58Z [decision] design-1 D9: taskkill in target repos is a documented limit
+- 2026-11-14T21:06:59Z [dismiss] codebase_details #8 (M20): pipe-name bytes claimed single-backslash 19 bytes - contested, lead read node.exe at 0x55df524: double backslash, 20 bytes; version-compare half fixed
+- 2026-11-14T21:07:00Z [dismiss] style p7 n2,n3 (N22): two phrasings kept, the lens itself marked them acceptable
+- 2026-11-14T21:09:39Z [reaudit] d3: phase 7
+- 2026-11-14T21:09:40Z [reaudit] d3: phase 9
+- 2026-11-14T21:10:27Z [dismiss] worker-sandb-d2-zo-p5: not run - the user chose a re-audit of phases 7 and 9 only after round 1
+- 2026-11-14T21:10:28Z [dismiss] worker-sandb-d2-ic-p5: not run - the user chose a re-audit of phases 7 and 9 only after round 1
+- 2026-11-14T21:10:28Z [dismiss] worker-sandb-d2-cm-p6: not run - the user chose a re-audit of phases 7 and 9 only after round 1
+- 2026-11-14T21:10:29Z [dismiss] worker-sandb-d2-zo-p8: not run - the user chose a re-audit of phases 7 and 9 only after round 1
+- 2026-11-14T21:41:23Z [dismiss] design-2 R30 (style p9 S4): contested - the read-only worktree is granted read (row 2), not read+write
+- 2026-11-14T21:41:24Z [dismiss] design-2 R31 (readiness N5): contested - probe 6 loaded Pester from C:/Program Files with no grant
+- 2026-11-14T21:41:24Z [dismiss] design-2 R28 (style p7 S6), R34 wording parts: declined - measured fact / wording only
+- 2026-11-14T21:44:56Z [gate] design-locked: "lock the design"
+- 2026-11-14T21:44:57Z [stage] design-review -> plan
+- 2026-11-14T21:58:01Z [dismiss] comprehension cm1: check-in mode on-problems undefined in plan.md - generated line; defined in the feature skill, which is the reader's context for plan approval
+- 2026-11-15T00:13:41Z [decision] plan: sandbox: no-retry rule extended to signoff.md and design-review.md failed-reviewer ladder (found in plan review 2; design rule applies to every retry-once site)
+- 2026-11-15T00:13:42Z [dismiss] comprehension p2 cm1: junction target wording - lead step; design Machine setup gives per-skill paths
+- 2026-11-15T00:13:43Z [dismiss] comprehension p2 cm2: fixtures/ in sandbox-run files - intended for its own container-test fixtures; phase 4 owns fake-cursor and depends on phase 3
+- 2026-11-15T00:13:43Z [dismiss] comprehension p2 cm3,cm5,cm6: Sandbox tag, six headings, lens/council canary invocation - covered by the design the briefs point to and existing tests
+- 2026-11-15T00:17:27Z [decision] review plan-3: declined by the user
+- 2026-11-15T00:17:27Z [gate] plan-approved: "approve plan"
+- 2026-11-15T00:17:27Z [decision] checkin: on-problems
+- 2026-11-15T00:17:28Z [stage] plan -> build
+- 2026-11-15T03:58:15Z [fix-up] kill-tree: 1 files, 1 lines — tree test also asserts the deepest (grandchild) pid is gone
+- 2026-11-15T05:38:12Z [fix-up] sandbox-core: 1 files, 12 lines — Sandbox.Tests.ps1 restores XAGENT_* env vars and unloads the module in AfterAll
+- 2026-11-15T05:52:39Z [stage] build -> plan: apply the fixes, time estimate, split tasks and narrower acceptance test
+- 2026-11-15T06:01:43Z [dismiss] comprehension: TEST REPOS rule missing from sandbox-access — it creates no repo or worktree; its refusal test checks paths only
+- 2026-11-15T06:01:44Z [dismiss] comprehension: no per-task Describe filter for iterating — skills/delegate/tests runs in seconds, so the narrowed command is the iteration command
+- 2026-11-15T06:05:08Z [decision] plan review: no fourth round; the user approved the plan revised after plan-3
+- 2026-11-15T06:05:09Z [gate] plan-approved: "approve the plan"
+- 2026-11-15T06:05:09Z [decision] checkin: on-problems
+- 2026-11-15T06:05:10Z [stage] plan -> build
+- 2026-11-15T06:17:26Z [stop] sandbox-access: preflight size gate says split (comprehension: 550-900 lines, 30-50 min); readiness: 1 Blocker, 8 Major spec gaps in the grant-list and ledger contracts
+- 2026-11-15T06:21:03Z [resume] user: make all 3 changes (size-standard calibration and Composer comprehension on main 30d2d29; split sandbox-access in two; pin readiness findings)
+- 2026-11-15T06:21:04Z [stage] build -> plan: make all 3 changes: split sandbox-access in two
+- 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-grants size claim doubtful — readiness estimates 300-430 lines, 15-22 min; the build-time size gate checks again
+- 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-readlist Decided wording — the task file's Decided list replaces the brief boilerplate
+- 2026-11-15T06:25:57Z [dismiss] implementation_readiness: drop fixtures/ from readlist and grants — harmless scope, no effect
+- 2026-11-15T07:41:23Z [decision] review plan-5: declined by the user
+- 2026-11-15T07:41:24Z [gate] plan-approved: "decline review round 5 and approve plan"
+- 2026-11-15T07:41:24Z [decision] checkin: on-problems
+- 2026-11-15T07:41:25Z [stage] plan -> build
+- 2026-11-15T07:47:13Z [dismiss] comprehension (sandbox-readlist preflight): acceptance runs all of skills/delegate/tests — that folder runs in ~3 s; settled in plan review 3
+- 2026-11-15T08:10:26Z [stop] sandbox-grants: preflight size gate says split, borderline (480-620 lines, 20-28 min; limit 20 min / 600 lines); readiness: no Blockers, fixes pinned in the task file
+- 2026-11-15T08:15:01Z [resume] user override: run sandbox-grants as one task (borderline split verdict; 'yeah borderline go with 1')
+- 2026-11-15T16:12:11Z [stop] sandbox-lifecycle: preflight size gate says split (comprehension, composer-2.5: 500-700 lines, 28-42 worker min); proposed: sandbox-run (3 functions + harness + worker-run test) and sandbox-run-checks (read-only, kill, unremovable-grant tests); readiness found 1 Blocker (Stop-SandboxRun with no run) and 6 Majors to pin
+- 2026-11-15T20:10:59Z [resume] user: split sandbox-lifecycle into sandbox-run and sandbox-run-checks ('yes, split it into those two')
+- 2026-11-15T20:11:00Z [stage] build -> plan: split sandbox-lifecycle into sandbox-run and sandbox-run-checks
+- 2026-11-15T20:30:46Z [gate] plan-approved: "approve plan"
+- 2026-11-15T20:30:46Z [decision] checkin: on-problems
+- 2026-11-15T20:30:53Z [stage] plan -> build
+- 2026-11-15T20:32:21Z [stop] sandbox-run: preflight size gate says split again (comprehension: 450-650 lines, 22-32 min; readiness agrees); proposed: sandbox-run-fns (3 functions + container-free unit tests) and sandbox-run-harness (container harness + worker-run test); readiness: 1 Blocker (unreadable vs missing ledger in Stop-SandboxRun) and 8 Majors to pin
+- 2026-11-15T20:40:02Z [resume] user: split sandbox-run into sandbox-run-fns and sandbox-run-harness ('ok split it')
+- 2026-11-15T20:40:03Z [stage] build -> plan: split sandbox-run into sandbox-run-fns and sandbox-run-harness
+- 2026-11-15T20:57:28Z [gate] plan-approved: "approve the plan"
+- 2026-11-15T20:57:28Z [decision] checkin: on-problems
+- 2026-11-15T20:57:29Z [stage] plan -> build
+- 2026-11-15T21:01:47Z [dismiss] implementation_readiness (sandbox-run-fns preflight): login-copy test now — the copies are verified by sandbox-run-harness's container test; keeps this task inside its size estimate
+- 2026-11-15T22:26:20Z [fix-up] sandbox-run-fns: 1 files, 7 lines — rename $home to $runHome in New-SandboxRun ($HOME is read-only; every real run threw after writing the ledger)
+- 2026-11-15T22:38:48Z [stop] sandbox-run-harness preflight: size split verdict (22-35 worker min, 260-380 lines); lead recommends no split (the proposed harness-only half has no test; recent actuals land at or below the low end: run-fns est 22-32, actual 17); acceptance-scope Major also flagged; readiness gaps pinned in the task file
+- 2026-11-15T22:42:56Z [resume] user: launch sandbox-run-harness as one task (cohesive unit; size verdict overridden by lead judgment)
+- 2026-11-15T23:13:09Z [dismiss] comprehension (sandbox-run-checks preflight): narrow the acceptance command — the full skills/delegate/tests run takes about 16 s and doubles as a regression check; the narrow filter is given for iterating
+- 2026-11-15T23:31:02Z [decision] sandbox-canary: the observe-only probes (Cursor --version and -p in a slot, per-user Python from a read-list entry) move from the worker to the lead after the merge; the worker task keeps the canary function and its container tests as one cohesive unit
+- 2026-11-15T23:33:37Z [decision] sandbox-canary preflight: size verdict split (25-40 min); lead keeps one task under the user's 2026-11-15 rule (lead decides splits; size alone is no reason). Calibration: grok actuals at or below the low end (harness 23 vs 22-35, checks 15 vs 18-28). Acceptance-scope Major dismissed as before; readiness findings pinned
+- 2026-11-16T00:23:39Z [decision] phase 3 test passed: scripts/test.ps1 -Fast, 257 passed, 0 failed (39 Live/Slow not run)
+- 2026-11-16T00:25:15Z [decision] phase 3 probes (lead, scratch root): runtime 2026.11.13-eacade1 libuv 1.52.1 patched; Cursor --version ok 1.6 s; Cursor -p in a slot replied OK in 7.3 s (its PATH write to HKCU was denied, but the error showed HKCU\Environment is readable from the container); ComfyUI bootstrap Python from a read-list entry printed 1. Letters, profiles and probe root removed
+- 2026-11-16T04:08:48Z [decision] C:\ RA for Node read-list tools: deferred (user, option C). No RA on C:\ or C:\Users until a real need forces it; --preserve-symlinks is the known workaround. Note at sign-off.
+- 2026-11-16T04:08:49Z [decision] HKCU\Environment readable from the container: accepted risk (user, option A). Record in the design's risks table at sign-off with a note never to keep secrets in user environment variables; revisit if it becomes a problem.
+- 2026-11-16T04:23:36Z [decision] delegate-wiring preflight: size lens said split (35-55 min, 750-1100 lines); lead keeps it one task (the parameter sets, run path and the tests that prove them are one cohesive unit) and runs it on grok-4.7-high with a 3300 s timeout. Readiness: 1 blocker (tests would copy the real Cursor login: child gets a fake profile) and 5 majors, all pinned in the task file.
+- 2026-11-16T05:05:19Z [decision] doctor-check preflight: size fits (10-18 min). Readiness: detail format and test were under-pinned; lead pinned a named detail builder with a fast unit test, problems-first ordering, fixed unreserved-letters text, and an isolated Cursor root and log dir in the Slow test.
+- 2026-11-16T05:20:09Z [decision] phase 4 test passed: scripts/test.ps1 (full, with Slow) 307 passed, 0 failed, 1 not run (Live); no letters or test roots left behind
+- 2026-11-16T05:24:16Z [decision] sandbox-docs preflight: size fits (12-20 min). Readiness: README structure, parameter table rows, the stale secret-variable paragraph, the two no-report retry places and test quoting were open; lead pinned all of them.
+- 2026-11-16T05:25:32Z [fix-up] sandbox-docs lead fix-up (3 files changed, 3 insertions(+), 3 deletions(-)): de-duplicated the sandbox: sentence at the two no-report retries (my pin made it repeat), and listed the full read-list refusal rules in delegate SKILL.md
+- 2026-11-16T06:30:09Z [decision] phase 5 test passed: scripts/test.ps1 (full) 308 passed, 0 failed, 1 not run (Live). User chose drive letters Z,Y,X for the real reservation.
+- 2026-11-16T06:31:26Z [fix-up] phase 5 lead fix-up (2 files changed, 16 insertions(+)): pwsh -File passes -Reserve Z,Y,X as one string; delegate.ps1 now splits it, with a test. Then reserved Z,Y,X (user's choice) and ran -SandboxCheck -Repo on this repo: support ok, runtime 2026.11.13-eacade1 patched, canary all 9 checks ok, no clean-up notes.
+- 2026-11-16T06:50:41Z [fix-up] in-sandbox suite run 1 (sandboxed worker, slot Y): 243 passed, 5 failed, 22 skipped; a literal %SystemDrive% cache folder appeared in the worktree. Lead fix-up (3 files changed, 14 insertions(+), 4 deletions(-)): SystemDrive and ProgramData added to the container environment; 5 tests skip or adapt inside a container. Host fast suite 270/0.
+- 2026-11-16T07:06:32Z [decision] in-sandbox suite (CUJ 2) passed on run 3: a sandboxed composer worker (slot Y, live delegate.ps1) ran scripts/test.ps1 -Fast: 245 passed, 0 failed, 25 skipped (container-only tests), worktree clean, sandboxNotes empty
+- 2026-11-16T07:07:13Z [decision] overhead: delegate.ps1 wall time with an instant fake Cursor, 5 runs each: median 2.95 s sandboxed vs 1.24 s unsandboxed (+1.7 s, target 5 s), grant removal included; first run of a version 3.66 s. Separate root and letters W,V,U, released after.
+- 2026-11-16T07:08:21Z [decision] build done: all 13 tasks merged, full suite 308; lead checks recorded in docs/test-plan.md. Token-refresh check due after 2026-11-16 16:30 local; G2 lens/council canary and the G4 regression run after the junctions go back to the live skills.
+- 2026-11-17T00:43:44Z [decision] token refresh (one-day check, 2026-11-16): a sandboxed worker ran ok (sandboxed true, no notes), and cursor-agent status outside the sandbox still shows logged in. Sign-off is unblocked.
+- 2026-11-17T03:29:30Z [stage] build -> signoff
+- 2026-11-17T03:42:11Z [decision] sign-off drift check: no missing behaviour except G1 write/list (probed now: a real sandboxed worker was denied writing to the profile, D:\ and the main checkout, and listing the profile) and G2/G4 (after sign-off, need live junctions); other differences recorded in as-built.md
+- 2026-11-17T03:42:54Z [decision] sign-off full suite: 309 passed, 0 failed (1 not run by the suite's filter), 762 s
+- 2026-11-17T03:51:36Z [gate] signed-off: "sign off"

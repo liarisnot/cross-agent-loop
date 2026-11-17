@@ -335,3 +335,84 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
 | S8 | Killing a worker for CUJ 2: workers launch detached (`Start-Process -WindowStyle Hidden`), so Esc in the sandbox session stops only the session's monitor, never the worker | Procedure note for the next run: kill it from outside with a watcher that waits for the run's `<logs>.pid` file and runs `taskkill /T /F /PID <pid>` (step 6 used this, 3 s after launch). To see "where are we?" explain a killed run live, `/clear` right after the kill, before the session's monitor notices and relaunches |
 | S6 | `feature.ps1 stage -Reason` writes only the reason (`[stage] go back to the plan`), losing which stage it left | Fixed in `10c5656`: `<from> -> <to>: <reason>`, also for abandon |
 | S7 | The lint `fb-stages-check.ps1` fails on the main checkout because `core.autocrlf` gives CRLF files | Fixed (lead's lint in the git-excluded `.xagent/tasks/`): it checks committed line endings with `git ls-files --eol` |
+
+## worker-sandbox build (from 2026-11-14)
+
+- **G6 freeze (2026-11-14):** `D:\cross-agent-loop.frozen` is a detached worktree at `6ca02a1`, the design-lock commit. `~\.claude\skills\delegate` and `~\.claude\skills\feature` point at its `skills\delegate` and `skills\feature`, with the user's approval ("yes freeze skill"). `feature.ps1 doctor` through the junctions reports ready. Every run of this build should show `skillDir` under `D:\cross-agent-loop.frozen` once phase 4 adds the field. Before that, the junction targets are the record. After sign-off, the junctions go back to `D:\cross-agent-loop\skills\` and the worktree is removed.
+- **Phase 1 (2026-11-14):** `test-runner` and `kill-tree` (Composer 2.5) merged. `kill-tree` took 17 min; one lead fix-up (its tree test didn't assert that the deepest process died). Phase test: full suite, 224 passed on `feature/worker-sandbox`.
+- **`reconcile` loses the worktree (bug in the frozen `feature.ps1`):** for a detached worker that finished while no session was running, `reconcile` moved the task `running` → `in-review` but recorded no `worktree` or `baseSha`, so `verify` refused (`task kill-tree has no worktree in state.json`). Worked around by reading `summary-r1.json` and running `task -Status in-review -Worktree -BaseSha` by hand. Fix after this build: `reconcile` should take those fields from the run's summary file.
+- **Not a worker fault: Windows Terminal auto-update (2026-11-14 17:28).** Every pwsh window and Claude CLI session closed while the user was away. The user suspected `kill-tree` (its tests kill process trees). Its transcript showed only kills of processes it had started itself, and it had finished at 17:00. The event log showed the Microsoft Store updating Windows Terminal 1.24 → 1.25 at 17:28:49, which closes every tab.
+
+### `sandbox-core` run 1 timed out at 50 min: root cause (2026-11-14)
+
+`sandbox-core` (`code-hard`, Grok 4.7 high) timed out at `-TimeoutSec 3000` while running its acceptance command. Run 2 (fresh session, same worktree) finished in 15.5 min **with no edits**: run 1 had finished the work and was killed about 40 s before its final test run ended.
+
+**Timeline of run 1** (rebuilt from probe-file mtimes and terminal logs; Cursor writes no usage for a killed run):
+
+| Time | Minutes | Activity |
+|---|---|---|
+| 20:18 → ~20:50 | ~32 | Read the design and code (20 reads, 14 greps, 5 probes), wrote the 3 files (1,842 lines, 83 KB), 4 unit-test runs |
+| 20:52 → 20:55 | 3 | PowerShell quirks in its own tests (empty arrays collapsing to `$null`) |
+| 20:55 → 21:02 | 7 | Undocumented Windows behaviour: `CreateProcess` into an AppContainer fails unless the environment block is sorted in Windows' case-insensitive ordinal order and holds `LOCALAPPDATA` (~12 probes and a web search) |
+| ~21:00 | — | Context compaction (139 turns, ~415 KB) |
+| 21:02:35 → 21:08:39 | 6 | Acceptance command `scripts/test.ps1 -Fast` (~6.7 min, 224 feature tests this task can't affect); killed by the timeout |
+
+**Measured (run 2):** 926 s; 40.0k output tokens, of which 37.6k reasoning (94%); 179k input, 1.56M cache read; ~76 output tokens/s. Unit-test runs took 2-3 s each, so tests didn't eat the time; model turns did. **Estimated (run 1):** ~32 min at ~76 tok/s is ~140k output tokens against ~21k tokens of code, so roughly 110k reasoning tokens, about 5× the code. The user's "1,800 lines takes a few minutes" holds for a fast low-reasoning model (Composer), not for Grok high on Win32 interop.
+
+**Root causes, most to least:**
+1. **Task too big:** one task held a C# P/Invoke layer, a 795-line module and 32 tests, plus a 75-line task file with ~40 pinned rules to reason against. Nothing in plan or preflight estimated size or time.
+2. **High reasoning effort scales with size:** right for small hard tasks, costly over 1,800 lines.
+3. **Design gap handed to the worker:** the environment-block rule was not in the design; discovery belongs in design probes, not a timed run.
+4. **Acceptance command wider than the task:** the full fast suite (6.7 min) instead of the task's own tests (3 s). The phase test already runs the full suite after each phase.
+
+**Changes adopted (user, 2026-11-14):** the comprehension preflight gives a time and size estimate; a task estimated over ~20 min or ~600 changed lines goes back to be split (split by layer, so `code-hard` tasks stay on Grok high); a task's acceptance command (which `verify` also runs) covers only its own tests, and the full suite runs as the phase test. Rejected: telling the worker its time limit (the user doubted it would help). Committed on `main` as `8cb3a3a` (new `skills/delegate/personas/task-size-standard.md`, plus `delegate` SKILL.md and `feature` `plan.md`/`build.md`). **The G6 freeze moved** from `6ca02a1` to `8cb3a3a` (`skills/` differs only in those five files), so the rest of this build uses the size gate. Then back to `plan`: plan review 3 (`reviews/plan-3.md`) found the first three-way split of `sandbox-run` still over budget in its middle task (both lenses: 700-1,000 lines, 30-50 min), so phase 3 became four `code-hard` tasks. Review of the merged code: sound; one lead fix-up (the test file left `XAGENT_*` env vars pointing into a deleted TestDrive for later test files in the same run).
+
+### Phases 3-5 and the phase-5 checks (2026-11-15)
+
+- **Phase 3 (7 tasks after three plan-time splits; `code-hard`, Grok 4.7 high):** all merged. Phase test: fast suite 257 passed. Actual worker minutes against the comprehension preflight's estimate:
+
+  | Task | Estimate (min) | Actual (min) |
+  |---|---|---|
+  | sandbox-run-fns | 22-32 | 17 |
+  | sandbox-run-harness | 22-35 | 23 |
+  | sandbox-run-checks | 18-28 | 15 |
+  | sandbox-canary | 25-40 | 42 |
+  | sandbox-slots | 18-26 | 22 |
+
+  Grok's actuals land at or below the estimate's low end, except the canary.
+- **Bugs the phase-3 workers found and fixed:**
+  - `icacls` needs `(RA)` with parentheses.
+  - `icacls` cannot grant a bare RA on a folder without propagating it. The canary task replaced it with `NtSetSecurityObject`, adding one non-inheriting ACE.
+  - The lead fixed one bug: an assignment to PowerShell's read-only `$home`.
+- **Phase-3 probes (lead):**
+  - Cursor `--version` worked (1.6 s).
+  - `cursor -p` in a slot replied OK (7.3 s), using `--workspace <real path>` with the working folder at `<slot>:\`.
+  - ComfyUI's per-user Python, started from a read-list entry, printed `1`.
+  - Found: Node tools started from a read-list entry under the profile fail on `require` without `--preserve-symlinks`, because Node's realpath `lstat`s `C:\`. The user deferred granting RA on `C:\` (option C, 2026-11-15).
+  - Found: `HKCU\Environment` is readable from the container. The user accepted this as a risk (option A, 2026-11-15).
+- **G7 (two-part task file), compared with `fb-stages`:**
+  - Every phase-3 and phase-4 task used the "Decided / Yours to decide" file. Readiness review found 1 blocker and several majors each time, mostly gaps between the task file and code it pointed at: the login copy, parameter sets, exact strings. The lead pinned them before launch, in one preflight round each, with no second preflight round and no worker review round.
+  - Every worker passed its own acceptance command on the first run. Lead fix-ups were small: 1-3 lines each, in run-fns, kill-tree and sandbox-docs.
+  - `fb-stages` (feature-skill build, single-part task files) needed review rounds after the worker. G7's cost moved to preflight instead.
+  - Verdict: keep the two-part layout for `code-hard` tasks. The template change waits for the process rework (HANDOFF Open items).
+- **Phase 4:**
+  - `delegate-wiring` (Grok 4.7 high, 36 min) was kept as one task against a "split" size verdict, the lead's call under the user's 2026-11-15 rule.
+  - `doctor-check` (Composer 2.5, 97 s).
+  - Phase test: full suite 307 passed.
+- **Phase 5:**
+  - `sandbox-docs` (Composer 2.5, 38 s); the lead de-duplicated one sentence.
+  - Phase test: full suite 308 passed.
+- **Lead checks, phase 5, with the live `D:\cross-agent-loop\skills\delegate`:**
+  - **First use (CUJ 1):** reserved Z,Y,X (the user's choice). The documented `-Reserve Z,Y,X` failed, because `pwsh -File` passes it as one string. Fixed in `delegate.ps1`, with a test (`8ed0883`). Then `-SandboxCheck -Repo D:\cross-agent-loop` passed: support ok, runtime patched, all 9 canary checks ok (3 denied, git/node/network ok, no leak), no clean-up notes.
+  - **Live canary (G1, CUJ 3):** a real Cursor worker (Composer 2.5) was told to read both canaries. The `Live` test passed in 30 s.
+  - **In-sandbox suite (CUJ 2):** a sandboxed worker ran `scripts/test.ps1 -Fast`.
+    - Run 1: 243 passed, 5 failed. Windows wrote its shell caches into the worktree under a literal `%SystemDrive%` folder, because the container environment had no `SystemDrive`. Fixed by adding `SystemDrive` and `ProgramData` (`3121100`). Five tests assumed a host (icacls, CIM, `IsAppContainer`, the real log folder).
+    - Run 3: 245 passed, 0 failed, 25 skipped (container-only), worktree clean, `sandboxNotes` empty.
+  - **Overhead:** `delegate.ps1` wall time with an instant fake Cursor, 5 runs each, median 2.95 s sandboxed vs 1.24 s unsandboxed: +1.7 s, against a target of 5 s. Grant removal is included. The first run of a Cursor version took 3.66 s.
+  - **Token refresh:** after the probes, the live test and 3 sandboxed suite runs, `cursor-agent status` outside the sandbox still shows logged in. The design's one-day check is due 2026-11-16 after 16:30 local. **Done 2026-11-16 16:43:** one more sandboxed worker (Composer 2.5, `sandboxed: true`, no clean-up notes) ran, then `cursor-agent status` outside the sandbox still showed logged in. The copied login does not break the host login.
+  - **Seen in passing:** Cursor tries to add itself to the user PATH via `reg.exe add HKCU\Environment`. It is denied, but the error message quotes the user's whole PATH into the run's stderr log (the accepted registry-read risk).
+- **Not run by hand, covered by tests instead:**
+  - timeout kill of a process tree (CUJ 7; `Sandbox.Tests.ps1` "Kill ends the whole process tree");
+  - crash recovery (CUJ 6; the abandoned-mutex and live-ledger tests);
+  - sandbox failures (CUJ 5; `DelegateLaunch.Tests.ps1` forced-failure and zeroed-pattern cases).
+- **Not yet run:** the read-only canary as a `review` lens and a `council` seat (G2, CUJ 4), and the `delegate` regression with the sandbox on (G4). Both need the skill junctions pointed at the live skills, which happens after sign-off; the build still runs on the frozen copy.

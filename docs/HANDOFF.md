@@ -41,6 +41,20 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Machine setup done (2026-11-12):** junction `~/.claude/skills/feature` to `skills/feature`, and the `feature.ps1` allow rule (junction path) in `~/.claude/settings.json`. `doctor` reports ready through the junction.
 4. **Design write-back done (2026-11-13, approved by the user):** the D19 decisions (reconcile `name`, `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, `in-review` not checked, `branch-missing` at any stage, router-handled entry rows, council ids `<name12>-dc<k>`/`-pc<k>`) are folded into `docs/designs/feature-skill.md` as a post-lock amendment.
    - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
+5. **`worker-sandbox` feature: build done (2026-11-15), waiting for sign-off.** Design `docs/designs/worker-sandbox.md`, branch `feature/worker-sandbox` (not pushed). Every `cursor` worker, review lens and council seat now runs in a Windows AppContainer by default (`-NoSandbox` opts out). All 13 tasks are merged, and the full suite passes (308). Phase-5 lead checks are in `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks".
+   - **Machine state:** drive letters Z (runtime), Y and X (slots) are reserved in `%LOCALAPPDATA%\xagent\sandbox.json` (the user's choice). They are mapped with `subst`, which does not survive a reboot; the next run maps them again. Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules`.
+   - **Token refresh passed (2026-11-16):** the host Cursor login was still valid after a day of sandboxed runs. Build findings that differ from the locked design are in `docs/features/worker-sandbox/as-built.md`. After sign-off, point the skill junctions back at `D:\cross-agent-loop\skills\`, remove `D:\cross-agent-loop.frozen`, then run the read-only canary as a lens and a council seat, plus the `delegate` regression, with the sandbox on.
+   - **Design write-back at sign-off:**
+     - RA on folders goes through `NtSetSecurityObject`, and `icacls` needs `(RA)`;
+     - `SystemDrive` and `ProgramData` were added to the container environment;
+     - `delegate.ps1` splits a comma-separated `-Reserve`;
+     - `doctor`'s sandbox check is `ok` only when letters are reserved;
+     - two accepted limits: Node read-list tools need `--preserve-symlinks` (RA on `C:\` deferred), and `HKCU\Environment` is readable (accepted risk).
+   - **Key facts:**
+     - Cursor's bundled Node (libuv 1.52.1) hangs in an AppContainer on any piped child spawn, so a copy of `node.exe` gets a one-string patch until libuv 1.53 (nodejs/node#66374).
+     - Worktrees and the run home are `subst` drive letters, because Node `lstat`s the drive root.
+     - `taskkill.exe` hangs inside the container.
+     - The sandbox needs Windows 11 build 26300 or later.
 
 ## How to run a review lens
 - `pwsh -NoProfile -File skills/delegate/scripts/delegate.ps1 -Agent cursor -Profile review -Persona <lens> -Model <model> -Repo D:/cross-agent-loop -TaskId <id> -TaskFile <path>`
@@ -50,9 +64,32 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 
 ## Open items
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
-- **Worker sandboxing** (a restricted account or a VM) is the **high-priority first item after v1**. Workers run with `--force` and can read the machine's files.
+- **Worker sandboxing** is built (`worker-sandbox`, Next item 5) and waits for sign-off. The skill junctions still point at the frozen copy, so live runs are unsandboxed until they are switched back.
+- **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
+- **Process changes to make after `worker-sandbox` signs off (decided by the user, 2026-11-15).** Don't change the process mid-feature. These follow from the waterfall item below. During phase 3, preflight size gates forced three "go back to plan" cycles: sandbox-access, sandbox-lifecycle, and sandbox-run. Each meant a re-import and a fresh plan-approved gate for what was only a task split.
+  - **Roles, scrum-style.** The user is the PO. The lead (Claude, the EGM "elephant") is the lead engineer.
+    - How tasks are split and assigned to workers is the lead's call. It needs no PO approval and need not be surfaced, as long as the locked design doesn't change.
+    - The lead still logs each split as a decision in `decisions.md`.
+  - **Escalate only on scope or cost growth.** For example: the phase goal, the files or the design change, or a phase's total estimate grows by more than about 50%.
+    - Present it as a priority choice, not a yes/no on the lead's plan. For example: do it now, defer it to a later phase or feature, or cut something else, each with its cost.
+    - The reason: when scope changes, the PO re-prioritizes what gets done first.
+  - **No mechanical splits.** Minutes and lines alone are not a reason to split.
+    - The test is whether the task can be cut without losing the cohesion of the code produced.
+    - A cohesive unit stays whole even when big. Example: sandbox-run-harness (the container harness plus the one test that proves it) was estimated at 22–35 min. The user had it launched as one task, because either half alone proves nothing.
+  - **Reviewers advise; the lead decides.**
+    - Preflight and review verdicts are input. The lead may overrule them with a logged reason.
+    - When the pushback is strong and the lead is unsure, the furthest escalation is a council, not a stop that waits on the PO.
+  - **Changes to make:**
+    - In `stages/build.md`, the rule "a `split` verdict is a problem stop" (preflight section) becomes lead judgment. A split inside the phase's scope is a logged decision with no go-back to plan and no re-gate.
+    - Add a cohesion question to `task-size-standard.md`.
+    - Consider planning at phase granularity, with task files written just in time.
+    - Recalibrate the size estimates. grok-4.7-high actuals land at or below the low end of composer's estimates: run-fns, estimate 22–32 min, actual 17; slots, estimate 18–26, actual 22.
+  - **Bugs found along the way:**
+    - `feature.ps1 schedule -Repo .` run from a subfolder (`.xagent/features/<name>`) read the wrong state and offered the long-merged `test-runner` task. `-Repo` should resolve to the git top level.
+    - `reconcile` moves a finished task to `in-review` without setting its `worktree` and `baseSha`.
+    - Detached worker launches have no completion signal. The lead must start a background wait on the worker pid, or the result sits unreviewed (it did for about an hour on 2026-11-15).
 - **Delete the local backup bundle** that still contains the pre-rewrite history with the email, once confident.
 - **Before making the repo public,** delete and recreate the GitHub repo, so old commits aren't reachable by SHA.
 - **First trial on a real repo** (for example MyApp), using `feature` once it's built.

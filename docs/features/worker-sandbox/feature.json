@@ -1,0 +1,280 @@
+{
+  "name": "worker-sandbox",
+  "stage": "signoff",
+  "checkin": "on-problems",
+  "designDoc": "docs/designs/worker-sandbox.md",
+  "gates": {
+    "design-locked": {
+      "at": "2026-11-14T21:44:56Z",
+      "quote": "lock the design",
+      "sha": "6ca02a12a551c98e55f418d59398d705155827db",
+      "designBlob": "379f46602b94102bc5dad226c18d9e27bd7c67a9"
+    },
+    "plan-approved": {
+      "at": "2026-11-15T20:57:28Z",
+      "quote": "approve the plan",
+      "sha": "a2c6307539c5a78ff7db26d37ed076833d62c949"
+    },
+    "signed-off": {
+      "at": "2026-11-17T03:51:36Z",
+      "quote": "sign off",
+      "sha": "f5385781cab1e232154bc22d779111dd030c6ffc"
+    }
+  },
+  "summary": "Build worker-sandbox as designed in docs/designs/worker-sandbox.md (locked at 6ca02a1): every delegate agent run starts inside a Windows AppContainer on a reserved slot drive letter, with per-run grants, a slot ledger and a patched copy of Cursor's node.exe. READING THE BRIEFS: 'file N' means entry N under the design's 'Detailed Implementation Plan > Target Files to Create/Modify'; the design is the source of truth wherever a brief is shorter. Profiles (code, code-hard) pick the delegate worker model from skills/delegate/models.json. WORKER TASKS: thirteen, in five phases, following the design's Build order with one deliberate change: phase 2 runs after phase 1 instead of beside it, because every task's test command is scripts/test.ps1, which phase 1 creates. Phase 3's seven task files are the G7 experiment, taken as one group: each is written in two parts (Decided / Yours to decide), and the group is afterwards compared with fb-stages, the earlier tightly specified code-hard task (the feature skill's build step 4, D19 in docs/test-plan.md). Phase 4's two tasks run one after the other, because both test runs execute the container tests, which reserve real drive letters and slot profiles. LEAD AND USER STEPS (not tasks): (1) before phase 1, with the user's approval, the lead creates the frozen copy (git worktree add --detach D:/cross-agent-loop.frozen 6ca02a1; moved on 2026-11-14 to main's 8cb3a3a and then 30d2d29, which add only the task size gate) and points ~/.claude/skills/delegate and ~/.claude/skills/feature at it (G6); (2) the first sandboxed run on the real machine needs the user to approve three drive letters (CUJ 1); tests reserve and release their own; (3) after phase 5 the lead runs the checks that need a real Cursor login or a human (the Live canary as worker, lens and council seat; the suite inside the sandbox; the delegate regression; crash recovery; overhead; the token-refresh check over at least a day) and records them, the G6 skillDir check and the G7 comparison in docs/test-plan.md and docs/HANDOFF.md. No step involves secrets, credentials or deploys. TASK SIZE AND TIMEOUTS (re-planned 2026-11-14 after sandbox-core's 50-minute timeout; docs/test-plan.md): each unmerged task targets about 20 worker minutes or 600 lines, checked by the comprehension preflight's size gate (skills/delegate/personas/task-size-standard.md), and its test command runs only its own tests (skills/delegate/tests, or a Pester filter on one Describe), so workers no longer run the full suite. Workers launch with delegate.ps1 -TimeoutSec 2700 and verify with feature.ps1 verify -TimeoutSec 900. The phase tests run the fast suite (phases 2 and 3) or the full suite (phases 1, 4 and 5); the full suite took 695 s on 2026-11-12 and grows with the container tests, so the lead runs phase tests with a timeout of at least 1800 s.",
+  "phases": [
+    {
+      "n": 1,
+      "rationale": "Groundwork with no sandbox code: one test command for workers and the lead, and no taskkill.exe anywhere, so this repo's own suite can later run inside the sandbox.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1",
+      "tasks": [
+        {
+          "id": "test-runner",
+          "title": "scripts/test.ps1: the repo's one test command",
+          "dependsOn": [],
+          "files": [
+            "scripts/test.ps1"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+          "profile": "code",
+          "brief": "Create scripts/test.ps1 as the design's file 7 specifies: param([switch]$Fast); Import-Module Pester -MinimumVersion 5.5; New-PesterConfiguration with Run.Path set to whichever of skills/feature/tests and skills/delegate/tests exist (resolved from the script's own folder, so it works from any working folder; if neither exists, print 'no test folders' and exit 0), Run.PassThru = $true, TestRegistry.Enabled = $false (Pester's test registry writes HKCU, which an AppContainer cannot write), Filter.ExcludeTag 'Live' plus 'Slow' with -Fast, Output.Verbosity 'Normal'; exit with [Math]::Min($result.FailedCount, 250). Nothing else changes. Its contract is tested by kill-tree.",
+          "delegateTaskId": "worker-sandb-test-runner"
+        },
+        {
+          "id": "kill-tree",
+          "title": "Replace taskkill.exe with a .NET tree kill",
+          "dependsOn": [
+            "test-runner"
+          ],
+          "files": [
+            "skills/feature/scripts/feature.ps1",
+            "skills/feature/tests/feature.Tests.ps1",
+            "skills/delegate/scripts/delegate.ps1",
+            "scripts/test.ps1"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1",
+          "profile": "code",
+          "brief": "Add Stop-ProcessTree -ProcessId to feature.ps1 ([Diagnostics.Process]::GetProcessById($id).Kill($true), ignore 'process has exited' and 'not found', wait up to 10 s) and use it at the three taskkill.exe sites: the reconcile orphan kill (~line 1806), the verify timeout in Invoke-TaskTestCommand (~2290) and the Invoke-DoctorCommand timeout (~2556). In delegate.ps1, replace the timeout's '& taskkill.exe /T /F /PID' (line ~349) with 'try { $proc.Kill($true) } catch {}; $proc.WaitForExit(10000) | Out-Null'; nothing else in delegate.ps1 changes in this task. Add an UNTAGGED feature.Tests.ps1 test (not Slow) that a two-level child process tree (pwsh starting pwsh starting Start-Sleep) is fully gone after Stop-ProcessTree. Acceptance also includes: 'git grep -n taskkill -- skills/feature/scripts skills/delegate/scripts' finds nothing. The test command runs the full suite because the existing tests that cover these kill sites (feature.Tests.ps1 lines ~1485 and ~2281) are tagged Slow. The new test gets Stop-ProcessTree through the file's existing pattern, BeforeAll { . (Get-FeatureFunctionScript -Name @('Stop-ProcessTree')) } (see TestHelpers.ps1 and feature.Tests.ps1 ~140), never by dot-sourcing the whole script. Also add an untagged Describe 'scripts/test.ps1' in feature.Tests.ps1 that builds a temp folder with one passing, one failing and one Slow-tagged test, runs the script's configuration logic against it with -Fast, and asserts the Slow test was excluded and the exit code is 1; and that a run with no test folders prints 'no test folders' and exits 0 (point the script at the temp folder through a parameter or environment variable the script reads; if test-runner gave it none, add -Path to scripts/test.ps1, which this task may edit).",
+          "delegateTaskId": "worker-sandb-kill-tree"
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "rationale": "The sandbox core: the native launcher and everything that does not depend on a run: support check, runtime cache and node.exe patch, reserved letters. Fully specified by the design (files 1 and 2, the functions the Build order lists for phase 2).",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "sandbox-core",
+          "title": "SandboxNative.cs and Sandbox.psm1 part 1 (support, runtime cache and patch, letters)",
+          "dependsOn": [
+            "test-runner"
+          ],
+          "files": [
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/tests/Sandbox.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+          "profile": "code-hard",
+          "brief": "Implement exactly what docs/designs/worker-sandbox.md specifies for phase 2. File 1, SandboxNative.cs: XagentSandbox with EnsureProfile, DeleteProfile, Start, Wait, Kill, Finish, IsAppContainer, and RunHandle, with the constants, handle-inheritance and environment-block rules given there. File 2, Sandbox.psm1: its Settings, Test-LetterFree, Test-SandboxSupport (all checks except the read-list rule, which phase 3 adds), Get-SandboxRuntime (version choice, reuse contract, copy, patch, prune), Get-SandboxConfig, Set-SandboxLetters and Initialize-SandboxLetters, with the exact error strings; every thrown error starts with 'sandbox:'. Pinned here because other tasks consume them: (a) Test-SandboxSupport returns {ok, build, cursorVersion, uv, patternCount, letters, problems[]} where letters is {reserved: bool, runtime: <letter or null>, slots: [<letters>], states: {<letter>: 'free'|'ours'|'used'}}; no letters reserved is NOT a problem (ok stays true, reserved = false); (b) the copy path first deletes any existing <version> folder and any <version>.partial; (c) the module loads SandboxNative.cs only if the type is not loaded yet (if (-not ('XagentSandbox' -as [type])) { Add-Type -Path ... }), so importing it twice in one process works. Tests: the phase-2 unit tests listed in file 5, in skills/delegate/tests/Sandbox.Tests.ps1, using XAGENT_SANDBOX_ROOT and XAGENT_CURSOR_ROOT under TestDrive; no test calls a real model or touches the user's sandbox.json. The version-choice test takes its oracle from the real launcher: it extracts Parse-VersionString from %LOCALAPPDATA%/cursor-agent/cursor-agent.ps1 with the PowerShell AST, and skips with a reason when that file is unreadable. Reference: docs/designs/worker-sandbox-probe/ (probe5.ps1's AC class; the pattern bytes and offset in the README). Test-LetterFree stays private (not exported); test it with InModuleScope. (d) For a Cursor version whose node.exe has the pattern a number of times other than 1 and libuv below 1.53, Test-SandboxSupport's problem string is exactly 'Cursor <version>: node.exe pipe-name pattern found <n> times; Sandbox.psm1 needs an update (use -NoSandbox to run unsandboxed)', the same text Get-SandboxRuntime throws after its 'sandbox: ' prefix; delegate.ps1 joins problems with '; ' after 'sandbox: '. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos. ",
+          "delegateTaskId": "worker-sandb-sandbox-core"
+        }
+      ]
+    },
+    {
+      "n": 3,
+      "rationale": "Running one sandboxed task: read list, environment, grants, ledger, slots, run home, launch, stop, canary and release. Split on 2026-11-14 into seven sequential code-hard tasks of about 20 worker minutes each, after sandbox-core's 50-minute timeout (docs/test-plan.md) and plan review 3 (sandbox-access and later sandbox-lifecycle then each split by their preflight size gates, sandbox-lifecycle twice): the read list and environment, then the grant list and ledger, then slots and release, then the run lifecycle functions with their unit tests, then the container harness with the worker-run test, then the read-only, kill and stuck-grant tests, then the canary with the isolation and read-list runs and the probes. Each task's test runs only skills/delegate/tests; the phase test runs the fast suite. The seven task files are the G7 group.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "sandbox-readlist",
+          "title": "Sandbox.psm1 part 2a: read list, profile refusal, environment",
+          "dependsOn": [
+            "sandbox-core"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 1 of 5 (sandbox-access was split in two on 2026-11-14 after its preflight size gate). Private functions the later phase-3 tasks call: Test-SandboxReadList (validates the sandbox.json read list with the design's refusal rules and order, in config order, returns the normalized entries, throws on the first refused entry); Assert-SandboxOutsideProfile (the %USERPROFILE% refusal for a repo or worktree, on paths only); Get-SandboxEnvironment (the environment array from 'Launch and kill' as NAME=VALUE strings, only the listed names). Test-SandboxSupport gains the read-list check: one problem per refused entry, in config order, after the letter problems, with the text \"read-list entry '<path>' <reason>; edit sandbox.json\" and no 'sandbox: ' prefix; Test-SandboxReadList throws the same text with the prefix. Tests: file 5's environment array, every read-list refusal (both message forms) and addToPath, and the %USERPROFILE% refusal. This task maps no drive letter, creates no AppContainer profile and runs no icacls. G7 two-part task. Decided: the private function names above, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version.",
+          "delegateTaskId": "worker-sandb-sandbox-readlist"
+        },
+        {
+          "id": "sandbox-grants",
+          "title": "Sandbox.psm1 part 2b: grant list, ledger, grant removal",
+          "dependsOn": [
+            "sandbox-readlist"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 2 of 5. Private functions the later phase-3 tasks call: Get-SandboxGrantList (the complete [{path, spec}] list from 'What the sandbox can reach' for one run, worker or read-only, taking the worktree name as an explicit parameter; New-SandboxRun later writes it to the ledger and applies each row unchanged); Read-SandboxLedger and Write-SandboxLedger (the slot ledger format). Public and exported: Remove-SandboxGrants -Ledger. Tests: a Get-SandboxGrantList row test on a synthetic repo and worktree, and Remove-SandboxGrants with one unremovable entry. The task file pins the row rules, the ledger and return contracts, and a tested way to make one grant unremovable. This task maps no drive letter and creates no AppContainer profile. G7 two-part task. Decided: the private function names above, the ledger format, and the access table's paths and icacls specs, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version.",
+          "delegateTaskId": "worker-sandb-sandbox-grants"
+        },
+        {
+          "id": "sandbox-slots",
+          "title": "Sandbox.psm1 part 2b: slots, release, crash recovery",
+          "dependsOn": [
+            "sandbox-grants"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 3 of 5. Implement Get-SandboxSlot -TimeoutSec and Remove-SandboxLetters. Get-SandboxSlot releases and disposes every mutex it rejects before trying the next slot, on the live-ledger and abandoned-mutex paths alike; only Stop-SandboxRun (next task) releases a taken slot's mutex. On a free slot with a dead run's ledger it calls Remove-SandboxGrants. Remove-SandboxLetters parses CheckNetIsolation LoopbackExempt -s for exemptions still registered for the two SIDs and returns each with its -d command. Tests: a unit test of that parse on a captured text fixture in skills/delegate/tests/fixtures/. Container tests are tagged Sandbox and follow file 5's skip rules (IsAppContainer() true, build below 26300, or fewer than three free letters); BeforeAll reserves the three highest free letters with Set-SandboxLetters and AfterAll calls Remove-SandboxLetters in a finally. Container tests: reserve and release (three mappings and two profiles, all removed, with <Root>\\sandbox and the letters in sandbox.json); release refused while a slot is held; with both slot mutexes held, a third Get-SandboxSlot fails with the no-free-slot error after -TimeoutSec 4; crash recovery: a child process takes a slot mutex and exits without releasing it, leaving a ledger with grants on a test folder, and the next Get-SandboxSlot takes that slot and removes those grants (assert with icacls that the SID is gone); a ledger naming a live process makes the slot busy. G7 two-part task. Decided: mutex names, the slot result {letter, mutex, container, sid}, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos.",
+          "delegateTaskId": "worker-sandb-sandbox-slots"
+        },
+        {
+          "id": "sandbox-run-fns",
+          "title": "Sandbox.psm1 part 2c: New-SandboxRun, launch and stop",
+          "dependsOn": [
+            "sandbox-slots"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 4 of 7 (sandbox-lifecycle was split on 2026-11-15 after its preflight size gate, and its first half again after its own). Implement New-SandboxRun (Assert-SandboxOutsideProfile, Test-SandboxReadList, Write-SandboxLedger with the Get-SandboxGrantList rows before any grant, icacls grants applied unchanged, the run home with the copied Cursor login and git config, subst mapping, the return shape), Start-SandboxProcess (copy Quote from delegate.ps1 into Sandbox.psm1 as a private function with identical behaviour; quote each -Arguments element and join with spaces) and Stop-SandboxRun (the 'Clean-up' steps in order, each in its own try/catch, returning notes[]; failed grant removals are written back to the ledger, which is deleted when none failed). Tests need no AppContainer, drive letter or test repo: the command-line quoting against delegate.ps1's own Quote, and Stop-SandboxRun's clean-up paths (no run object, a failed grant written back, an unreadable ledger kept, the copied auth.json deleted). G7 two-part task. Decided: the run result shape, the run-home layout and copied files, and the clean-up order, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version.",
+          "delegateTaskId": "worker-sandb-sandbox-run-fns"
+        },
+        {
+          "id": "sandbox-run-harness",
+          "title": "Sandbox.psm1 part 2d: run container harness and worker-run test",
+          "dependsOn": [
+            "sandbox-run-fns"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 5 of 7. Tests, plus module fixes only where a test proves a bug in sandbox-run-fns' functions. Build the container test harness that sandbox-run-checks reuses (reserved letters, a real patched runtime, a test repo and worktree, fake login files) in a 'run lifecycle' Describe. Container tests are tagged Sandbox and follow file 5's skip rules (IsAppContainer() true, build below 26300, or fewer than three free letters); BeforeAll reserves the three highest free letters with Set-SandboxLetters and AfterAll calls Remove-SandboxLetters in a finally. One container test, a worker run of a pwsh test script (this is file 5's 'pwsh canary script', not Invoke-SandboxCanary): git status --porcelain on a clean worktree is empty, a Node child with piped output works, a file created before the grant is readable, and Stop-SandboxRun leaves no grant, ledger or auth.json behind. G7 two-part task. Decided: the run result shape, the run-home layout and copied files, and the clean-up order, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos.",
+          "delegateTaskId": "worker-sandb-sandbox-run-harness"
+        },
+        {
+          "id": "sandbox-run-checks",
+          "title": "Sandbox.psm1 part 2d: read-only run, kill and stuck-grant tests",
+          "dependsOn": [
+            "sandbox-run-harness"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 6 of 7. Tests only, in sandbox-run-harness's container Describe and reusing its harness; module changes only where a test proves a bug in sandbox-run-fns' functions. Container tests: a read-only run (it can write its run home, cannot create or modify files elsewhere in its worktree, and git status --porcelain --untracked-files=no is empty); a sleeper tree with a grandchild dies on Kill; Stop-SandboxRun with one unremovable grant keeps the ledger with only that entry and names it in notes. G7 two-part task. Decided: the run result shape, the run-home layout and copied files, and the clean-up order, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos.",
+          "delegateTaskId": "worker-sandb-sandbox-run-checks"
+        },
+        {
+          "id": "sandbox-canary",
+          "title": "Sandbox.psm1 part 2d: canary, isolation and read-list runs, probes",
+          "dependsOn": [
+            "sandbox-run-checks"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/scripts/SandboxNative.cs",
+            "skills/delegate/tests/Sandbox.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code-hard",
+          "brief": "Phase 3, task 7 of 7. Implement Invoke-SandboxCanary -Repo (setup, run and clean-up as the design gives them; returns {ok, results[]}). Container tests are tagged Sandbox and follow file 5's skip rules (IsAppContainer() true, build below 26300, or fewer than three free letters); BeforeAll reserves the three highest free letters with Set-SandboxLetters and AfterAll calls Remove-SandboxLetters in a finally. Container tests: Invoke-SandboxCanary -Repo <test repo> returns ok with the expected results[] entries and leaves no canary worktree, canary file, mapping or ledger behind; a read-list entry under a profile-like TestDrive path (a copied node.exe runs from it, and node -e with a require of a file in it works); isolation between runs (two concurrent runs in both slots cannot read each other's worktrees; a later run in the same slot cannot read the previous run's). Probes, observe-only: against a scratch root (XAGENT_SANDBOX_ROOT = <worktree>/.xagent/probe-root) with letters the probe reserves and releases itself, never the real %LOCALAPPDATA%/xagent: (1) Cursor --version, then a -p run with the prompt 'Reply with the single word OK.' and a 120 s timeout, inside a slot with --workspace <real worktree path> and working folder <slot>:\\; (2) if a per-user Python is installed, start it from a read-list entry with python -c \"print(1)\". Cap the whole probe section at 5 minutes. Record each result, or its failure, in result.json's summary, and do not debug a failing probe. Delete the probe root before the task's own test run. G7 two-part task. Decided: the canary result {ok, results[]} and its clean-up order, every error string, and the public function signatures as the design states them. Yours to decide: internal helpers, internal tests beyond the listed ones, and the order of work. The design (file 2's phase-3 functions and file 5's tests) is the source of truth. SandboxNative.cs may change only if a test proves it must. Tests go in skills/delegate/tests/Sandbox.Tests.ps1 beside phase 2's; keep its BeforeAll/AfterAll environment handling. Each task is sized to about 20 worker minutes; the earlier tasks' helpers are in the code, so call them rather than adding a second version. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos.",
+          "delegateTaskId": "worker-sandb-sandbox-canary"
+        }
+      ]
+    },
+    {
+      "n": 4,
+      "rationale": "Wire the sandbox into delegate.ps1 (default on, -NoSandbox, -SandboxCheck with -Reserve and -Release, new summary fields) and add the fast sandbox check to doctor. The two tasks run one after the other: both test runs execute the container tests, which reserve real drive letters and slot profiles.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1",
+      "tasks": [
+        {
+          "id": "delegate-wiring",
+          "title": "delegate.ps1: sandbox by default, parameter sets, -SandboxCheck, summary fields",
+          "dependsOn": [
+            "sandbox-canary"
+          ],
+          "files": [
+            "skills/delegate/scripts/delegate.ps1",
+            "skills/delegate/tests/DelegateLaunch.Tests.ps1",
+            "skills/delegate/tests/fixtures/"
+          ],
+          "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast -Path skills/delegate/tests",
+          "profile": "code",
+          "brief": "Implement the design's file 3: the Run and Check parameter sets, -NoSandbox, -SandboxCheck, [string[]]$Reserve, -Release and the invalid combinations; -SandboxCheck handled before $Repo is resolved and before the -Agent and -TaskFile guards; $cursorRoot from XAGENT_CURSOR_ROOT; the sandboxed launch with the try moved before Get-SandboxSlot and Stop-SandboxRun in finally; exitCode from Finish, -1 on timeout; summary and runs.jsonl gain sandboxed, sandbox, skillDir and sandboxNotes; help comment. Add skills/delegate/tests/DelegateLaunch.Tests.ps1 and the fake Cursor fixture (skills/delegate/tests/fixtures/fake-cursor/index.js) as file 6 lists, with all its cases, and these two precisions: (a) the fixture copies node.exe from the real Cursor install's current version; every Describe that needs that copy skips itself with a reason when %LOCALAPPDATA%/cursor-agent/versions is unreadable (as inside the sandbox, where LOCALAPPDATA is the run home), so the suite still passes when run inside the sandbox; (b) the patch-failure case zeroes the pattern bytes in the fixture's SOURCE node.exe (TestDrive/cursor-agent/versions/2099.01.01-abc123/node.exe) and starts with no runtime cache and no patch.json, so Get-SandboxRuntime must take the copy-and-patch path and fail with 'pattern found 0 times'. (c) The patch-failure case asserts the error starts with 'sandbox: Cursor 2099.01.01-abc123: node.exe pipe-name pattern found 0 times' and accepts it from either Test-SandboxSupport or Get-SandboxRuntime (sandbox-core pins both to the same text). (d) -NoSandbox is declared in BOTH parameter sets, so -SandboxCheck -NoSandbox binds and is rejected by Fail with JSON. (e) 'Existing calls still bind' is checked with Get-Command delegate.ps1 -Syntax / parameter-set metadata, not by a real run. (f) The sandboxed Describe also skips with a reason when three free letters can't be reserved or the build is below 26300, as Sandbox.Tests.ps1 does. (g) Also add file 5's Live test to DelegateLaunch.Tests.ps1 (tag Live, so scripts/test.ps1 excludes it): delegate.ps1 with a real Cursor worker (composer-2.5) on a temporary repo outside the profile, told to read the canaries; it passes when no canary text is in the logs, summary or branch and sandboxed is true; it skips with a reason when %LOCALAPPDATA%/cursor-agent/versions is unreadable. The lead runs it by hand after phase 5. TEST REPOS: the sandbox refuses any repo or worktree under %USERPROFILE%, and Pester's TestDrive is under it. So every test that needs a sandboxed repo or worktree creates it under a test root on the drive of the repo being tested, outside the worktree: $testRoot = Join-Path (Split-Path <repo root> -Qualifier) ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0,8)), created in BeforeAll and removed in an AfterAll finally. If that drive's root is not writable, or the repo is under %USERPROFILE%, those Describes skip with a reason. Only XAGENT_SANDBOX_ROOT, XAGENT_CURSOR_ROOT and XAGENT_LOG_DIR stay in TestDrive, and -NoSandbox cases may use TestDrive repos. ",
+          "delegateTaskId": "worker-sandb-delegate-wiring"
+        },
+        {
+          "id": "doctor-check",
+          "title": "feature.ps1 doctor: fast sandbox check",
+          "dependsOn": [
+            "delegate-wiring"
+          ],
+          "files": [
+            "skills/feature/scripts/feature.ps1",
+            "skills/feature/tests/feature.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -Command '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests\"; $c.Filter.FullName = \"*feature.ps1 doctor*\"; $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Implement the design's file 4 doctor bullet: a tenth check named 'sandbox' that imports Sandbox.psm1 in-process from the delegate skill folder, found the same way doctor already finds it ($delegateDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate')), see feature.ps1 ~line 2641), and calls Test-SandboxSupport; required = $false so ready is unaffected; detail lists cursorVersion, uv, patternCount, letters (reserved, and each letter's state) and problems, cut to 300 characters; an import failure gives ok = $false with the error. Update It 'reports prerequisites' (~line 2469, tagged Slow; the test command runs only Describe 'feature.ps1 doctor', Slow test included; in that Describe the sandbox check is tenth and last with required = $false, its ok is not asserted (the machine's Cursor state is not this test's business), and it is left out of any assertion that every required check is ok) to expect ten checks with sandbox last.",
+          "delegateTaskId": "worker-sandb-doctor-check"
+        }
+      ]
+    },
+    {
+      "n": 5,
+      "rationale": "Documentation of the shipped behaviour: the skills' sandbox rules and the sandbox: no-retry rule in all five places, the task template line, README, and the first design's post-lock amendment. The phase test is the full suite (no -Fast) because sign-off runs the same command.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1",
+      "tasks": [
+        {
+          "id": "sandbox-docs",
+          "title": "Skill docs, task template, README and feature-skill amendment",
+          "dependsOn": [
+            "delegate-wiring",
+            "doctor-check"
+          ],
+          "files": [
+            "skills/delegate/SKILL.md",
+            "skills/feature/SKILL.md",
+            "skills/feature/stages/build.md",
+            "skills/feature/stages/design-review.md",
+            "skills/feature/stages/signoff.md",
+            "skills/feature/templates/task.md",
+            "skills/feature/tests/feature.Tests.ps1",
+            "README.md",
+            "docs/designs/feature-skill.md"
+          ],
+          "test": "pwsh -NoProfile -Command '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests\"; $c.Filter.FullName = \"templates.*\"; $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Apply the design's files 8, 9, 10, 12 and 13 exactly: the Sandbox section, the summary field list and the sandbox: exception in skills/delegate/SKILL.md; the same exception sentence in the five retry-once places named in file 9 and in two more found in plan review (skills/feature/stages/signoff.md ~line 43, the sign-off lens retry; skills/feature/stages/design-review.md ~line 82, the failed-reviewer ladder); the one-line sandbox note at the end of Constraints in templates/task.md (headings and <test, copied exactly> unchanged); README requirements, setup and uninstall; and the feature-skill.md Amended line (date: the day this task runs, as YYYY-MM-DD), Risks row cell and Future Improvements bullet replaced with the texts given. Add the file-11 test that the task template keeps its six headings and has the sandbox line, inside Describe 'templates' (the test command runs only that Describe). Don't edit docs/test-plan.md or docs/HANDOFF.md: the lead writes those.",
+          "delegateTaskId": "worker-sandb-sandbox-docs"
+        }
+      ]
+    }
+  ]
+}
