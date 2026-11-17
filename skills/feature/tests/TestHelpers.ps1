@@ -252,6 +252,15 @@ function Get-StandardTwoPhasePlan {
     }
 }
 
+function Move-FeatureToBuildStage {
+    param(
+        [string]$Repo,
+        [string]$Name
+    )
+    Assert-FeatureOk (Invoke-FeatureInProcess @('gate', '-Gate', 'plan-approved', '-Quote', 'approve', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+    Assert-FeatureOk (Invoke-FeatureInProcess @('stage', '-To', 'build', '-Repo', $Repo, '-Name', $Name) -WorkingDirectory $Repo)
+}
+
 function Import-TestPlan {
     param(
         [string]$Repo,
