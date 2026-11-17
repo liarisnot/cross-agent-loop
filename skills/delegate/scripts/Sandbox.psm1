@@ -1338,6 +1338,26 @@ function Format-SandboxIcaclsError($Output) {
     return ($lines.ToArray() -join '; ')
 }
 
+# Grants and removals rewrite whole access lists (icacls and NtSetSecurityObject read, change, write).
+# Two runs editing a shared path at once (the runtime cache, the repo's .git, read-list entries)
+# can drop each other's entry, so every ACL edit holds this machine-wide lock.
+function Invoke-SandboxAclLocked([scriptblock]$Body) {
+    $mutex = [Threading.Mutex]::new($false, 'Local\xagent-acl')
+    $owned = $false
+    try {
+        try {
+            $owned = $mutex.WaitOne([TimeSpan]::FromSeconds(120))
+        } catch [Threading.AbandonedMutexException] {
+            $owned = $true
+        }
+        if (-not $owned) { throw 'sandbox: timed out after 120 s waiting for another run to finish changing permissions' }
+        & $Body
+    } finally {
+        if ($owned) { try { $mutex.ReleaseMutex() } catch { } }
+        $mutex.Dispose()
+    }
+}
+
 function Remove-SandboxGrants {
     [CmdletBinding()]
     param(
@@ -1361,6 +1381,7 @@ function Remove-SandboxGrants {
     }
     # No /T. A missing path is already gone, so it counts as removed.
     $failed = New-Object System.Collections.Generic.List[object]
+    Invoke-SandboxAclLocked {
     foreach ($grant in $grantList) {
         $path = Get-ObjectProperty $grant 'path'
         if ($null -eq $path) { continue }
@@ -1388,6 +1409,7 @@ function Remove-SandboxGrants {
                 error = (Format-SandboxIcaclsError $output)
             })
         }
+    }
     }
     Write-Output -NoEnumerate $failed.ToArray()
 }
@@ -1796,6 +1818,7 @@ function New-SandboxRun {
 
     # No /T. A missing path stays in the ledger; removal skips it too.
     $sid = [string]$Slot.sid
+    Invoke-SandboxAclLocked {
     foreach ($row in $rows) {
         $pathText = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($pathText)) { continue }
@@ -1813,6 +1836,7 @@ function New-SandboxRun {
         if ($LASTEXITCODE -ne 0) {
             throw "sandbox: grant failed on ${pathText}: $(Format-SandboxIcaclsError $output)"
         }
+    }
     }
 
     Copy-SandboxLoginFile (Join-Path $script:LoginProfile '.cursor\cli-config.json') (Join-Path $runHome '.cursor\cli-config.json') $false

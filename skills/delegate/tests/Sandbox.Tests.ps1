@@ -1437,6 +1437,35 @@ Describe 'grant list and ledger' {
         $packed.Thrown | Should -Be 'sandbox: ledger has no sid'
     }
 
+    It 'waits while another process holds the ACL lock before removing grants' {
+        if ([XagentSandbox]::IsAppContainer()) { Set-ItResult -Skipped -Because 'an AppContainer cannot change file permissions'; return }
+        $file = Join-Path $TestDrive 'acl-lock.txt'
+        Set-Content -LiteralPath $file -Value 'x' -Encoding ascii
+        $grantOut = @(& icacls.exe $file /grant '*S-1-15-2-1:(R)' 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "icacls grant failed ($LASTEXITCODE): $grantOut" }
+        $holder = Join-Path $TestDrive 'acl-hold.ps1'
+        $ready = Join-Path $TestDrive 'acl-hold.ready'
+        Set-Content -LiteralPath $holder -Encoding utf8 -Value @(
+            '$m = [Threading.Mutex]::new($false, ''Local\xagent-acl'')'
+            '$null = $m.WaitOne()'
+            ('Set-Content -LiteralPath ''{0}'' -Value x' -f $ready)
+            'Start-Sleep -Seconds 3'
+            '$m.ReleaseMutex()'
+        )
+        $p = Start-Process pwsh -ArgumentList '-NoProfile', '-File', $holder -WindowStyle Hidden -PassThru
+        try {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $ready) -and $clock.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 100 }
+            Test-Path -LiteralPath $ready | Should -BeTrue
+            $clock.Restart()
+            $failed = Remove-SandboxGrants -Ledger ([pscustomobject]@{ sid = 'S-1-15-2-1'; grants = @([pscustomobject]@{ path = $file; spec = '(R)' }) })
+            $clock.Elapsed.TotalSeconds | Should -BeGreaterThan 1.5
+            @($failed).Count | Should -Be 0
+        } finally {
+            $p | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'returns the one grant icacls cannot remove' {
         if ([XagentSandbox]::IsAppContainer()) { Set-ItResult -Skipped -Because 'an AppContainer cannot change file permissions'; return }
         $folder = Join-Path $TestDrive 'grant-remove'
@@ -3226,6 +3255,34 @@ exit 0
             try {
                 Remove-Item -LiteralPath (Join-Path $script:RunWorktree '.xagent\a-live.ps1') -Force -ErrorAction SilentlyContinue
             } catch { }
+        }
+    }
+
+    It 'New-SandboxRun waits while another process holds the ACL lock' -Skip:$script:RunSkip {
+        # Two runs granting on the same shared folders at once dropped each other's entries
+        # (2026-11-16: about 1 in 13 concurrent starts failed with MODULE_NOT_FOUND).
+        $holder = Join-Path $TestDrive 'acl-hold-run.ps1'
+        $ready = Join-Path $TestDrive 'acl-hold-run.ready'
+        Set-Content -LiteralPath $holder -Encoding utf8 -Value @(
+            '$m = [Threading.Mutex]::new($false, ''Local\xagent-acl'')'
+            '$null = $m.WaitOne()'
+            ('Set-Content -LiteralPath ''{0}'' -Value x' -f $ready)
+            'Start-Sleep -Seconds 3'
+            '$m.ReleaseMutex()'
+        )
+        $p = Start-Process pwsh -ArgumentList '-NoProfile', '-File', $holder -WindowStyle Hidden -PassThru
+        $slot = $null; $run = $null
+        try {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $ready) -and $clock.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 100 }
+            Test-Path -LiteralPath $ready | Should -BeTrue
+            $slot = Get-SandboxSlot
+            $clock.Restart()
+            $run = New-SandboxRun -Slot $slot -Runtime $script:RunRuntime -Repo $script:RunRepo -Worktree $script:RunWorktree -WtName $script:RunWtName
+            $clock.Elapsed.TotalSeconds | Should -BeGreaterThan 1.5
+        } finally {
+            if ($null -ne $slot) { try { Stop-SandboxRun -Run $run -Slot $slot -Handle $null | Out-Null } catch { } }
+            $p | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
         }
     }
 
