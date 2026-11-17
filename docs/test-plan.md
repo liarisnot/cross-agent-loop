@@ -409,7 +409,7 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
     - Run 1: 243 passed, 5 failed. Windows wrote its shell caches into the worktree under a literal `%SystemDrive%` folder, because the container environment had no `SystemDrive`. Fixed by adding `SystemDrive` and `ProgramData` (`3121100`). Five tests assumed a host (icacls, CIM, `IsAppContainer`, the real log folder).
     - Run 3: 245 passed, 0 failed, 25 skipped (container-only), worktree clean, `sandboxNotes` empty.
   - **Overhead:** `delegate.ps1` wall time with an instant fake Cursor, 5 runs each, median 2.95 s sandboxed vs 1.24 s unsandboxed: +1.7 s, against a target of 5 s. Grant removal is included. The first run of a Cursor version took 3.66 s.
-  - **Token refresh:** after the probes, the live test and 3 sandboxed suite runs, `cursor-agent status` outside the sandbox still shows logged in. The design's one-day check is due 2026-11-16 after 16:30 local.
+  - **Token refresh:** after the probes, the live test and 3 sandboxed suite runs, `cursor-agent status` outside the sandbox still shows logged in. The design's one-day check is due 2026-11-16 after 16:30 local. **Done 2026-11-16 16:43:** one more sandboxed worker (Composer 2.5, `sandboxed: true`, no clean-up notes) ran, then `cursor-agent status` outside the sandbox still showed logged in. The copied login does not break the host login.
   - **Seen in passing:** Cursor tries to add itself to the user PATH via `reg.exe add HKCU\Environment`. It is denied, but the error message quotes the user's whole PATH into the run's stderr log (the accepted registry-read risk).
 - **Not run by hand, covered by tests instead:**
   - timeout kill of a process tree (CUJ 7; `Sandbox.Tests.ps1` "Kill ends the whole process tree");
