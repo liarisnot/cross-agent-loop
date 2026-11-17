@@ -41,10 +41,12 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Machine setup done (2026-11-12):** junction `~/.claude/skills/feature` to `skills/feature`, and the `feature.ps1` allow rule (junction path) in `~/.claude/settings.json`. `doctor` reports ready through the junction.
 4. **Design write-back done (2026-11-13, approved by the user):** the D19 decisions (reconcile `name`, `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, `in-review` not checked, `branch-missing` at any stage, router-handled entry rows, council ids `<name12>-dc<k>`/`-pc<k>`) are folded into `docs/designs/feature-skill.md` as a post-lock amendment.
    - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
-5. **`worker-sandbox` feature: build done (2026-11-15), waiting for sign-off.** Design `docs/designs/worker-sandbox.md`, branch `feature/worker-sandbox` (not pushed). Every `cursor` worker, review lens and council seat now runs in a Windows AppContainer by default (`-NoSandbox` opts out). All 13 tasks are merged, and the full suite passes (308). Phase-5 lead checks are in `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks".
+5. **`worker-sandbox` feature: done (signed off and merged into `main` 2026-11-16, `9f8e9bd`; not pushed).** Design `docs/designs/worker-sandbox.md`. Every `cursor` worker, review lens and council seat runs in a Windows AppContainer by default (`-NoSandbox` opts out). Results: `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks" and "After sign-off: G2, G4 and two fixes". Build findings that differ from the locked design: `docs/features/worker-sandbox/as-built.md`.
    - **Machine state:** drive letters Z (runtime), Y and X (slots) are reserved in `%LOCALAPPDATA%\xagent\sandbox.json` (the user's choice). They are mapped with `subst`, which does not survive a reboot; the next run maps them again. Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules`.
-   - **Token refresh passed (2026-11-16):** the host Cursor login was still valid after a day of sandboxed runs. Build findings that differ from the locked design are in `docs/features/worker-sandbox/as-built.md`. After sign-off, point the skill junctions back at `D:\cross-agent-loop\skills\`, remove `D:\cross-agent-loop.frozen`, then run the read-only canary as a lens and a council seat, plus the `delegate` regression, with the sandbox on.
-   - **Design write-back at sign-off:**
+   - **After sign-off:** the skill junctions point at `D:\cross-agent-loop\skills\` again, and the frozen copy is gone. The token refresh, G2 and G4 checks passed.
+   - **Two post-merge fixes on `main`:** a lock around ACL edits (concurrent starts dropped each other's grants), and reclaiming a slot left mapped by a killed run.
+   - **Open:** fold `as-built.md` into the design doc (offered at sign-off); `delegate.ps1` gives a raw error, not JSON, for a missing `-TaskFile`; delete the scratch folder `D:\xagent-g4-agents` by hand (the harness blocked its removal).
+   - **Design write-back (in `as-built.md`):**
      - RA on folders goes through `NtSetSecurityObject`, and `icacls` needs `(RA)`;
      - `SystemDrive` and `ProgramData` were added to the container environment;
      - `delegate.ps1` splits a comma-separated `-Reserve`;
@@ -64,7 +66,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 
 ## Open items
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
-- **Worker sandboxing** is built (`worker-sandbox`, Next item 5) and waits for sign-off. The skill junctions still point at the frozen copy, so live runs are unsandboxed until they are switched back.
+- **Worker sandboxing** is live (`worker-sandbox`, Next item 5): every `delegate` run is sandboxed unless `-NoSandbox` is passed.
 - **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.

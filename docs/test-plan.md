@@ -416,3 +416,22 @@ Rows 8-15 and 17 were exercised by the CUJ runs.
   - crash recovery (CUJ 6; the abandoned-mutex and live-ledger tests);
   - sandbox failures (CUJ 5; `DelegateLaunch.Tests.ps1` forced-failure and zeroed-pattern cases).
 - **Not yet run:** the read-only canary as a `review` lens and a `council` seat (G2, CUJ 4), and the `delegate` regression with the sandbox on (G4). Both need the skill junctions pointed at the live skills, which happens after sign-off; the build still runs on the frozen copy.
+
+### After sign-off: G2, G4 and two fixes (2026-11-16)
+
+Signed off and merged into `main` (`9f8e9bd`). The skill junctions point at `D:\cross-agent-loop\skills\` again, and `D:\cross-agent-loop.frozen` is removed. Every run below used the live `delegate` with the sandbox on.
+
+- **G2 (CUJ 4):** two planted canaries with a random secret (one in the profile, one at `D:\`). A `council` run (Grok and GLM seats) and a `codebase_details` review lens ran sandboxed. Neither Cursor nor the seats ran the probe steps: council seats refused, and the lens audited the steps as a document. So this shows confinement, not a denied read: every run was in a slot container, no secret appeared in any log, report or worktree, no file appeared outside the run home, and the read-only check found no changes. The denied-write side of G2 is the suite test "a read-only run writes only its run home".
+- **G1 write and list (sign-off):** a sandboxed Composer worker was denied writes to the profile, `D:\` and the main checkout, and a listing of the profile (see `as-built.md`).
+- **G4 regression, all with the sandbox on:**
+  - judgement lenses with `-Standard feature-spec-standard.md` on Grok 4.7 medium and GLM 5.2 high: reports written;
+  - a DeepSeek readiness review: report written, in parallel with the lens;
+  - `-TargetFile`: the lens quoted the copied file's first line;
+  - `-Agent agy` fails with the T0 reason, and `-Model auto` is refused;
+  - a read-only run in a scratch repo with `AGENTS.md` ("Always answer in French"): no violation, the report is in English, and the file is back and unchanged;
+  - a review run killed 7 s in, then `-Cleanup`: it succeeded, and no sandboxed process was left;
+  - council `-Cleanup` removed both seat worktrees;
+  - `runs.jsonl` has the `feature` field when `-Feature` is given, plus `sandboxed`; the summary carries `baseSha`; the pid file existed during the run and was gone after it.
+- **Bug 1, concurrent starts (fixed in `96029ce`):** the first lens run failed in 2 s with `Cannot find module 'Z:\<version>\index.js'`. Two runs starting together edit the same access lists (runtime cache, `.git`, read list), and one could drop the other's entry. With a fake Cursor, 3 of 40 concurrent starts failed. A machine-wide lock around grants and removals fixed it: 48 of 48 passed. The build never saw this, because the sandbox code ran unsandboxed on the frozen copy, and its tests start one run at a time.
+- **Bug 2, slot left mapped after a kill (fixed after `96029ce`):** after the killed run, slot Y still pointed at the dead run's worktree. The next run failed with "reserved letter Y: is used by another drive" instead of reclaiming it. A slot mapped to the worktree named in its own dead ledger is now `stale` and gets reclaimed. On the real machine state, the next run took slot Y, and no ledger was left.
+- **Seen in passing:** `delegate.ps1` with a missing `-TaskFile` exits with a raw PowerShell error, not a one-line JSON `ok:false`. This predates the sandbox. Open.
