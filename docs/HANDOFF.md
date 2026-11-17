@@ -1,4 +1,4 @@
-# Handoff: where we are (2026-11-11)
+# Handoff: where we are (2026-11-16)
 
 Start a new Claude Code session in `D:\cross-agent-loop` and read this file first.
 
@@ -41,7 +41,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 3. **Machine setup done (2026-11-12):** junction `~/.claude/skills/feature` to `skills/feature`, and the `feature.ps1` allow rule (junction path) in `~/.claude/settings.json`. `doctor` reports ready through the junction.
 4. **Design write-back done (2026-11-13, approved by the user):** the D19 decisions (reconcile `name`, `stop-not-recorded`, the non-empty `stdout.json` finished-run rule, `in-review` not checked, `branch-missing` at any stage, router-handled entry rows, council ids `<name12>-dc<k>`/`-pc<k>`) are folded into `docs/designs/feature-skill.md` as a post-lock amendment.
    - **Launch workers detached** (SKILL.md, D16); every step since 2.4 ran that way.
-5. **`worker-sandbox` feature: done (signed off and merged into `main` 2026-11-16, `9f8e9bd`; not pushed).** Design `docs/designs/worker-sandbox.md`. Every `cursor` worker, review lens and council seat runs in a Windows AppContainer by default (`-NoSandbox` opts out). Results: `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks" and "After sign-off: G2, G4 and two fixes". Build findings that differ from the locked design: `docs/features/worker-sandbox/as-built.md`.
+5. **`worker-sandbox` feature: done (signed off and merged into `main` 2026-11-16, `9f8e9bd`; pushed).** Design `docs/designs/worker-sandbox.md`. Every `cursor` worker, review lens and council seat runs in a Windows AppContainer by default (`-NoSandbox` opts out). Results: `docs/test-plan.md`, "Phases 3-5 and the phase-5 checks" and "After sign-off: G2, G4 and two fixes". Build findings that differ from the locked design: `docs/features/worker-sandbox/as-built.md`.
    - **Machine state:** drive letters Z (runtime), Y and X (slots) are reserved in `%LOCALAPPDATA%\xagent\sandbox.json` (the user's choice). They are mapped with `subst`, which does not survive a reboot; the next run maps them again. Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules`.
    - **After sign-off:** the skill junctions point at `D:\cross-agent-loop\skills\` again, and the frozen copy is gone. The token refresh, G2 and G4 checks passed.
    - **Two post-merge fixes on `main`:** a lock around ACL edits (concurrent starts dropped each other's grants), and reclaiming a slot left mapped by a killed run.
@@ -70,26 +70,13 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
-- **Process changes, now due: `worker-sandbox` signed off on 2026-11-16 (decided by the user, 2026-11-15).** They were held back so the process wouldn't change mid-feature. These follow from the waterfall item below. During phase 3, preflight size gates forced three "go back to plan" cycles: sandbox-access, sandbox-lifecycle, and sandbox-run. Each meant a re-import and a fresh plan-approved gate for what was only a task split.
-  - **Roles, scrum-style.** The user is the PO. The lead (Claude, the EGM "elephant") is the lead engineer.
-    - How tasks are split and assigned to workers is the lead's call. It needs no PO approval and need not be surfaced, as long as the locked design doesn't change.
-    - The lead still logs each split as a decision in `decisions.md`.
-  - **Escalate only on scope or cost growth.** For example: the phase goal, the files or the design change, or a phase's total estimate grows by more than about 50%.
-    - Present it as a priority choice, not a yes/no on the lead's plan. For example: do it now, defer it to a later phase or feature, or cut something else, each with its cost.
-    - The reason: when scope changes, the PO re-prioritizes what gets done first.
-  - **No mechanical splits.** Minutes and lines alone are not a reason to split.
-    - The test is whether the task can be cut without losing the cohesion of the code produced.
-    - A cohesive unit stays whole even when big. Example: sandbox-run-harness (the container harness plus the one test that proves it) was estimated at 22–35 min. The user had it launched as one task, because either half alone proves nothing.
-  - **Reviewers advise; the lead decides.**
-    - Preflight and review verdicts are input. The lead may overrule them with a logged reason.
-    - When the pushback is strong and the lead is unsure, the furthest escalation is a council, not a stop that waits on the PO.
-  - **Changes to make:**
-    - In `stages/build.md`, the rule "a `split` verdict is a problem stop" (preflight section) becomes lead judgment. A split inside the phase's scope is a logged decision with no go-back to plan and no re-gate.
-    - Add a cohesion question to `task-size-standard.md`.
-    - Consider planning at phase granularity, with task files written just in time.
-    - Recalibrate the size estimates. grok-4.7-high actuals land at or below the low end of composer's estimates: run-fns, estimate 22–32 min, actual 17; slots, estimate 18–26, actual 22.
-    - **Sign-off write-back has no place in the flow (found 2026-11-16).** `finish` refuses when the design file differs from the blob recorded at design-locked. So build findings can't go into the design before the merge. For `worker-sandbox` they went into `docs/features/<name>/as-built.md`, the drift check was told to mark items that note explains, and they were folded into the design on `main` after `finish`. `stages/signoff.md` should say this: an as-built note before the drift check, folded in after the merge.
-    - **Sign-off checks that need the live skills come after the merge.** G2 and G4 could only run once the junctions left the frozen copy. Both post-merge bugs (concurrent ACL edits, a slot left mapped after a kill) surfaced there, because the build ran the sandbox code unsandboxed and the tests start one run at a time. For a feature that changes `skills/`, plan a short post-merge check with live, concurrent runs and a killed run.
+- **Process changes: done on branch `process-changes` (2026-11-16), not yet merged into `main`.** Background: during `worker-sandbox` phase 3, preflight size gates forced three "go back to plan" cycles for what were only task splits. Changes:
+  - **Roles:** the user is the PO, the lead is the lead engineer. Splitting or refining tasks inside a phase's scope is the lead's call: `feature.ps1 plan` now accepts a restricted re-import in stage `build` (phases unchanged, started and merged tasks unchanged and in place, files inside the phase's declared files), logged as a decision, with no go-back and no new gate (`stages/build.md`, "Splitting a task in build"). Later phases may be planned loosely and refined this way.
+  - **Escalate only on scope or cost growth** (design, phase goal or files change, or a phase estimate up more than about 50%), as a priority choice. Preflight verdicts are advice; strong pushback when unsure goes to a council, not a stop.
+  - **Size standard:** new Cohesion question; `split` is now a Major, not a Blocker, and never for a cohesive task; Grok 4.7 high calibration rows added (low end of the estimate).
+  - **Sign-off:** as-built note before the drift check, folded into the design after the merge; post-merge live check (two concurrent runs, one killed) for features that change `skills/` (`stages/signoff.md`).
+  - **Existing design docs:** `new -DesignDoc <path>` adopts a doc in place (any folder or file name); without it, `new` refuses when `docs/designs/<name>.md` already exists. `stages/design.md` has "Starting from an existing doc": gap check against what later stages need, one bulk approval, draft only the gaps. Stage files use `<design doc>` (`status.designDoc`). Prompted by MyApp, where most features start from research.
+  - Design amended (`docs/designs/feature-skill.md`, "Amended: 2026-11-16"). Built through `delegate` (D21, D22 in `docs/test-plan.md`); 252 Pester tests pass.
   - **Bugs found along the way:**
     - `feature.ps1 schedule -Repo .` run from a subfolder (`.xagent/features/<name>`) read the wrong state and offered the long-merged `test-runner` task. `-Repo` should resolve to the git top level.
     - `reconcile` moves a finished task to `in-review` without setting its `worktree` and `baseSha`.

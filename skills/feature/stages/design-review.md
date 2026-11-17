@@ -10,7 +10,7 @@ When this file applies: the stage is `design-review`, the user asked to review t
 
 Read and follow `<skill dir>/egm/skills/egm-review/SKILL.md`, `<skill dir>/egm/skills/egm-review-loop/SKILL.md` and `<skill dir>/egm/skills/egm-resolve/SKILL.md`, with these differences.
 
-Where those files spawn a Claude reviewer, or an `egm:*` agent, do not spawn one. Run `delegate.ps1` with the model from `status.reviewRuns`, as below. Where they write `design_draft.md`, the design doc is `docs/designs/<name>.md`. Their question gates map to this skill's recorded gates. The only recorded gate in this stage is **design-locked**.
+Where those files spawn a Claude reviewer, or an `egm:*` agent, do not spawn one. Run `delegate.ps1` with the model from `status.reviewRuns`, as below. Where they write `design_draft.md`, the design doc is `<design doc>`. Their question gates map to this skill's recorded gates. The only recorded gate in this stage is **design-locked**.
 
 Use each run's `model` as `status` gives it. Do not swap models except in [Failed reviewers](#failed-reviewers).
 
@@ -30,7 +30,7 @@ A failed run (`ok: false` or `timedOut: true`) follows "Failed delegate.ps1 runs
 
 ### Task file
 
-Write `<repo>/.xagent/features/<name>/<id>.task.md`. It names the design doc's path and line range (`docs/designs/<name>.md` is committed, so the worktree has it) and the GoldfishContext list. The reviewer reads both with its file tools.
+Write `<repo>/.xagent/features/<name>/<id>.task.md`. It names the design doc's path and line range (`<design doc>` is committed, so the worktree has it) and the GoldfishContext list. The reviewer reads both with its file tools.
 
 GoldfishContext is the reading list besides the target: the repository files the design links to, plus any you name. It is plain text, not a schema field. Reviewers cannot open URLs, so save a web page as a file first. Example:
 
