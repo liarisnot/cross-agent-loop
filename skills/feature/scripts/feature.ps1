@@ -1968,11 +1968,12 @@ function Get-DelegateRunPidFiles {
     return @($files)
 }
 
-function Get-NewestStdoutJsonPath {
-    param([string]$Repository, [string]$DelegateTaskId)
+function Get-NewestStdoutJsonPathInDirs {
+    param([string[]]$Dirs)
     $bestStamp = $null
     $bestPath = $null
-    foreach ($dir in (Get-DelegateRunDirs $Repository $DelegateTaskId)) {
+    foreach ($dir in $Dirs) {
+        if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
         foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.stdout.json' -File -ErrorAction SilentlyContinue) {
             if ($f.Name -match '^(\d{8}-\d{6})-') {
                 $stamp = $Matches[1]
@@ -1984,6 +1985,76 @@ function Get-NewestStdoutJsonPath {
         }
     }
     return $bestPath
+}
+
+function Get-NewestStdoutJsonPath {
+    param([string]$Repository, [string]$DelegateTaskId)
+    return (Get-NewestStdoutJsonPathInDirs -Dirs (Get-DelegateRunDirs $Repository $DelegateTaskId))
+}
+
+function Test-TaskStateStringFieldEmpty {
+    param([object]$Rec, [string]$Name)
+    if ($Rec -is [System.Collections.IDictionary]) {
+        if (-not $Rec.Contains($Name)) { return $true }
+        $v = $Rec[$Name]
+    } else {
+        $p = $Rec.PSObject.Properties[$Name]
+        if ($null -eq $p) { return $true }
+        $v = $p.Value
+    }
+    if ($null -eq $v) { return $true }
+    return ([string]$v).Length -eq 0
+}
+
+function Get-ReconcileDelegateWorktreePath {
+    param([string]$Repository, [string]$DelegateTaskId)
+    $repoName = Split-Path $Repository -Leaf
+    $parent = Split-Path $Repository -Parent
+    return (Join-Path (Join-Path $parent "$repoName.xagent") $DelegateTaskId)
+}
+
+function Get-ReconcileInReviewFields {
+    param(
+        [string]$Repository,
+        [string]$DelegateTaskId,
+        [object]$Rec,
+        [string]$StdoutPath
+    )
+    $fields = @{}
+    if ($StdoutPath -and (Test-Path -LiteralPath $StdoutPath)) {
+        try {
+            $raw = [IO.File]::ReadAllText($StdoutPath, [Text.UTF8Encoding]::new($false)).Trim()
+            if ($raw.Length -gt 0) {
+                $obj = $raw | ConvertFrom-Json
+                if ($null -ne $obj.PSObject.Properties['session_id']) {
+                    $sid = [string]$obj.session_id
+                    if ($sid.Length -gt 0 -and (Test-TaskStateStringFieldEmpty $Rec 'sessionId')) {
+                        $fields['sessionId'] = $sid
+                    }
+                }
+            }
+        } catch { }
+    }
+    if (-not (Test-TaskStateStringFieldEmpty $Rec 'worktree')) {
+        return $fields
+    }
+    $wt = Get-ReconcileDelegateWorktreePath -Repository $Repository -DelegateTaskId $DelegateTaskId
+    if (-not (Test-Path -LiteralPath $wt)) {
+        return $fields
+    }
+    $fields['worktree'] = $wt.Replace('\', '/')
+    $basePath = Join-Path $wt '.xagent/base.sha'
+    if ((Test-TaskStateStringFieldEmpty $Rec 'baseSha') -and (Test-Path -LiteralPath $basePath)) {
+        $sha = [IO.File]::ReadAllText($basePath, [Text.UTF8Encoding]::new($false)).Trim()
+        if ($sha -match '^[0-9a-f]{40}$') {
+            $fields['baseSha'] = $sha
+        }
+    }
+    $resultPath = Join-Path $wt '.xagent/result.json'
+    if ((Test-TaskStateStringFieldEmpty $Rec 'resultFile') -and (Test-Path -LiteralPath $resultPath)) {
+        $fields['resultFile'] = $resultPath.Replace('\', '/')
+    }
+    return $fields
 }
 
 function Test-StdoutJsonFinished {
@@ -1999,6 +2070,7 @@ function Update-ReconcileInFlightTask {
         [string]$DelegateTaskId,
         [object]$Rec
     )
+    $taskStatus = if ($Rec -is [System.Collections.IDictionary]) { [string]$Rec['status'] } else { [string]$Rec.status }
     $pidFiles = Get-DelegateRunPidFiles -Repository $Repository -DelegateTaskId $DelegateTaskId
     foreach ($pf in $pidFiles) {
         $obj = $null
@@ -2029,9 +2101,29 @@ function Update-ReconcileInFlightTask {
         Stop-ProcessTree -ProcessId $childPid
         $orphanKilled = $true
     }
-    $stdoutPath = Get-NewestStdoutJsonPath -Repository $Repository -DelegateTaskId $DelegateTaskId
+    $runsRoot = Join-Path $Repository '.xagent/runs'
+    if ($taskStatus -ceq 'preflight') {
+        $preflightDirs = @(
+            (Join-Path $runsRoot ($DelegateTaskId + '-pc')),
+            (Join-Path $runsRoot ($DelegateTaskId + '-pr'))
+        )
+        $stdoutPath = Get-NewestStdoutJsonPathInDirs -Dirs $preflightDirs
+        if (-not $orphanKilled -and (Test-StdoutJsonFinished $stdoutPath)) {
+            return @{ changed = $true; newStatus = 'pending'; becameFailed = $false; incrementFailures = $false }
+        }
+        return @{ changed = $true; newStatus = 'failed'; becameFailed = $true; incrementFailures = $true }
+    }
+    $workerDir = Join-Path $runsRoot $DelegateTaskId
+    $stdoutPath = Get-NewestStdoutJsonPathInDirs -Dirs @($workerDir)
     if (-not $orphanKilled -and (Test-StdoutJsonFinished $stdoutPath)) {
-        return @{ changed = $true; newStatus = 'in-review'; becameFailed = $false; incrementFailures = $false }
+        $fields = Get-ReconcileInReviewFields -Repository $Repository -DelegateTaskId $DelegateTaskId -Rec $Rec -StdoutPath $stdoutPath
+        return @{
+            changed           = $true
+            newStatus         = 'in-review'
+            becameFailed      = $false
+            incrementFailures = $false
+            fields            = $fields
+        }
     }
     return @{ changed = $true; newStatus = 'failed'; becameFailed = $true; incrementFailures = $true }
 }
@@ -2171,6 +2263,17 @@ function Invoke-ReconcileFeature {
                 }
                 if ($flight.becameFailed) {
                     $newFailedTasks.Add($tid) | Out-Null
+                }
+                if ($flight -is [System.Collections.IDictionary] -and $flight.Contains('fields')) {
+                    $flightFields = $flight['fields']
+                    if ($null -ne $flightFields -and $flightFields -is [hashtable] -and $flightFields.Count -gt 0) {
+                        foreach ($fk in $flightFields.Keys) {
+                            $cur = $rec[$fk]
+                            if ($null -eq $cur -or ([string]$cur).Length -eq 0) {
+                                $rec[$fk] = $flightFields[$fk]
+                            }
+                        }
+                    }
                 }
                 if ($newSt -cne $fromStatus) {
                     $changes.Add(@{ task = $tid; from = $fromStatus; to = $newSt }) | Out-Null
