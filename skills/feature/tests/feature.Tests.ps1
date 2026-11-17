@@ -2660,6 +2660,99 @@ Describe 'feature.ps1 reconcile' {
         $st2 = Get-Content -Raw (Join-Path $repo '.xagent/features/rcrb/state.json') | ConvertFrom-Json
         $st2.tasks.t2.sessionId | Should -Be $sid
     }
+
+    It 'reconcile running in-review fills worktree fields from worker stdout and worktree dir' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcir' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcir' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-123","result":"x"}'
+        $repoPath = [IO.Path]::GetFullPath($repo)
+        $wt = Join-Path (Join-Path (Split-Path $repoPath -Parent) "$(Split-Path $repoPath -Leaf).xagent") $d
+        $xa = Join-Path $wt '.xagent'
+        New-Item -ItemType Directory -Force -Path $xa | Out-Null
+        $baseSha = ('a' * 40)
+        [IO.File]::WriteAllText((Join-Path $xa 'base.sha'), $baseSha, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $xa 'result.json'), '{}', [Text.UTF8Encoding]::new($false))
+        Set-TaskState -Repo $repo -Name 'rcir' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo 'rcir').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcir/state.json') | ConvertFrom-Json
+        $st.tasks.t1.sessionId | Should -Be 's-123'
+        $st.tasks.t1.worktree | Should -Match ("\.xagent/{0}$" -f [regex]::Escape($d))
+        $st.tasks.t1.worktree | Should -Not -Match '\\'
+        $st.tasks.t1.baseSha | Should -Be $baseSha
+        $st.tasks.t1.resultFile | Should -Match "/\.xagent/result\.json$"
+    }
+
+    It 'reconcile running in-review without worktree dir keeps sessionId only' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcnw' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcnw' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-only","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcnw' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo 'rcnw').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcnw/state.json') | ConvertFrom-Json
+        $st.tasks.t1.sessionId | Should -Be 's-only'
+        $st.tasks.t1.worktree | Should -BeNullOrEmpty
+        $st.tasks.t1.baseSha | Should -BeNullOrEmpty
+        $st.tasks.t1.resultFile | Should -BeNullOrEmpty
+    }
+
+    It 'reconcile running keeps preset worktree and does not fill baseSha from derived path' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpw' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpw' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-pw","result":"x"}'
+        $repoPath = [IO.Path]::GetFullPath($repo)
+        $wt = Join-Path (Join-Path (Split-Path $repoPath -Parent) "$(Split-Path $repoPath -Leaf).xagent") $d
+        $xa = Join-Path $wt '.xagent'
+        New-Item -ItemType Directory -Force -Path $xa | Out-Null
+        [IO.File]::WriteAllText((Join-Path $xa 'base.sha'), ('b' * 40), [Text.UTF8Encoding]::new($false))
+        Set-TaskState -Repo $repo -Name 'rcpw' -States @{ t1 = 'running' } -ExtraFields @{ t1 = @{ worktree = 'X:/given' } }
+        (Invoke-ReconcileOk $repo 'rcpw').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpw/state.json') | ConvertFrom-Json
+        $st.tasks.t1.worktree | Should -Be 'X:/given'
+        $st.tasks.t1.baseSha | Should -BeNullOrEmpty
+        $st.tasks.t1.sessionId | Should -Be 's-pw'
+    }
+
+    It 'reconcile running fails when only preflight stdout is finished' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpr' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpr' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pr' -Content '{"session_id":"s-pr","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcpr' -States @{ t1 = 'running' }
+        $j = Invoke-ReconcileOk $repo 'rcpr'
+        $j.changes[0].to | Should -Be 'failed'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpr/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 1
+    }
+
+    It 'reconcile preflight finished stdout returns to pending without failure stop' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpf' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpf' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pc' -Content '{"session_id":"s-pc","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcpf' -States @{ t1 = 'preflight' }
+        $j = Invoke-ReconcileOk $repo 'rcpf'
+        $j.changes[0].from | Should -Be 'preflight'
+        $j.changes[0].to | Should -Be 'pending'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpf/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 0
+        (Get-Content -Raw (Join-Path $repo 'docs/features/rcpf/decisions.md')) | Should -Not -Match '\[stop\]'
+    }
+
+    It 'reconcile preflight with empty stdout in -pr dir fails and increments failures' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpe' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpe' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pr' -Content ''
+        Set-TaskState -Repo $repo -Name 'rcpe' -States @{ t1 = 'preflight' }
+        $j = Invoke-ReconcileOk $repo 'rcpe'
+        $j.changes[0].to | Should -Be 'failed'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpe/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 1
+    }
+
 }
 
 Describe 'feature.ps1 finish' {
