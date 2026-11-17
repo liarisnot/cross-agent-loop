@@ -2,6 +2,7 @@
 
 *   **Author:** Eugene Chin
 *   **Status:** Approved (locked 2026-11-14)
+*   **Amended:** 2026-11-16, after sign-off. What the build changed or found is written back into the sections below, each marked "(as built)". The note it came from is `docs/features/worker-sandbox/as-built.md`; results are in `docs/test-plan.md`.
 *   **Date:** 2026-11-13 (revised 2026-11-14 after design review round 1, `docs/features/worker-sandbox/reviews/design-1.md`)
 
 --------------------------------------------------------------------------------
@@ -175,6 +176,9 @@ The user reserves three letters once (CUJ 1), and they are stored in `sandbox.js
     *   **Releasing it:** at the end, the run maps the letter back to the empty folder `<Root>\sandbox\idle` (this keeps the letter reserved against USB drives) and releases the lock.
     *   **Crash safety:** Windows releases a dead process's mutexes. When a run waits on a lock its dead holder never released, .NET throws `AbandonedMutexException`, and the waiter **now owns the lock** and takes the slot. So the lock needs no clean-up. The dead run's grants are removed by the new run from the slot ledger before it grants its own.
 *   **Mapping:** `subst` mappings belong to the user's logon session and disappear at sign-out or restart. Each run first maps any reserved letter that is missing. If a reserved letter is in use and isn't ours, the run fails with `sandbox: reserved letter <L>: is used by another drive; choose new letters` and changes nothing.
+    *   **(as built)** A slot letter still mapped to the worktree named in its own ledger, whose process is dead, is *stale*, not in use: a killed run leaves it that way. The next run reclaims the slot.
+    *   **(as built)** `-Reserve Z,Y,X` reaches `delegate.ps1` as one string under `pwsh -File`, so it splits on commas.
+    *   **(as built)** In File Explorer the reserved letters show the host volume's label (for example "OS"). Windows can't give a `subst` drive its own label or icon without clearing the host's; the README explains the drives instead.
 *   **Release:** `delegate.ps1 -SandboxCheck -Release` refuses while a slot is in use. Otherwise it:
     *   removes the three mappings;
     *   deletes the two slot containers;
@@ -189,6 +193,8 @@ Every grant below goes to the slot's container SID, is made at the start of the 
 *   **The ledger comes first.** Before granting, the run writes the slot ledger, `{slot, sid, pid, startTime, runtimeVersion, worktree, grants:[{path, spec}]}`.
 *   **Crash recovery.** A run that takes a slot whose ledger names a dead process first removes those grants, and only then deletes the ledger.
 *   **How grants are applied.** The spec is passed to `icacls <path> /grant "*<sid>:<spec>"`. Removal is `icacls <path> /remove "*<sid>"`. Neither uses `/T`: Windows propagates an inherited (`(OI)(CI)`) entry to existing children whose access lists inherit, which is how git creates worktree files, and removing the parent's entry removes the inherited copies.
+    *   **(as built)** `icacls` needs the `(RA)` form with parentheses, and it cannot grant a bare `RA` on a folder without propagating it. `RA` rows are written as one non-inheriting entry with `NtSetSecurityObject` instead.
+    *   **(as built)** Grants and removals rewrite whole access lists, and two runs editing a shared path at once (the runtime cache, `.git`, read-list entries) dropped each other's entries. Every ACL edit holds a machine-wide lock, `Local\xagent-acl`.
 *   **"RA"** means read attributes on that folder only. It lets a program check that the folder exists, not list or read it.
 
 | Path | Spec | Why |
@@ -208,6 +214,8 @@ Every grant below goes to the slot's container SID, is made at the start of the 
 | Read-list paths (`sandbox.json`) | `(OI)(CI)RX`, plus `RA` on each ancestor from the profile root down | Per-user toolchains the user opts in (see "Read list"). |
 | Everything else | none | G1. |
 
+**(as built)** The registry is not covered by this table. `HKCU\Environment`, including the user `PATH`, is readable from the container. The user accepted this risk on 2026-11-15; the README says not to keep secrets in user environment variables.
+
 ### Read list
 
 `sandbox.json` may list per-user toolchain folders, for example the Python that ComfyUI uses:
@@ -222,6 +230,7 @@ Every grant below goes to the slot's container SID, is made at the start of the 
     *   Windows lets a container open a granted folder without access to the folders above it. The first probe imported Pester from under `OneDrive\Documents` with only the module folder granted.
     *   Programs that *check* their parent folders, such as Node and git, still fail without "read attributes" on them. So an entry under the profile also gets `RA` on each ancestor from the profile root (inclusive) down. Nothing is granted above the profile root.
     *   Phase 3 checks a Node-based program and ComfyUI's Python from a read-list entry.
+    *   **(as built)** ComfyUI's Python works. A Node program under the profile fails on `require` unless started with `--preserve-symlinks`, because Node's realpath calls `lstat` on `C:\`. Granting `RA` on `C:\` would fix it; the user deferred that until a worker needs it (2026-11-15).
 *   **Comparison:** paths are normalized with `GetFullPath`, trailing `\` removed, and compared case-insensitively, so mixed case can't get around a rule.
 *   **Refused entries:** checked in this order; the first match wins, and its reason is quoted in the error:
     1.  `is the profile root`;
@@ -273,7 +282,7 @@ The cache follows Cursor's own launcher, `cursor-agent.ps1`:
     *   **On timeout:** `delegate.ps1` terminates the job and reports `timedOut: true` and `exitCode: -1`.
     *   **Unsandboxed runs (`-NoSandbox`)** keep `Start-Process`. On timeout they use .NET's `Process.Kill($true)` and wait up to 10 s, instead of `taskkill.exe`.
 *   **Environment:** the child gets an environment block built from scratch, with nothing from the user's environment unless it is listed. For sandboxed runs this replaces the secret-variable denylist.
-    *   **System variables:** `SystemRoot`, `windir`, `ComSpec`, `PATHEXT`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`.
+    *   **System variables:** `SystemRoot`, `windir`, `SystemDrive`, `ProgramData`, `ComSpec`, `PATHEXT`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`. **(as built)** `SystemDrive` and `ProgramData` were added: without them Windows wrote shell caches into the worktree under a literal `%SystemDrive%` folder. The secret-variable denylist also still runs before a sandboxed launch, as defence in depth; it changes nothing in the container.
     *   **`PATH`:** `C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd`, then the read-list entries with `addToPath`.
     *   **`PSModulePath`:** `C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules`.
     *   **Run home:** `USERPROFILE` and `HOME` are `<slot>:\.xagent\sandbox\home`. `APPDATA` and `LOCALAPPDATA` are `home\AppData\Roaming` and `home\AppData\Local` under it. `TEMP` and `TMP` are `<slot>:\.xagent\sandbox\tmp`.
@@ -312,6 +321,7 @@ The cache follows Cursor's own launcher, `cursor-agent.ps1`:
     *   **Clean-up:** releases the slot, deletes the canaries, and runs `git worktree remove --force` on the canary worktree.
 
     It prints one JSON object `{ok, support, runtime, canary}` and exits 0 when `ok`, 1 otherwise.
+*   **(as built)** When the fast check fails, `-SandboxCheck` skips the canary and adds `error`. `feature.ps1 doctor`'s `sandbox` check is not required, and it is `ok` only when the fast check passes and letters are reserved. The canary script reads and lists only; writing outside the worktree was checked with a real sandboxed worker at sign-off (denied).
 
 ### Record of each run (G5, G6)
 
@@ -526,7 +536,9 @@ Grant the runtime cache and each repo's `.git` to named capabilities that every 
 | The host-services exemption opens every host port. | It is not part of this feature. `-Release` lists any exemption left on a slot SID. | Decided with the first feature that needs it. |
 | This feature's own build workers run unsandboxed. | They use the frozen `main` at the lock commit (G6), and the sandbox is on for every run after merge. | Accepted for the build's duration. |
 | Target repos whose scripts call `taskkill.exe` hang. | Documented in SKILL.md and the task template: use `Stop-Process -Force` or `.Kill($true)`. It shows up as `timedOut: true` with `taskkill` among the run's last commands. | The target repo changes its scripts. |
-| Per-user toolchains are unreadable. | The read list. | One entry per toolchain. Whether one that checks its parent folders runs is confirmed in phase 3. |
+| Per-user toolchains are unreadable. | The read list. | One entry per toolchain. **(as built)** Python works; Node programs under the profile need `--preserve-symlinks` (RA on `C:\` deferred). |
+| **(as built)** User environment variables are readable (`HKCU\Environment`). | README warns not to keep secrets there. | Accepted by the user (2026-11-15). Cursor's denied attempt to edit the user `PATH` copies it into the run's stderr log. |
+| **(as built)** Two runs editing the same access list at once. | A machine-wide lock around every grant and removal. | None known; 48 concurrent starts passed. |
 | SSH git remotes are unusable (`~\.ssh` is blocked). | Workers don't push. HTTPS remotes work. | Documented. |
 | Network is always on. | File isolation limits what can be sent (G3). | Host filtering is a Future Improvement. |
 | Scalability. | Two slots. One feature never has more than two live runs, and a third sandboxed run from anywhere (a second feature, a manual run) waits up to 60 s, then fails with `no free slot`. The cache holds at most two Cursor versions (about 512 MB). | More slots need more reserved letters. |

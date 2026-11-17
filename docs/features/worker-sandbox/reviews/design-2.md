@@ -94,7 +94,7 @@ No item needs an architecture choice. Where a finding offered options, one was c
 ### R7. Read-list entries under the profile: parents aren't granted
 - **Lenses:** ir B1.
 - **Assessment:** CONTEST in part, FIX in part.
-  - **CONTEST:** the claim that AppContainer access "needs traverse on every parent folder" is wrong. Windows' bypass-traverse privilege applies. In the first probe run, Pester under `<user profile>\OneDrive\Documents\...`, with only the module folder granted, was imported and passed (`worker-sandbox-probe/README.md`, Pester row; `inner2.ps1`).
+  - **CONTEST:** the claim that AppContainer access "needs traverse on every parent folder" is wrong. Windows' bypass-traverse privilege applies. In the first probe run, Pester under `<profile>\OneDrive\Documents\...`, with only the module folder granted, was imported and passed (`worker-sandbox-probe/README.md`, Pester row; `inner2.ps1`).
   - **Still valid:** tools that *stat* their parents, as Node and git do, fail at any parent without RA.
   - **The profile root was refused for repos** because `C:\Users` itself can't be granted without admin; the user can grant inside their own profile.
 - **FIX:**

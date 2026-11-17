@@ -1,6 +1,6 @@
 # `worker-sandbox`: as built
 
-The design `docs/designs/worker-sandbox.md` is locked, so the build's findings are recorded here instead. Each item says what differs from, or adds to, the design.
+The design `docs/designs/worker-sandbox.md` was locked during the build, so the build's findings were recorded here. After sign-off (2026-11-16) they were folded into the design, marked "(as built)". This note keeps the full list.
 
 ## Changes from the design
 
