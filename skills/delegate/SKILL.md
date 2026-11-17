@@ -53,7 +53,13 @@ $a = @('-NoProfile','-File','<skill dir>/scripts/delegate.ps1','-Agent','cursor'
 $p = Start-Process pwsh -ArgumentList $a -WindowStyle Hidden -RedirectStandardOutput "$runs/summary.json" -RedirectStandardError "$runs/launcher.err.txt" -PassThru; $p.Id
 ```
 
-Then watch with the Monitor tool: a loop that prints the summary and exits once `summary.json` is non-empty, or prints a failure line once the launcher pid is gone without one (poll every 20 s; re-arm after the 30-minute expiry). The summary file holds the same JSON line as a foreground run. A detached worker keeps running if Claude Code exits; stop it early with the pid in `<logs>.pid`. Use a new summary file name per round so an old one isn't read as the new result.
+A detached run sends no signal when it ends, so **start the wait in the same message as the launch**, never in a later turn: a result nobody waits for sits unreviewed (it did for about an hour on 2026-11-15). Use one Bash call with `run_in_background`, which notifies you once when it exits:
+
+```bash
+f=<repo>/.xagent/runs/<taskId>/summary.json; until [ -s "$f" ] || ! powershell.exe -NoProfile -c "if (Get-Process -Id <pid> -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >/dev/null 2>&1; do sleep 20; done; if [ -s "$f" ]; then echo DONE; else echo "LAUNCHER GONE, no summary"; fi
+```
+
+For two workers, one call can wait for both (loop until each has a summary or a dead launcher). "LAUNCHER GONE" means the run died without a summary: read `launcher.err.txt` and the run logs. The summary file holds the same JSON line as a foreground run. A detached worker keeps running if Claude Code exits; stop it early with the pid in `<logs>.pid`. Use a new summary file name per round so an old one isn't read as the new result.
 
 The script prints **one compact JSON line**: `ok, violation, profile, model, usage, agent, seat, feature, taskId, worktree, branch, baseSha, exitCode, timedOut, seconds, cliStatus, sessionId, result, reviewFile, changes, diffStat, stderrTail, logs, sandboxed, sandbox, skillDir, sandboxNotes`. `baseSha` is the commit the worktree was created from (diff against it). `sandboxed` is true or false. `sandbox` holds container, slot, runtime letter and version, and whether `node.exe` was patched. `skillDir` is the folder `delegate.ps1` ran from. `sandboxNotes` lists clean-up steps that failed, and is empty when all went well. Full logs are in `<repo>/.xagent/runs/<taskId>/`. While a run is live, `<logs>.pid` holds `{pid, startTime, childPid, childStartTime, feature}`.
 

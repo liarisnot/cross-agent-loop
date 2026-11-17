@@ -1488,6 +1488,16 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks[0].files -is [array] | Should -BeTrue
         $r.Json.tasks[0].files[0] | Should -Be 'src/a.ts'
     }
+
+    It 'schedule -Repo on repo subfolder matches repo root' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'subsch' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $sub = Join-Path $repo 'docs/sub'
+        New-Item -ItemType Directory -Force -Path $sub | Out-Null
+        $rRoot = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'subsch') -WorkingDirectory $repo
+        $rSub = Invoke-Feature @('schedule', '-Repo', $sub, '-Name', 'subsch') -WorkingDirectory $sub
+        $rSub.Json.tasks.id | Should -Be $rRoot.Json.tasks.id
+    }
 }
 
 Describe 'feature.ps1 task' {
@@ -2412,6 +2422,27 @@ Describe 'feature.ps1 status' {
         $j = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
         $j.designDoc | Should -Be 'docs/design/x.md'
     }
+
+    It 'status -Repo on repo subfolder matches repo root' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'subst' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $sub = Join-Path $repo 'docs/sub'
+        New-Item -ItemType Directory -Force -Path $sub | Out-Null
+        $jRoot = Invoke-StatusOk $repo -Extra @('-Name', 'subst')
+        $jSub = Invoke-Feature @('status', '-Repo', $sub, '-Name', 'subst') -WorkingDirectory $sub
+        $jSub.ExitCode | Should -Be 0
+        $jSub.Json.ok | Should -BeTrue
+        $jSub.Json.stage | Should -Be $jRoot.stage
+        $jSub.Json.designDoc | Should -Be $jRoot.designDoc
+    }
+
+    It 'status -Repo on nonexistent path returns ok false' {
+        $repo = New-TestRepo
+        $bad = Join-Path $TestDrive ('missing-' + [guid]::NewGuid().ToString('N'))
+        $r = Invoke-Feature @('status', '-Repo', $bad) -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.ok | Should -BeFalse
+    }
 }
 
 Describe 'feature.ps1 reconcile' {
@@ -2660,6 +2691,99 @@ Describe 'feature.ps1 reconcile' {
         $st2 = Get-Content -Raw (Join-Path $repo '.xagent/features/rcrb/state.json') | ConvertFrom-Json
         $st2.tasks.t2.sessionId | Should -Be $sid
     }
+
+    It 'reconcile running in-review fills worktree fields from worker stdout and worktree dir' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcir' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcir' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-123","result":"x"}'
+        $repoPath = [IO.Path]::GetFullPath($repo)
+        $wt = Join-Path (Join-Path (Split-Path $repoPath -Parent) "$(Split-Path $repoPath -Leaf).xagent") $d
+        $xa = Join-Path $wt '.xagent'
+        New-Item -ItemType Directory -Force -Path $xa | Out-Null
+        $baseSha = ('a' * 40)
+        [IO.File]::WriteAllText((Join-Path $xa 'base.sha'), $baseSha, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $xa 'result.json'), '{}', [Text.UTF8Encoding]::new($false))
+        Set-TaskState -Repo $repo -Name 'rcir' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo 'rcir').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcir/state.json') | ConvertFrom-Json
+        $st.tasks.t1.sessionId | Should -Be 's-123'
+        $st.tasks.t1.worktree | Should -Match ("\.xagent/{0}$" -f [regex]::Escape($d))
+        $st.tasks.t1.worktree | Should -Not -Match '\\'
+        $st.tasks.t1.baseSha | Should -Be $baseSha
+        $st.tasks.t1.resultFile | Should -Match "/\.xagent/result\.json$"
+    }
+
+    It 'reconcile running in-review without worktree dir keeps sessionId only' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcnw' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcnw' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-only","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcnw' -States @{ t1 = 'running' }
+        (Invoke-ReconcileOk $repo 'rcnw').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcnw/state.json') | ConvertFrom-Json
+        $st.tasks.t1.sessionId | Should -Be 's-only'
+        $st.tasks.t1.worktree | Should -BeNullOrEmpty
+        $st.tasks.t1.baseSha | Should -BeNullOrEmpty
+        $st.tasks.t1.resultFile | Should -BeNullOrEmpty
+    }
+
+    It 'reconcile running keeps preset worktree and does not fill baseSha from derived path' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpw' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpw' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -Content '{"session_id":"s-pw","result":"x"}'
+        $repoPath = [IO.Path]::GetFullPath($repo)
+        $wt = Join-Path (Join-Path (Split-Path $repoPath -Parent) "$(Split-Path $repoPath -Leaf).xagent") $d
+        $xa = Join-Path $wt '.xagent'
+        New-Item -ItemType Directory -Force -Path $xa | Out-Null
+        [IO.File]::WriteAllText((Join-Path $xa 'base.sha'), ('b' * 40), [Text.UTF8Encoding]::new($false))
+        Set-TaskState -Repo $repo -Name 'rcpw' -States @{ t1 = 'running' } -ExtraFields @{ t1 = @{ worktree = 'X:/given' } }
+        (Invoke-ReconcileOk $repo 'rcpw').changes[0].to | Should -Be 'in-review'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpw/state.json') | ConvertFrom-Json
+        $st.tasks.t1.worktree | Should -Be 'X:/given'
+        $st.tasks.t1.baseSha | Should -BeNullOrEmpty
+        $st.tasks.t1.sessionId | Should -Be 's-pw'
+    }
+
+    It 'reconcile running fails when only preflight stdout is finished' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpr' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpr' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pr' -Content '{"session_id":"s-pr","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcpr' -States @{ t1 = 'running' }
+        $j = Invoke-ReconcileOk $repo 'rcpr'
+        $j.changes[0].to | Should -Be 'failed'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpr/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 1
+    }
+
+    It 'reconcile preflight finished stdout returns to pending without failure stop' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpf' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpf' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pc' -Content '{"session_id":"s-pc","result":"x"}'
+        Set-TaskState -Repo $repo -Name 'rcpf' -States @{ t1 = 'preflight' }
+        $j = Invoke-ReconcileOk $repo 'rcpf'
+        $j.changes[0].from | Should -Be 'preflight'
+        $j.changes[0].to | Should -Be 'pending'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpf/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 0
+        (Get-Content -Raw (Join-Path $repo 'docs/features/rcpf/decisions.md')) | Should -Not -Match '\[stop\]'
+    }
+
+    It 'reconcile preflight with empty stdout in -pr dir fails and increments failures' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rcpe' -Plan (New-OneTaskPlan) | Out-Null
+        $d = Get-PlanDelegateTaskId $repo 'rcpe' 't1'
+        Write-DelegateRunStdout -Repo $repo -DelegateId $d -Stamp '20260101-120000' -RunSuffix '-pr' -Content ''
+        Set-TaskState -Repo $repo -Name 'rcpe' -States @{ t1 = 'preflight' }
+        $j = Invoke-ReconcileOk $repo 'rcpe'
+        $j.changes[0].to | Should -Be 'failed'
+        $st = Get-Content -Raw (Join-Path $repo '.xagent/features/rcpe/state.json') | ConvertFrom-Json
+        $st.tasks.t1.failures | Should -Be 1
+    }
+
 }
 
 Describe 'feature.ps1 finish' {
@@ -2767,6 +2891,28 @@ Describe 'feature.ps1 finish' {
         $feat = $featJson | ConvertFrom-Json
         $feat.gates.PSObject.Properties['signed-off'] | Should -BeNullOrEmpty
         (Get-Content -Raw (Join-Path $repo 'docs/features/fincon/decisions.md')) | Should -Match 'finish: merge conflict'
+    }
+
+    It 'lists done feature after feature branch is deleted' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'finbd' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ship', '-Repo', $repo, '-Name', 'finbd') -WorkingDirectory $repo)
+        Assert-FeatureOk (Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'finbd') -WorkingDirectory $repo)
+        & git -C $repo branch -D 'feature/finbd' 2>&1 | Out-Null
+        $jn = Invoke-StatusOk $repo
+        ($jn.features | Where-Object { $_.name -eq 'finbd' }).stage | Should -Be 'done'
+    }
+
+    It 'does not list main-only feature without signed-off' {
+        $repo = New-TestRepo
+        $dir = Join-Path $repo 'docs/features/ghost'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $feat = @{ stage = 'build'; gates = @{} } | ConvertTo-Json -Compress
+        Set-Content -LiteralPath (Join-Path $dir 'feature.json') -Value $feat -NoNewline
+        & git -C $repo add docs/features/ghost 2>&1 | Out-Null
+        & git -C $repo commit -m 'ghost' 2>&1 | Out-Null
+        $jn = Invoke-StatusOk $repo
+        $jn.features | Where-Object { $_.name -eq 'ghost' } | Should -BeNullOrEmpty
     }
 }
 
