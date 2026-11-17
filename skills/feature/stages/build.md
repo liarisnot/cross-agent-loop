@@ -22,7 +22,7 @@ Take tasks only from `feature.ps1 schedule -Repo <repo> -Name <name>`. Read `liv
 delegate.ps1 -Agent cursor -Model <model> -Profile <profile> -Feature <name> -Base feature/<name> -Repo <repo> -TaskId <delegateTaskId> -TaskFile <task file>
 ```
 
-`<model>` and `<profile>` come from `schedule.tasks`. Workers are long runs: launch them detached, the way `<delegate dir>/SKILL.md` launches long runs. Preflights, reviews and council seats stay in the foreground.
+`<model>` and `<profile>` come from `schedule.tasks`. Workers are long runs: launch them detached, the way `<delegate dir>/SKILL.md` launches long runs, and start the background wait for each in the same message as its launch. Preflights, reviews and council seats stay in the foreground.
 
 4. When the run returns with `ok: true` and `timedOut` is not true, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status in-review -SessionId <sessionId> -ResultFile <worktree>/.xagent/result.json -Worktree <worktree> -BaseSha <baseSha>`. Take `sessionId`, `worktree` and `baseSha` from `delegate.ps1`'s summary. Omit `-SessionId` when the summary has none. Then do [After each worker run](#after-each-worker-run). A failed run (`ok: false` or `timedOut: true`) follows [Failed runs](#failed-runs) instead, and does not move to `in-review`. A task under council stays `in-review`.
 
