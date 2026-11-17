@@ -486,6 +486,13 @@ function Get-ReservedLetterState {
     $target = $status.Substring(5)
     if (Test-SamePath $target $Expected) { return 'ours' }
     if ($Slot -and (Test-LedgerProcessLive $LedgerPath)) { return 'busy' }
+    # A killed run leaves its slot mapped to its worktree, with its ledger. The next run
+    # reclaims the slot (Get-SandboxSlot clears the ledger, New-SandboxRun remaps the letter).
+    if ($Slot -and (Test-Path -LiteralPath $LedgerPath -PathType Leaf)) {
+        $ledger = Read-SandboxLedger -Path $LedgerPath
+        $ledgerWorktree = if ($null -ne $ledger) { [string](Get-ObjectProperty $ledger 'worktree') } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($ledgerWorktree) -and (Test-SamePath $target $ledgerWorktree)) { return 'stale' }
+    }
     return 'used'
 }
 

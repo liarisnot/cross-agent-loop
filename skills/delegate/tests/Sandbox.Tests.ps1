@@ -657,6 +657,32 @@ Describe 'letters' {
         $result.letters.states[$free[1]] | Should -Be 'free'
         @($result.problems) | Should -Contain "reserved letter ${used}: is used by another drive; choose new letters"
     }
+
+    It 'treats a slot still mapped to a dead run''s worktree as stale, not used' {
+        # 2026-11-16: a killed run left its slot mapped to its worktree, and the next run refused it.
+        $dir = Join-Path $TestDrive 'stale-slot'
+        $wt = Join-Path $dir 'wt'
+        $other = Join-Path $dir 'other'
+        New-Item -ItemType Directory -Force -Path $wt, $other | Out-Null
+        $ledger = Join-Path $dir 'slot-Q.json'
+        $deadPid = 999999
+        @{ slot = 'Q'; sid = 'S-1-15-2-1'; pid = $deadPid; startTime = '2026-01-01T00:00:00Z'; worktree = $wt; grants = @() } |
+            ConvertTo-Json | Set-Content -LiteralPath $ledger -Encoding utf8
+        $states = InModuleScope Sandbox -Parameters @{ Wt = $wt; Other = $other; Ledger = $ledger; Idle = (Join-Path $dir 'idle') } {
+            param($Wt, $Other, $Ledger, $Idle)
+            $drives = [Collections.Generic.HashSet[string]]::new()
+            @{
+                stale = Get-ReservedLetterState -Letter 'Q' -Expected $Idle -LedgerPath $Ledger -Slot $true -Map @{ Q = $Wt } -Drives $drives
+                elsewhere = Get-ReservedLetterState -Letter 'Q' -Expected $Idle -LedgerPath $Ledger -Slot $true -Map @{ Q = $Other } -Drives $drives
+                runtime = Get-ReservedLetterState -Letter 'Q' -Expected $Idle -LedgerPath $Ledger -Slot $false -Map @{ Q = $Wt } -Drives $drives
+                noLedger = Get-ReservedLetterState -Letter 'Q' -Expected $Idle -LedgerPath (Join-Path $Idle 'none.json') -Slot $true -Map @{ Q = $Wt } -Drives $drives
+            }
+        }
+        $states.stale | Should -Be 'stale'
+        $states.elsewhere | Should -Be 'used'
+        $states.runtime | Should -Be 'used'
+        $states.noLedger | Should -Be 'used'
+    }
 }
 
 Describe 'read list and environment' {
