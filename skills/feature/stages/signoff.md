@@ -24,9 +24,13 @@ git -C <repo> diff --output=.xagent/features/<name>/final.diff main...feature/<n
 
 Do not use `>` to write this file. In PowerShell, `>` writes UTF-16.
 
+## 3a. As-built note
+
+`finish` refuses when the design file differs from the one locked at **design-locked**, so build findings cannot go into the design before the merge. If the build settled or changed anything the design says (a platform fact, a changed mechanism, an accepted limit), write `docs/features/<name>/as-built.md`: one short item per finding, each naming the design section it affects. Commit it with `feature.ps1 commit-records -Repo <repo> -Name <name> -Message "as-built note"`. Skip this step when there is nothing to note.
+
 ## 4. Task file
 
-Write `<repo>/.xagent/features/<name>/<id>.task.md`, where `<id>` is the one run in `status.reviewRuns`. The file names the locked design's path (`docs/designs/<name>.md`) and says the diff is `.xagent/final.diff` in the reviewer's worktree.
+Write `<repo>/.xagent/features/<name>/<id>.task.md`, where `<id>` is the one run in `status.reviewRuns`. The file names the locked design's path (`<design doc>`) and says the diff is `.xagent/final.diff` in the reviewer's worktree. If `as-built.md` exists, the file names it too and asks the reviewer to mark each finding that the note explains as "explained by as-built.md", not as drift.
 
 ## 5. Drift check
 
@@ -78,6 +82,11 @@ On a clear yes:
 3. Ask whether to push. `finish` never pushes. On a clear yes, run `git -C <repo> push`. Otherwise do not push.
 
 On success (`ok: true`), the feature counts as `done` once the merge commit exists on `main`. That is derived, not stored. Report it.
+
+### After the merge
+
+1. **Fold in the as-built note.** If `docs/features/<name>/as-built.md` exists, write each item into the design on `main`, marked "(as built)", and add an `Amended:` line at the top of the design. Show the user the changes and commit only on their approval.
+2. **Live check, when the feature changed the skills that run it.** When a feature changes files under `skills/` in this repo, the build usually runs a frozen copy of the skills, and its tests start one run at a time. So bugs that show only with the live skills, with runs at the same time, or with a killed run surface after the merge (on `worker-sandbox`: grants lost between concurrent starts, a slot left mapped after a kill). Once the skill links point at the merged code, do a short check: two live runs at once, and one run killed mid-way and then cleaned up. Fix what it finds on `main` as ordinary commits, and note them in `docs/test-plan.md`.
 
 `finish` also refuses when the tree is not clean, when `HEAD` is not `feature/<name>`, when `git diff` from the signed-off SHA to `HEAD` lists any file outside `docs/features/<name>/`, or when the design file's blob differs from the one recorded at **design-locked**. Show `error` and stop.
 

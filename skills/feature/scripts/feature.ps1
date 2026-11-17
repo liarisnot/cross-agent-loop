@@ -24,7 +24,8 @@ param(
     [string]$ResultFile,
     [string]$Worktree,
     [string]$BaseSha,
-    [string]$TimeoutSec
+    [string]$TimeoutSec,
+    [string]$DesignDoc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,6 +104,52 @@ function Test-FeatureName([string]$n) {
 
 function Assert-OneLine([string]$label, [string]$value) {
     if ($null -ne $value -and $value -match "`r|`n") { throw "$label must be a single line" }
+}
+
+
+function Test-DesignDocGiven([string]$DesignDoc) {
+    return (-not [string]::IsNullOrWhiteSpace($DesignDoc))
+}
+
+function Normalize-DesignDocPath([string]$DesignDoc) {
+    $p = $DesignDoc.Trim()
+    $p = $p -replace '\\', '/'
+    if ($p.StartsWith('./', [StringComparison]::Ordinal)) { $p = $p.Substring(2) }
+    return $p
+}
+
+function Assert-RepoRelativeDesignDoc([string]$Normalized) {
+    if ($Normalized.StartsWith('/', [StringComparison]::Ordinal)) { throw '-DesignDoc must be a repo-relative path' }
+    foreach ($seg in $Normalized.Split('/', [StringSplitOptions]::RemoveEmptyEntries)) {
+        if ($seg -ceq '..') { throw '-DesignDoc must be a repo-relative path' }
+    }
+}
+
+function Resolve-NewFeatureDesignDoc {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$DesignDocInput
+    )
+    if (Test-DesignDocGiven $DesignDocInput) {
+        Assert-OneLine '-DesignDoc' $DesignDocInput
+        $trimmed = $DesignDocInput.Trim()
+        if ([IO.Path]::IsPathRooted($trimmed)) { throw '-DesignDoc must be a repo-relative path' }
+        $designDoc = Normalize-DesignDocPath $DesignDocInput
+        Assert-RepoRelativeDesignDoc $designDoc
+        if (-not $designDoc.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase)) {
+            throw '-DesignDoc must be a .md file'
+        }
+    } else {
+        $designDoc = "docs/designs/$FeatureName.md"
+        $defaultFull = Join-Path $Repository $designDoc
+        if (Test-Path -LiteralPath $defaultFull) {
+            throw "design doc docs/designs/$FeatureName.md already exists; pass -DesignDoc to adopt it, or choose another name"
+        }
+    }
+    $designDocFull = Join-Path $Repository $designDoc
+    $designDocExists = Test-Path -LiteralPath $designDocFull
+    return @{ designDoc = $designDoc; designDocExists = $designDocExists }
 }
 
 function Get-UtcDecisionTime {
@@ -792,6 +839,7 @@ function Invoke-StatusFeature {
         stage                 = $storedStage
         phase                 = $phaseInfo
         checkin               = [string]$feat.checkin
+        designDoc             = [string]$feat.designDoc
         branch                = [string]$currentBranch
         treeClean             = (Test-TreeClean $Repository)
         tasks                 = $tasksList
@@ -945,12 +993,15 @@ function Invoke-NewFeature {
     if ($LASTEXITCODE -eq 0) { throw "branch feature/$Name already exists" }
     if (@(Get-InProgressFeatures $Repository).Count -gt 0) { throw 'another feature is in progress' }
 
+    $designInfo = Resolve-NewFeatureDesignDoc -Repository $Repository -FeatureName $Name -DesignDocInput $DesignDoc
+    $designDoc = $designInfo.designDoc
+    $designDocExists = $designInfo.designDocExists
+
     Enter-FeatureLock $Repository $Name
     try {
         Invoke-GitRepo $Repository 'switch' '-c' "feature/$Name" 'main' | Out-Null
         $featDir = Join-Path $Repository "docs/features/$Name"
         New-Item -ItemType Directory -Force $featDir | Out-Null
-        $designDoc = "docs/designs/$Name.md"
         $feature = [ordered]@{
             name      = $Name
             stage     = 'design'
@@ -965,7 +1016,12 @@ function Invoke-NewFeature {
         Write-TextLf (Join-Path $featDir 'decisions.md') $tpl
         $rel = "docs/features/$Name"
         $null = Invoke-FeatureCommit $Repository "feature($Name): start" @($rel)
-        Out-FeatureOk @{ name = $Name; branch = "feature/$Name" }
+        Out-FeatureOk @{
+            name            = $Name
+            branch          = "feature/$Name"
+            designDoc       = $designDoc
+            designDocExists = $designDocExists
+        }
     } finally {
         Exit-FeatureLock
     }
@@ -1410,6 +1466,124 @@ function Build-FeaturePhasesWithDelegateIds {
     return @($outPhases)
 }
 
+function Get-HeadPhasesByN([object]$Feature) {
+    $map = @{}
+    if (-not $Feature.PSObject.Properties['phases'] -or $null -eq $Feature.phases) { return $null }
+    foreach ($phase in @($Feature.phases)) {
+        $map[[int]$phase.n] = $phase
+    }
+    return $map
+}
+
+function Get-PlanPhasesByN([object]$Plan) {
+    $map = @{}
+    foreach ($phase in @($Plan.phases)) {
+        $map[[int]$phase.n] = $phase
+    }
+    return $map
+}
+
+function Test-HeadFileCoversNewFile([string]$OldKey, [string]$NewKey) {
+    if ([string]$OldKey -ceq [string]$NewKey) { return $true }
+    if ([string]$OldKey -ceq '') { return $true }
+    if ([string]$NewKey -ceq '') { return $false }
+    if ($OldKey.EndsWith('/')) {
+        return $NewKey.StartsWith($OldKey, [StringComparison]::Ordinal)
+    }
+    return $false
+}
+
+function Get-PlanTaskEffectiveStatus {
+    param(
+        [string]$TaskId,
+        [string[]]$MergedIds,
+        [hashtable]$StateStatuses
+    )
+    if ($MergedIds -contains $TaskId) { return 'merged' }
+    if ($StateStatuses.ContainsKey($TaskId)) { return [string]$StateStatuses[$TaskId] }
+    return 'pending'
+}
+
+function Assert-BuildStagePlanRestrictions {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [object]$HeadFeature,
+        [object]$NewPlan
+    )
+    $headByN = Get-HeadPhasesByN $HeadFeature
+    if ($null -eq $headByN -or $headByN.Count -eq 0) {
+        throw 'in stage build, there is no plan to change'
+    }
+
+    $newByN = Get-PlanPhasesByN $NewPlan
+    $headNums = @($headByN.Keys | Sort-Object)
+    $newNums = @($newByN.Keys | Sort-Object)
+    if ($headNums.Count -ne $newNums.Count) {
+        throw 'in stage build, the phases must stay unchanged'
+    }
+    for ($i = 0; $i -lt $headNums.Count; $i++) {
+        if ($headNums[$i] -ne $newNums[$i]) {
+            throw 'in stage build, the phases must stay unchanged'
+        }
+    }
+    foreach ($n in $headNums) {
+        $hp = $headByN[$n]
+        $np = $newByN[$n]
+        if (-not ([string]$hp.rationale -ceq [string]$np.rationale) -or -not ([string]$hp.test -ceq [string]$np.test)) {
+            throw "in stage build, phase $n must stay unchanged"
+        }
+    }
+
+    $mergedIds = @(Get-XagentMergedTaskIds $Repository $FeatureName)
+    $stateStatuses = Get-FeatureStateTaskStatuses $Repository $FeatureName
+    $newById = Get-PlanTasksById $NewPlan
+    $protected = @('merged', 'preflight', 'running', 'in-review')
+
+    foreach ($n in $headNums) {
+        foreach ($task in @($headByN[$n].tasks)) {
+            $id = [string]$task.id
+            $status = Get-PlanTaskEffectiveStatus -TaskId $id -MergedIds $mergedIds -StateStatuses $stateStatuses
+            if ($protected -notcontains $status) { continue }
+            if (-not $newById.ContainsKey($id)) {
+                throw "task $id is $status and must stay unchanged"
+            }
+            $newEntry = $newById[$id]
+            if ($newEntry.PhaseN -ne [int]$n) {
+                throw "task $id is $status and must stay unchanged"
+            }
+            if (-not (Test-PlanTaskFieldsEqual $newEntry.Task $task)) {
+                throw "task $id is $status and must stay unchanged"
+            }
+        }
+    }
+
+    foreach ($n in $headNums) {
+        $headKeys = [System.Collections.Generic.List[string]]::new()
+        foreach ($task in @($headByN[$n].tasks)) {
+            foreach ($entry in (Get-JsonPropertyStringArray $task 'files')) {
+                $headKeys.Add((Get-OverlapKey ([string]$entry)))
+            }
+        }
+        foreach ($task in @($newByN[$n].tasks)) {
+            $id = [string]$task.id
+            foreach ($entry in (Get-JsonPropertyStringArray $task 'files')) {
+                $newKey = Get-OverlapKey ([string]$entry)
+                $covered = $false
+                foreach ($hk in $headKeys) {
+                    if (Test-HeadFileCoversNewFile $hk $newKey) {
+                        $covered = $true
+                        break
+                    }
+                }
+                if (-not $covered) {
+                    throw "task $id file $entry is outside phase $n's declared files"
+                }
+            }
+        }
+    }
+}
+
 function Invoke-PlanFeature {
     param([string]$Repository, [string]$FeatureName)
     if (-not $PlanFile) { throw '-PlanFile is required' }
@@ -1418,7 +1592,8 @@ function Invoke-PlanFeature {
     try {
         Assert-OnFeatureBranch $Repository $FeatureName
         $state = Get-HeadFeatureState $Repository $FeatureName
-        if ([string]$state.Feature.stage -ne 'plan') { throw 'plan is only allowed in stage plan' }
+        $stage = [string]$state.Feature.stage
+        if ($stage -ne 'plan' -and $stage -ne 'build') { throw 'plan is only allowed in stage plan or build' }
 
         $planPath = if ([IO.Path]::IsPathRooted($PlanFile)) { $PlanFile } else { Join-Path (Get-Location).Path $PlanFile }
         if (-not (Test-Path -LiteralPath $planPath)) { throw "plan file not found: $PlanFile" }
@@ -1443,6 +1618,9 @@ function Invoke-PlanFeature {
         }
 
         Assert-PlanBusinessRules $planObj
+        if ($stage -eq 'build') {
+            Assert-BuildStagePlanRestrictions -Repository $Repository -FeatureName $FeatureName -HeadFeature $state.Feature -NewPlan $planObj
+        }
 
         $phases = Build-FeaturePhasesWithDelegateIds -FeatureName $FeatureName -Plan $planObj -HeadFeature $state.Feature
         $feat = $state.Feature
@@ -1471,7 +1649,7 @@ function Invoke-PlanFeature {
 
         $taskCount = 0
         foreach ($ph in @($phases)) { $taskCount += @($ph.tasks).Count }
-        Out-FeatureOk @{ name = $FeatureName; phases = @($phases).Count; tasks = $taskCount }
+        Out-FeatureOk @{ name = $FeatureName; phases = @($phases).Count; tasks = $taskCount; stage = $stage }
     } finally {
         Exit-FeatureLock
     }

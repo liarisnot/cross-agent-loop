@@ -42,6 +42,7 @@
       ]
     },
     "checkin": { "type": "string", "enum": ["on-problems", "every-phase"] },
+    "designDoc": { "type": "string" },
     "branch": { "type": "string" },
     "treeClean": { "type": "boolean" },
     "tasks": {
@@ -144,6 +145,7 @@
       "stage",
       "phase",
       "checkin",
+      "designDoc",
       "branch",
       "treeClean",
       "tasks",

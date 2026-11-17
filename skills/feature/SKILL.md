@@ -11,7 +11,7 @@ You are the lead. The user speaks in plain language. You design, review, plan, b
 
 `<skill dir>` is the base directory Claude Code reports when this skill loads, with forward slashes. `<delegate dir>` is the `delegate` skill beside it (`<skill dir>/../delegate`).
 
-`<repo>` is the top level of the session's current folder (`git rev-parse --show-toplevel`). `<name>` is `status.selected` after a feature has been selected.
+`<repo>` is the top level of the session's current folder (`git rev-parse --show-toplevel`). `<name>` is `status.selected` after a feature has been selected. `<design doc>` is `status.designDoc`: the design doc's path in `<repo>`, recorded by `new`. It is `docs/designs/<name>.md` unless the feature adopted an existing doc somewhere else.
 
 Personas and standards live in `<delegate dir>/personas/`. Files this skill ships are named from `<skill dir>`: `<skill dir>/egm/skills/egm-draft/SKILL.md`, `<skill dir>/egm/skills/egm-review/SKILL.md`, `<skill dir>/egm/skills/egm-review-loop/SKILL.md`, `<skill dir>/egm/skills/egm-resolve/SKILL.md`, `<skill dir>/egm/agents/synthesizer.md`, `<skill dir>/schemas/plan.schema.json`, `<skill dir>/templates/task.md`.
 
@@ -119,7 +119,7 @@ build (phase 1..n) --> signoff --[GATE signed-off]--> done
 
 | Stage | Done when | Gate to leave |
 |---|---|---|
-| `design` | all sections of `docs/designs/<name>.md` approved | none |
+| `design` | all sections of `<design doc>` approved | none |
 | `design-review` | goldfish findings resolved | **design-locked** |
 | `plan` | the plan imported and readiness-checked | **plan-approved** (also records the check-in mode) |
 | `build` | every task merged into `feature/<name>` and each phase's test passes | none (opt-in phase check-ins and problem stops pause it) |
@@ -176,7 +176,7 @@ Check these in order:
 3. The only feature in progress, if there is exactly one. `feature.ps1 status` applies this when `-Name` is omitted. A feature is in progress unless it is `done` or `abandoned`. `done` is derived (the branch is an ancestor of `main` and **signed-off** is recorded) and is never stored.
 4. Otherwise, ask the user.
 
-One feature is active, in the user's checkout. Local state is `<repo>/.xagent/features/<name>/`. Lasting records are committed on `feature/<name>` under `docs/features/<name>/`. The design doc is `docs/designs/<name>.md`. Workers are launched with `-Repo <repo> -Base feature/<name>`, and you merge their branches in `<repo>` while `feature/<name>` is checked out. Side work happens outside this skill. The checkout must be back on `feature/<name>` before you continue. Reconcile asks the user to switch back when it is not. `main` is merged into the feature only when the user asks, at a phase boundary, as `stages/build.md` describes.
+One feature is active, in the user's checkout. Local state is `<repo>/.xagent/features/<name>/`. Lasting records are committed on `feature/<name>` under `docs/features/<name>/`. The design doc is `<design doc>`. Workers are launched with `-Repo <repo> -Base feature/<name>`, and you merge their branches in `<repo>` while `feature/<name>` is checked out. Side work happens outside this skill. The checkout must be back on `feature/<name>` before you continue. Reconcile asks the user to switch back when it is not. `main` is merged into the feature only when the user asks, at a phase boundary, as `stages/build.md` describes.
 
 `feature.ps1` is the only writer of `feature.json`. Do not hand-edit `feature.json`, `plan.md` or `decisions.md`. `plan.md` is generated for the user to read.
 

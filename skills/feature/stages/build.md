@@ -37,7 +37,14 @@ delegate.ps1 -Agent cursor -Profile review -Persona implementation_readiness -Mo
 
 Comprehension always runs on Composer 2.5: on Grok 4.7 high it took 8.6 minutes for one task file (2026-11-14), against about 1 minute on Composer. The standard files are in `<delegate dir>/personas/`.
 
-Read the comprehension report's **Size estimate**. A `split` verdict, or your own judgment that the task is over about 20 worker minutes or 600 lines, is a needed plan change: make a [problem stop](#problem-stop) that shows the estimate and the proposed split. Do not launch the worker. A Major finding about the acceptance command's scope is a plan change too, so include it in the same stop.
+Read the comprehension report's **Size estimate** and its **Cohesion** answer. Preflight verdicts are advice: you decide, and you log a decision whenever you overrule one.
+
+- **Keep the task whole** when it is one cohesive unit, even if it is big: a harness and the one test that proves it, or a change whose halves cannot be tested apart. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "<id>: kept whole despite split verdict — <why it is one unit>"`, and launch it. Size alone (minutes or lines) is never the reason to split.
+- **Split the task** when it has a real seam (one part's output is a stable interface for the next, and each part is testable on its own). That is your call: do not ask the user and do not go back to the plan. Follow [Splitting a task in build](#splitting-a-task-in-build).
+- **Narrow the acceptance command** after a Major finding about its scope: fix it in the same re-import as a split, or as a re-import of its own.
+- **Strong pushback and you are unsure** (for example, both lenses say the task cannot work as written and you cannot tell who is right): convene a council on that question, as in `<delegate dir>/SKILL.md`, "Council". It is the furthest escalation. Do not stop for the user over it.
+
+Escalate to the user only for scope or cost growth: see [Scope or cost growth](#scope-or-cost-growth).
 
 Clean up each lens:
 
@@ -46,6 +53,21 @@ delegate.ps1 -Cleanup -Profile review -Repo <repo> -TaskId <that id>
 ```
 
 Read `reviewFile`. Triage per `delegate`'s rule (fix what would make two workers build different behaviour or interfaces). A failed preflight follows [Failed runs](#failed-runs).
+
+## Splitting a task in build
+
+Roles: the user is the product owner and sets scope and priority. You are the lead engineer. How tasks are cut and assigned is yours, as long as the locked design and the phase's scope do not change.
+
+1. Write a new complete plan input file to `<repo>/.xagent/features/<name>/plan-input.json`, as in `stages/plan.md`: every phase unchanged (`n`, `rationale`, `test`), every task that is merged or not `pending` unchanged, and the task being split replaced by its parts (new ids). The parts' `files` must stay inside what that phase's tasks already declared.
+2. Run `feature.ps1 plan -Repo <repo> -Name <name> -PlanFile <that file>`. In stage `build` it refuses a phase change, a change to a task that is not `pending`, or a file outside the phase's declared files. Any of those is scope growth, not a split.
+3. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "<id>: split into <new ids> — <seam and reason>"`.
+4. Schedule as usual. No plan review and no new **plan-approved**: the gate stays.
+
+The same steps refine later phases' tasks once earlier phases show what they need (planning a later phase in detail just in time). Task files are always written just before each run.
+
+## Scope or cost growth
+
+Stop for the user only when scope or cost grows: the phase goal, its files or the design must change, or the phase's total estimate grows by more than about 50% over the plan. The user re-prioritizes, so present it as a priority choice, each option with its cost, not as a yes/no on your plan. For example: do it now (cost), defer it to a later phase or feature, or cut something else to make room. Make it a [problem stop](#problem-stop).
 
 ## After each worker run
 
@@ -149,7 +171,7 @@ When the last phase is done, run `feature.ps1 stage -Repo <repo> -Name <name> -T
 
 ## Problem stop
 
-Stop for: a council that disagrees, or a failure after a task's second council; a test failure on `feature/<name>` that a fix-up cannot solve; a change outside the declared files; a needed change to the plan or the design; a usage limit; a task that fails a second time. A needed design or plan change stops here. The user can say "go back to the design" or "go back to the plan". Do not edit the locked design or the imported plan in place.
+Stop for: a council that disagrees, or a failure after a task's second council; a test failure on `feature/<name>` that a fix-up cannot solve; a change outside the declared files; scope or cost growth (a needed change to the design, a phase's goal or files, or a phase estimate up more than about 50%); a usage limit; a task that fails a second time. A task split or a refined later-phase task inside the phase's scope is not a stop: see [Splitting a task in build](#splitting-a-task-in-build). A needed design change, or a plan change beyond that, stops here. The user can say "go back to the design" or "go back to the plan". Do not edit the locked design or the imported plan in place.
 
 **Stopping.** Run `feature.ps1 decision -Repo <repo> -Name <name> -Kind stop -Text "<id or phase>: <why>"`. Read `line`. Report to the user, and end the turn. A stop is committed, so it survives a lost local state file.
 

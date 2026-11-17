@@ -332,6 +332,111 @@ Describe 'feature.ps1 new' {
         $dec = (& git -C $repo show 'HEAD:docs/features/demo/decisions.md') -join "`n"
         $dec.StartsWith('# Decisions: demo') | Should -BeTrue
     }
+    It 'records default designDoc and designDocExists false without -DesignDoc' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'docs/designs/alpha.md'
+        $r.Json.designDocExists | Should -BeFalse
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/designs/alpha.md'
+    }
+
+    It 'refuses new when default design doc is committed on main' {
+        $repo = New-TestRepo
+        $designPath = Join-Path $repo 'docs/designs/alpha.md'
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# alpha'
+        & git -C $repo add docs/designs/alpha.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'add design' 2>&1 | Out-Null
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match 'already exists; pass -DesignDoc'
+        & git -C $repo show-ref --verify --quiet refs/heads/feature/alpha 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Not -Be 0
+        Test-Path -LiteralPath (Join-Path $repo '.xagent/features/alpha') | Should -BeFalse
+    }
+
+    It 'refuses new when default design doc is untracked' {
+        $repo = New-TestRepo
+        $designPath = Join-Path $repo 'docs/designs/alpha.md'
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# alpha'
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match 'already exists; pass -DesignDoc'
+        & git -C $repo show-ref --verify --quiet refs/heads/feature/alpha 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Not -Be 0
+        Test-Path -LiteralPath (Join-Path $repo '.xagent/features/alpha') | Should -BeFalse
+    }
+
+    It 'adopts committed custom design doc without changing or committing it' {
+        $repo = New-TestRepo
+        $rel = 'docs/design/Voice Cloning.md'
+        $designPath = Join-Path $repo $rel
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# voice' -NoNewline
+        $before = [IO.File]::ReadAllBytes($designPath)
+        & git -C $repo add $rel 2>&1 | Out-Null
+        & git -C $repo commit -m 'add voice doc' 2>&1 | Out-Null
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'docs/design/Voice Cloning.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'docs/design/Voice Cloning.md'
+        $r.Json.designDocExists | Should -BeTrue
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/design/Voice Cloning.md'
+        [IO.File]::ReadAllBytes($designPath) | Should -Be $before
+        @(& git -C $repo log --format=%H main..feature/alpha -- 'docs/design/Voice Cloning.md') | Should -Be @()
+    }
+
+    It 'records normalized custom designDoc when the file does not exist' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'research\idea.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'research/idea.md'
+        $r.Json.designDocExists | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $repo 'research/idea.md') | Should -BeFalse
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'research/idea.md'
+    }
+
+    It 'adopts untracked design doc and commit-design can commit it' {
+        $repo = New-TestRepo
+        $rel = 'notes/plan.md'
+        $planPath = Join-Path $repo $rel
+        New-Item -ItemType Directory -Force (Split-Path $planPath) | Out-Null
+        Set-Content -LiteralPath $planPath -Value '# plan'
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'notes/plan.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDocExists | Should -BeTrue
+        & git -C $repo rev-parse --abbrev-ref HEAD | Should -Be 'feature/alpha'
+        Add-Content -LiteralPath $planPath -Value 'imported line'
+        Assert-FeatureOk (Invoke-Feature @('commit-design', '-Section', 'imported', '-Repo', $repo) -WorkingDirectory $repo)
+        ((& git -C $repo show 'feature/alpha:notes/plan.md') -join "
+") | Should -Match 'imported line'
+    }
+
+    It 'rejects invalid -DesignDoc paths' -ForEach @(
+        @{ Path = '../outside.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = 'docs/../x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = '/x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = 'C:/x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = "a.md`nb.md"; ExpectedError = 'must be a single line' }
+        @{ Path = 'docs/x.txt'; ExpectedError = 'must be a .md file' }
+    ) {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', $_.Path, '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match $_.ExpectedError
+    }
+
+    It 'treats whitespace -DesignDoc as not given' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', ' ', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/designs/alpha.md'
+    }
 }
 
 Describe 'feature.ps1 stage and gate' {
@@ -999,6 +1104,172 @@ Describe 'feature.ps1 plan' {
         Set-Content -LiteralPath $path -Value 'not json' -NoNewline
         $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'badj') -WorkingDirectory $repo
         $r.Json.error | Should -Match 'plan file is not valid JSON'
+    }
+
+    It 'in build, replacing pending t3 with t3a and t3b succeeds' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'bsplit' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bsplit'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].tasks = @(
+            @{ id = 't3a'; title = 'Task 3a'; dependsOn = @('t2'); files = @('docs/readme.md'); test = 'npm test'; profile = 'code'; brief = 'Split a.' },
+            @{ id = 't3b'; title = 'Task 3b'; dependsOn = @('t3a'); files = @('docs/readme.md'); test = 'npm test'; profile = 'code'; brief = 'Split b.' }
+        )
+        $path = Join-Path $TestDrive 'bsplit.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bsplit') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $r.Json.stage | Should -Be 'build'
+        $feat = (& git -C $repo show 'HEAD:docs/features/bsplit/feature.json' | ConvertFrom-Json)
+        $ids = @($feat.phases[1].tasks | ForEach-Object { $_.id })
+        $ids | Should -Contain 't3a'
+        $ids | Should -Contain 't3b'
+        $ids | Should -Not -Contain 't3'
+        $feat.gates.'plan-approved' | Should -Not -BeNullOrEmpty
+        $feat.stage | Should -Be 'build'
+    }
+
+    It 'in build, changing phase 2 rationale fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'bph' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bph'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].rationale = 'changed rationale'
+        $path = Join-Path $TestDrive 'bph.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bph') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'phase 2 must stay unchanged'
+    }
+
+    It 'in build, with t1 running, changing t1 brief fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'brun' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'brun'
+        Set-TaskState -Repo $repo -Name 'brun' -States @{ t1 = 'running' }
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[0].brief = 'changed brief'
+        $path = Join-Path $TestDrive 'brun.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'brun') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'task t1 is running and must stay unchanged'
+    }
+
+    It 'in build, with t3 failed, changing t3 brief succeeds' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'bfail' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bfail'
+        Set-TaskState -Repo $repo -Name 'bfail' -States @{ t3 = 'failed' }
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].tasks[0].brief = 'updated failed task'
+        $path = Join-Path $TestDrive 'bfail.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bfail') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $r.Json.stage | Should -Be 'build'
+    }
+
+    It 'in build, changing t3 files to docs/other.md fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'bfile' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bfile'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].tasks[0].files = @('docs/other.md')
+        $path = Join-Path $TestDrive 'bfile.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bfile') -WorkingDirectory $repo
+        $r.Json.error | Should -Match "task t3 file docs/other.md is outside phase 2's declared files"
+    }
+
+    It 'in build, t3 files docs/ allows docs/sub/x.md' {
+        $repo = New-TestRepo
+        $plan0 = Get-StandardTwoPhasePlan
+        $plan0.phases[1].tasks[0].files = @('docs/')
+        Import-TestPlan -Repo $repo -Name 'bpfx' -Plan $plan0 | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bpfx'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].tasks[0].files = @('docs/sub/x.md')
+        $path = Join-Path $TestDrive 'bpfx.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bpfx') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+    }
+
+    It 'in build, t3 files *.md allows src/x.md' {
+        $repo = New-TestRepo
+        $plan0 = Get-StandardTwoPhasePlan
+        $plan0.phases[1].tasks[0].files = @('*.md')
+        Import-TestPlan -Repo $repo -Name 'bglob' -Plan $plan0 | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bglob'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[1].tasks[0].files = @('src/x.md')
+        $path = Join-Path $TestDrive 'bglob.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bglob') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+    }
+
+    It 'in build, with t2 in-review, changing t2 brief fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'brev' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'brev'
+        Set-TaskState -Repo $repo -Name 'brev' -States @{ t2 = 'in-review' }
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks[1].brief = 'changed'
+        $path = Join-Path $TestDrive 'brev.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'brev') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'task t2 is in-review and must stay unchanged'
+    }
+
+    It 'in build, with t2 running, moving t2 to phase 2 fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'bmove' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'bmove'
+        Set-TaskState -Repo $repo -Name 'bmove' -States @{ t2 = 'running' }
+        $plan = Get-StandardTwoPhasePlan
+        $t2 = $plan.phases[0].tasks | Where-Object { $_.id -eq 't2' }
+        $t3 = $plan.phases[1].tasks[0]
+        $plan.phases[0].tasks = @($plan.phases[0].tasks | Where-Object { $_.id -ne 't2' })
+        $plan.phases[1].tasks = @($t2, $t3)
+        $path = Join-Path $TestDrive 'bmove.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'bmove') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'task t2 is running and must stay unchanged'
+    }
+
+    It 'in build, re-importing standard plan with reversed phase order succeeds' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'brevph' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'brevph'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases = @($plan.phases[1], $plan.phases[0])
+        $path = Join-Path $TestDrive 'brevph.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'brevph') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $r.Json.stage | Should -Be 'build'
+    }
+
+    It 'in build, a plan with only phase 1 fails' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'boneph' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        Move-FeatureToBuildStage -Repo $repo -Name 'boneph'
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases = @($plan.phases[0])
+        $path = Join-Path $TestDrive 'boneph.json'
+        New-PlanFile -Path $path -Plan $plan
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'boneph') -WorkingDirectory $repo
+        $r.Json.error | Should -Match 'the phases must stay unchanged'
+    }
+
+    It 'in stage plan, output has stage plan' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'stout' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $path = Join-Path $TestDrive 'stout.json'
+        New-PlanFile -Path $path -Plan (Get-StandardTwoPhasePlan)
+        $r = Invoke-FeatureInProcess @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'stout') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue
+        $r.Json.stage | Should -Be 'plan'
     }
 }
 
@@ -2134,6 +2405,12 @@ Describe 'feature.ps1 status' {
         $jd.nextAction | Should -Match 'done and merged'
         $jn = Invoke-StatusOk $repo
         ($jn.features | Where-Object { $_.name -eq 'donef' }).stage | Should -Be 'done'
+    }
+    It 'status returns designDoc from feature.json' {
+        $repo = New-TestRepo
+        Assert-FeatureOk (Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'docs/design/x.md', '-Repo', $repo) -WorkingDirectory $repo)
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
+        $j.designDoc | Should -Be 'docs/design/x.md'
     }
 }
 
