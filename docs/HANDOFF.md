@@ -70,7 +70,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
 - **Plugin packaging** comes after v1. The v1 install is a personal skill with no absolute paths (the design's Installation section).
 - **Check upstream EGM monthly:** `git ls-remote https://github.com/google/elephant-goldfish-model HEAD` against `b7d9e27`. Last checked 2026-11-13: HEAD `964a4f1` (26 commits: site, CI, packaging, Windsurf adapter, an `egm-bootstrap` fix); every vendored source and the adapted drift-report source are byte-identical to `b7d9e27` (git blob ids), and there is still no NOTICE file, so no sync is needed. Compare blob ids per path; don't stop at the HEAD SHA.
-- **Process changes to make after `worker-sandbox` signs off (decided by the user, 2026-11-15).** Don't change the process mid-feature. These follow from the waterfall item below. During phase 3, preflight size gates forced three "go back to plan" cycles: sandbox-access, sandbox-lifecycle, and sandbox-run. Each meant a re-import and a fresh plan-approved gate for what was only a task split.
+- **Process changes, now due: `worker-sandbox` signed off on 2026-11-16 (decided by the user, 2026-11-15).** They were held back so the process wouldn't change mid-feature. These follow from the waterfall item below. During phase 3, preflight size gates forced three "go back to plan" cycles: sandbox-access, sandbox-lifecycle, and sandbox-run. Each meant a re-import and a fresh plan-approved gate for what was only a task split.
   - **Roles, scrum-style.** The user is the PO. The lead (Claude, the EGM "elephant") is the lead engineer.
     - How tasks are split and assigned to workers is the lead's call. It needs no PO approval and need not be surfaced, as long as the locked design doesn't change.
     - The lead still logs each split as a decision in `decisions.md`.
@@ -88,10 +88,17 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
     - Add a cohesion question to `task-size-standard.md`.
     - Consider planning at phase granularity, with task files written just in time.
     - Recalibrate the size estimates. grok-4.7-high actuals land at or below the low end of composer's estimates: run-fns, estimate 22–32 min, actual 17; slots, estimate 18–26, actual 22.
+    - **Sign-off write-back has no place in the flow (found 2026-11-16).** `finish` refuses when the design file differs from the blob recorded at design-locked. So build findings can't go into the design before the merge. For `worker-sandbox` they went into `docs/features/<name>/as-built.md`, the drift check was told to mark items that note explains, and they were folded into the design on `main` after `finish`. `stages/signoff.md` should say this: an as-built note before the drift check, folded in after the merge.
+    - **Sign-off checks that need the live skills come after the merge.** G2 and G4 could only run once the junctions left the frozen copy. Both post-merge bugs (concurrent ACL edits, a slot left mapped after a kill) surfaced there, because the build ran the sandbox code unsandboxed and the tests start one run at a time. For a feature that changes `skills/`, plan a short post-merge check with live, concurrent runs and a killed run.
   - **Bugs found along the way:**
     - `feature.ps1 schedule -Repo .` run from a subfolder (`.xagent/features/<name>`) read the wrong state and offered the long-merged `test-runner` task. `-Repo` should resolve to the git top level.
     - `reconcile` moves a finished task to `in-review` without setting its `worktree` and `baseSha`.
     - Detached worker launches have no completion signal. The lead must start a background wait on the worker pid, or the result sits unreviewed (it did for about an hour on 2026-11-15).
+    - Deleting a done feature's merged branch makes it vanish from `feature.ps1 status` (`features: []`), although its records stay in `docs/features/<name>/`. `worker-sandbox` (branch deleted 2026-11-16) no longer lists. Not urgent: nothing reads the list for done features, but a "what has shipped" view would miss it.
+  - **Sandbox follow-ups (not urgent):**
+    - The canary script reads and lists but never writes outside the worktree; that was checked once by hand at sign-off. Add a write attempt to `New-SandboxCanaryScript`.
+    - Probe tasks given to a council seat or a review lens don't run: seats refuse and lenses audit the steps as a document. Sandbox probes need a `code` worker or the host-side canary, with the host checking the outcome.
+    - A sandboxed worker's PowerShell write through the worktree's real path (`D:\...`) was denied with "Access to the path 'D:\' is denied"; relative and slot-drive paths work. Watch for it in real tasks.
 - **Delete the local backup bundle** that still contains the pre-rewrite history with the email, once confident.
 - **Before making the repo public,** delete and recreate the GitHub repo, so old commits aren't reachable by SHA.
 - **First trial on a real repo** (for example MyApp), using `feature` once it's built.
