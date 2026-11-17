@@ -92,3 +92,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-16T07:08:21Z [decision] build done: all 13 tasks merged, full suite 308; lead checks recorded in docs/test-plan.md. Token-refresh check due after 2026-11-16 16:30 local; G2 lens/council canary and the G4 regression run after the junctions go back to the live skills.
 - 2026-11-17T00:43:44Z [decision] token refresh (one-day check, 2026-11-16): a sandboxed worker ran ok (sandboxed true, no notes), and cursor-agent status outside the sandbox still shows logged in. Sign-off is unblocked.
 - 2026-11-17T03:29:30Z [stage] build -> signoff
+- 2026-11-17T03:42:11Z [decision] sign-off drift check: no missing behaviour except G1 write/list (probed now: a real sandboxed worker was denied writing to the profile, D:\ and the main checkout, and listing the profile) and G2/G4 (after sign-off, need live junctions); other differences recorded in as-built.md
