@@ -332,6 +332,111 @@ Describe 'feature.ps1 new' {
         $dec = (& git -C $repo show 'HEAD:docs/features/demo/decisions.md') -join "`n"
         $dec.StartsWith('# Decisions: demo') | Should -BeTrue
     }
+    It 'records default designDoc and designDocExists false without -DesignDoc' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'docs/designs/alpha.md'
+        $r.Json.designDocExists | Should -BeFalse
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/designs/alpha.md'
+    }
+
+    It 'refuses new when default design doc is committed on main' {
+        $repo = New-TestRepo
+        $designPath = Join-Path $repo 'docs/designs/alpha.md'
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# alpha'
+        & git -C $repo add docs/designs/alpha.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'add design' 2>&1 | Out-Null
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match 'already exists; pass -DesignDoc'
+        & git -C $repo show-ref --verify --quiet refs/heads/feature/alpha 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Not -Be 0
+        Test-Path -LiteralPath (Join-Path $repo '.xagent/features/alpha') | Should -BeFalse
+    }
+
+    It 'refuses new when default design doc is untracked' {
+        $repo = New-TestRepo
+        $designPath = Join-Path $repo 'docs/designs/alpha.md'
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# alpha'
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match 'already exists; pass -DesignDoc'
+        & git -C $repo show-ref --verify --quiet refs/heads/feature/alpha 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Not -Be 0
+        Test-Path -LiteralPath (Join-Path $repo '.xagent/features/alpha') | Should -BeFalse
+    }
+
+    It 'adopts committed custom design doc without changing or committing it' {
+        $repo = New-TestRepo
+        $rel = 'docs/design/Voice Cloning.md'
+        $designPath = Join-Path $repo $rel
+        New-Item -ItemType Directory -Force (Split-Path $designPath) | Out-Null
+        Set-Content -LiteralPath $designPath -Value '# voice' -NoNewline
+        $before = [IO.File]::ReadAllBytes($designPath)
+        & git -C $repo add $rel 2>&1 | Out-Null
+        & git -C $repo commit -m 'add voice doc' 2>&1 | Out-Null
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'docs/design/Voice Cloning.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'docs/design/Voice Cloning.md'
+        $r.Json.designDocExists | Should -BeTrue
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/design/Voice Cloning.md'
+        [IO.File]::ReadAllBytes($designPath) | Should -Be $before
+        @(& git -C $repo log --format=%H main..feature/alpha -- 'docs/design/Voice Cloning.md') | Should -Be @()
+    }
+
+    It 'records normalized custom designDoc when the file does not exist' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'research\idea.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDoc | Should -Be 'research/idea.md'
+        $r.Json.designDocExists | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $repo 'research/idea.md') | Should -BeFalse
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'research/idea.md'
+    }
+
+    It 'adopts untracked design doc and commit-design can commit it' {
+        $repo = New-TestRepo
+        $rel = 'notes/plan.md'
+        $planPath = Join-Path $repo $rel
+        New-Item -ItemType Directory -Force (Split-Path $planPath) | Out-Null
+        Set-Content -LiteralPath $planPath -Value '# plan'
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'notes/plan.md', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $r.Json.designDocExists | Should -BeTrue
+        & git -C $repo rev-parse --abbrev-ref HEAD | Should -Be 'feature/alpha'
+        Add-Content -LiteralPath $planPath -Value 'imported line'
+        Assert-FeatureOk (Invoke-Feature @('commit-design', '-Section', 'imported', '-Repo', $repo) -WorkingDirectory $repo)
+        ((& git -C $repo show 'feature/alpha:notes/plan.md') -join "
+") | Should -Match 'imported line'
+    }
+
+    It 'rejects invalid -DesignDoc paths' -ForEach @(
+        @{ Path = '../outside.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = 'docs/../x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = '/x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = 'C:/x.md'; ExpectedError = 'must be a repo-relative path' }
+        @{ Path = "a.md`nb.md"; ExpectedError = 'must be a single line' }
+        @{ Path = 'docs/x.txt'; ExpectedError = 'must be a .md file' }
+    ) {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', $_.Path, '-Repo', $repo) -WorkingDirectory $repo
+        $r.Json.ok | Should -BeFalse
+        $r.Json.error | Should -Match $_.ExpectedError
+    }
+
+    It 'treats whitespace -DesignDoc as not given' {
+        $repo = New-TestRepo
+        $r = Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', ' ', '-Repo', $repo) -WorkingDirectory $repo
+        Assert-FeatureOk $r
+        $featJson = & git -C $repo show 'HEAD:docs/features/alpha/feature.json'
+        ($featJson | ConvertFrom-Json).designDoc | Should -Be 'docs/designs/alpha.md'
+    }
 }
 
 Describe 'feature.ps1 stage and gate' {
@@ -2300,6 +2405,12 @@ Describe 'feature.ps1 status' {
         $jd.nextAction | Should -Match 'done and merged'
         $jn = Invoke-StatusOk $repo
         ($jn.features | Where-Object { $_.name -eq 'donef' }).stage | Should -Be 'done'
+    }
+    It 'status returns designDoc from feature.json' {
+        $repo = New-TestRepo
+        Assert-FeatureOk (Invoke-Feature @('new', '-Name', 'alpha', '-DesignDoc', 'docs/design/x.md', '-Repo', $repo) -WorkingDirectory $repo)
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
+        $j.designDoc | Should -Be 'docs/design/x.md'
     }
 }
 

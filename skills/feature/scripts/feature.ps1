@@ -24,7 +24,8 @@ param(
     [string]$ResultFile,
     [string]$Worktree,
     [string]$BaseSha,
-    [string]$TimeoutSec
+    [string]$TimeoutSec,
+    [string]$DesignDoc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,6 +104,52 @@ function Test-FeatureName([string]$n) {
 
 function Assert-OneLine([string]$label, [string]$value) {
     if ($null -ne $value -and $value -match "`r|`n") { throw "$label must be a single line" }
+}
+
+
+function Test-DesignDocGiven([string]$DesignDoc) {
+    return (-not [string]::IsNullOrWhiteSpace($DesignDoc))
+}
+
+function Normalize-DesignDocPath([string]$DesignDoc) {
+    $p = $DesignDoc.Trim()
+    $p = $p -replace '\\', '/'
+    if ($p.StartsWith('./', [StringComparison]::Ordinal)) { $p = $p.Substring(2) }
+    return $p
+}
+
+function Assert-RepoRelativeDesignDoc([string]$Normalized) {
+    if ($Normalized.StartsWith('/', [StringComparison]::Ordinal)) { throw '-DesignDoc must be a repo-relative path' }
+    foreach ($seg in $Normalized.Split('/', [StringSplitOptions]::RemoveEmptyEntries)) {
+        if ($seg -ceq '..') { throw '-DesignDoc must be a repo-relative path' }
+    }
+}
+
+function Resolve-NewFeatureDesignDoc {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$DesignDocInput
+    )
+    if (Test-DesignDocGiven $DesignDocInput) {
+        Assert-OneLine '-DesignDoc' $DesignDocInput
+        $trimmed = $DesignDocInput.Trim()
+        if ([IO.Path]::IsPathRooted($trimmed)) { throw '-DesignDoc must be a repo-relative path' }
+        $designDoc = Normalize-DesignDocPath $DesignDocInput
+        Assert-RepoRelativeDesignDoc $designDoc
+        if (-not $designDoc.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase)) {
+            throw '-DesignDoc must be a .md file'
+        }
+    } else {
+        $designDoc = "docs/designs/$FeatureName.md"
+        $defaultFull = Join-Path $Repository $designDoc
+        if (Test-Path -LiteralPath $defaultFull) {
+            throw "design doc docs/designs/$FeatureName.md already exists; pass -DesignDoc to adopt it, or choose another name"
+        }
+    }
+    $designDocFull = Join-Path $Repository $designDoc
+    $designDocExists = Test-Path -LiteralPath $designDocFull
+    return @{ designDoc = $designDoc; designDocExists = $designDocExists }
 }
 
 function Get-UtcDecisionTime {
@@ -792,6 +839,7 @@ function Invoke-StatusFeature {
         stage                 = $storedStage
         phase                 = $phaseInfo
         checkin               = [string]$feat.checkin
+        designDoc             = [string]$feat.designDoc
         branch                = [string]$currentBranch
         treeClean             = (Test-TreeClean $Repository)
         tasks                 = $tasksList
@@ -945,12 +993,15 @@ function Invoke-NewFeature {
     if ($LASTEXITCODE -eq 0) { throw "branch feature/$Name already exists" }
     if (@(Get-InProgressFeatures $Repository).Count -gt 0) { throw 'another feature is in progress' }
 
+    $designInfo = Resolve-NewFeatureDesignDoc -Repository $Repository -FeatureName $Name -DesignDocInput $DesignDoc
+    $designDoc = $designInfo.designDoc
+    $designDocExists = $designInfo.designDocExists
+
     Enter-FeatureLock $Repository $Name
     try {
         Invoke-GitRepo $Repository 'switch' '-c' "feature/$Name" 'main' | Out-Null
         $featDir = Join-Path $Repository "docs/features/$Name"
         New-Item -ItemType Directory -Force $featDir | Out-Null
-        $designDoc = "docs/designs/$Name.md"
         $feature = [ordered]@{
             name      = $Name
             stage     = 'design'
@@ -965,7 +1016,12 @@ function Invoke-NewFeature {
         Write-TextLf (Join-Path $featDir 'decisions.md') $tpl
         $rel = "docs/features/$Name"
         $null = Invoke-FeatureCommit $Repository "feature($Name): start" @($rel)
-        Out-FeatureOk @{ name = $Name; branch = "feature/$Name" }
+        Out-FeatureOk @{
+            name            = $Name
+            branch          = "feature/$Name"
+            designDoc       = $designDoc
+            designDocExists = $designDocExists
+        }
     } finally {
         Exit-FeatureLock
     }
