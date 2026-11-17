@@ -91,7 +91,12 @@ function Assert-DelegateFiles {
 
 function Resolve-Repository {
     if ($Repo) {
-        return ([IO.Path]::GetFullPath($Repo)).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $full = ([IO.Path]::GetFullPath($Repo)).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $top = & git -C $full 'rev-parse' '--show-toplevel' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $top) {
+            return $top.TrimEnd('/').Replace('/', [IO.Path]::DirectorySeparatorChar)
+        }
+        return $full
     }
     $cwdPath = if ($Cwd) { $Cwd } else { (Get-Location).Path }
     $top = @(Invoke-GitRepo $cwdPath 'rev-parse' '--show-toplevel')[0]
@@ -272,6 +277,7 @@ function Get-EffectiveStage {
 
 function Get-FeatureList([string]$Repository) {
     $result = @()
+    $fromBranch = @{}
     foreach ($n in Get-FeatureBranchNames $Repository) {
         $feat = Get-FeatureJsonFromRef $Repository "feature/$n" $n
         if ($feat) {
@@ -280,6 +286,31 @@ function Get-FeatureList([string]$Repository) {
             $result += [pscustomobject]@{
                 name  = $n
                 stage = $stage
+            }
+            $fromBranch[$n] = $true
+        }
+    }
+    & git -C $Repository show-ref --verify --quiet 'refs/heads/main' 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $treeLines = @(& git -C $Repository 'ls-tree' '--name-only' 'main' 'docs/features/' 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $treeLines.Count -gt 0) {
+            $fromMain = @()
+            foreach ($line in $treeLines) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $leaf = $line.TrimEnd('/')
+                if ($leaf -match '^docs/features/(.+)$') { $leaf = $Matches[1] }
+                $n = ($leaf -split '/')[ -1]
+                if (-not (Test-FeatureName $n)) { continue }
+                if ($fromBranch.ContainsKey($n)) { continue }
+                $feat = Get-FeatureJsonFromRef $Repository 'main' $n
+                if (-not $feat) { continue }
+                if (-not $feat.PSObject.Properties['gates']) { continue }
+                if ([string]$feat.stage -eq 'abandoned') { continue }
+                if (-not $feat.gates.PSObject.Properties['signed-off']) { continue }
+                $fromMain += [pscustomobject]@{ name = $n; stage = 'done' }
+            }
+            if ($fromMain.Count -gt 0) {
+                $result += @($fromMain | Sort-Object { $_.name })
             }
         }
     }

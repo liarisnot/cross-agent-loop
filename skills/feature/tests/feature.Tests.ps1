@@ -1488,6 +1488,16 @@ Describe 'feature.ps1 schedule' {
         $r.Json.tasks[0].files -is [array] | Should -BeTrue
         $r.Json.tasks[0].files[0] | Should -Be 'src/a.ts'
     }
+
+    It 'schedule -Repo on repo subfolder matches repo root' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'subsch' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $sub = Join-Path $repo 'docs/sub'
+        New-Item -ItemType Directory -Force -Path $sub | Out-Null
+        $rRoot = Invoke-Feature @('schedule', '-Repo', $repo, '-Name', 'subsch') -WorkingDirectory $repo
+        $rSub = Invoke-Feature @('schedule', '-Repo', $sub, '-Name', 'subsch') -WorkingDirectory $sub
+        $rSub.Json.tasks.id | Should -Be $rRoot.Json.tasks.id
+    }
 }
 
 Describe 'feature.ps1 task' {
@@ -2412,6 +2422,27 @@ Describe 'feature.ps1 status' {
         $j = Invoke-StatusOk $repo -Extra @('-Name', 'alpha')
         $j.designDoc | Should -Be 'docs/design/x.md'
     }
+
+    It 'status -Repo on repo subfolder matches repo root' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'subst' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $sub = Join-Path $repo 'docs/sub'
+        New-Item -ItemType Directory -Force -Path $sub | Out-Null
+        $jRoot = Invoke-StatusOk $repo -Extra @('-Name', 'subst')
+        $jSub = Invoke-Feature @('status', '-Repo', $sub, '-Name', 'subst') -WorkingDirectory $sub
+        $jSub.ExitCode | Should -Be 0
+        $jSub.Json.ok | Should -BeTrue
+        $jSub.Json.stage | Should -Be $jRoot.stage
+        $jSub.Json.designDoc | Should -Be $jRoot.designDoc
+    }
+
+    It 'status -Repo on nonexistent path returns ok false' {
+        $repo = New-TestRepo
+        $bad = Join-Path $TestDrive ('missing-' + [guid]::NewGuid().ToString('N'))
+        $r = Invoke-Feature @('status', '-Repo', $bad) -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.ok | Should -BeFalse
+    }
 }
 
 Describe 'feature.ps1 reconcile' {
@@ -2767,6 +2798,28 @@ Describe 'feature.ps1 finish' {
         $feat = $featJson | ConvertFrom-Json
         $feat.gates.PSObject.Properties['signed-off'] | Should -BeNullOrEmpty
         (Get-Content -Raw (Join-Path $repo 'docs/features/fincon/decisions.md')) | Should -Match 'finish: merge conflict'
+    }
+
+    It 'lists done feature after feature branch is deleted' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'finbd' -Stage 'signoff'
+        Assert-FeatureOk (Invoke-Feature @('gate', '-Gate', 'signed-off', '-Quote', 'ship', '-Repo', $repo, '-Name', 'finbd') -WorkingDirectory $repo)
+        Assert-FeatureOk (Invoke-Feature @('finish', '-Repo', $repo, '-Name', 'finbd') -WorkingDirectory $repo)
+        & git -C $repo branch -D 'feature/finbd' 2>&1 | Out-Null
+        $jn = Invoke-StatusOk $repo
+        ($jn.features | Where-Object { $_.name -eq 'finbd' }).stage | Should -Be 'done'
+    }
+
+    It 'does not list main-only feature without signed-off' {
+        $repo = New-TestRepo
+        $dir = Join-Path $repo 'docs/features/ghost'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $feat = @{ stage = 'build'; gates = @{} } | ConvertTo-Json -Compress
+        Set-Content -LiteralPath (Join-Path $dir 'feature.json') -Value $feat -NoNewline
+        & git -C $repo add docs/features/ghost 2>&1 | Out-Null
+        & git -C $repo commit -m 'ghost' 2>&1 | Out-Null
+        $jn = Invoke-StatusOk $repo
+        $jn.features | Where-Object { $_.name -eq 'ghost' } | Should -BeNullOrEmpty
     }
 }
 
