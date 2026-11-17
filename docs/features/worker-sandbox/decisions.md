@@ -94,3 +94,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-17T03:29:30Z [stage] build -> signoff
 - 2026-11-17T03:42:11Z [decision] sign-off drift check: no missing behaviour except G1 write/list (probed now: a real sandboxed worker was denied writing to the profile, D:\ and the main checkout, and listing the profile) and G2/G4 (after sign-off, need live junctions); other differences recorded in as-built.md
 - 2026-11-17T03:42:54Z [decision] sign-off full suite: 309 passed, 0 failed (1 not run by the suite's filter), 762 s
+- 2026-11-17T03:51:36Z [gate] signed-off: "sign off"
