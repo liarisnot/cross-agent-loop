@@ -209,8 +209,11 @@ if ($PSCmdlet.ParameterSetName -eq 'Check') {
 }
 
 # ---------- resolve repo & worktree paths ----------
+if (-not (Test-Path -LiteralPath $Repo -PathType Container)) { Fail "-Repo not found: $Repo" }
 $Repo = (Resolve-Path -LiteralPath $Repo).Path.TrimEnd('\')
-$top = (Invoke-Git -C $Repo rev-parse --show-toplevel | Select-Object -First 1) -replace '/', '\'
+$top = @(& git -C $Repo rev-parse --show-toplevel 2>$null)
+if ($LASTEXITCODE -ne 0 -or $top.Count -eq 0) { Fail "-Repo is not a git repo: $Repo" }
+$top = "$($top[0])" -replace '/', '\'
 if ($top.TrimEnd('\') -ne $Repo) { Fail "Repo must be the top level of a git repo (got $top)" }
 
 $repoName = Split-Path $Repo -Leaf
@@ -297,6 +300,7 @@ if ($Agent -eq 'agy' -and -not ($cfg.PSObject.Properties['agy'] -and $cfg.agy.en
 }
 if ($Agent -eq 'agy' -and -not $NoSandbox) { Fail '-Agent agy runs only with -NoSandbox' }
 if (-not $TaskFile) { Fail '-TaskFile is required' }
+if (-not (Test-Path -LiteralPath $TaskFile -PathType Leaf)) { Fail "-TaskFile not found: $TaskFile" }
 $TaskFile = (Resolve-Path -LiteralPath $TaskFile).Path
 
 if (-not $Model) {

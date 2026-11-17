@@ -505,6 +505,29 @@ Describe 'delegate parameter sets' {
         $r.Json.error | Should -Be '-NoSandbox cannot be used with -SandboxCheck' -Because $because
     }
 
+    It 'fails with one JSON line for a missing -TaskFile, a missing -Repo and a non-git -Repo' {
+        $repo = Join-Path $TestDrive 'input-repo'
+        $plain = Join-Path $TestDrive 'input-plain'
+        New-Item -ItemType Directory -Force -Path $repo, $plain | Out-Null
+        & git -C $repo init -q 2>&1 | Out-Null
+        $missingTask = Join-Path $TestDrive 'no-such-task.md'
+        $missingRepo = Join-Path $TestDrive 'no-such-repo'
+        $env3 = Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog
+        $cases = @(
+            @{ Repo = $repo; Task = $missingTask; Error = "-TaskFile not found: $missingTask" }
+            @{ Repo = $missingRepo; Task = $missingTask; Error = "-Repo not found: $missingRepo" }
+            @{ Repo = $plain; Task = $missingTask; Error = "-Repo is not a git repo: $plain" }
+        )
+        foreach ($case in $cases) {
+            $r = Invoke-DelegateChild -ArgumentList @('-Agent', 'cursor', '-Repo', $case.Repo, '-TaskId', 'input-check', '-TaskFile', $case.Task) -ExtraEnv $env3
+            $because = Format-DelegateResult $r
+            @($r.JsonLines).Count | Should -Be 1 -Because $because
+            $r.ExitCode | Should -Be 1 -Because $because
+            $r.Json.ok | Should -BeFalse -Because $because
+            $r.Json.error | Should -Be $case.Error -Because $because
+        }
+    }
+
     It 'releases nothing on a fresh root' {
         $root = Join-Path $TestDrive 'release-root'
         $log = Join-Path $TestDrive 'release-log'

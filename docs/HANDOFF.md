@@ -45,7 +45,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
    - **Machine state:** drive letters Z (runtime), Y and X (slots) are reserved in `%LOCALAPPDATA%\xagent\sandbox.json` (the user's choice). They are mapped with `subst`, which does not survive a reboot; the next run maps them again. Pester 6.2.0 is installed for all users in `C:\Program Files\PowerShell\Modules`.
    - **After sign-off:** the skill junctions point at `D:\cross-agent-loop\skills\` again, and the frozen copy is gone. The token refresh, G2 and G4 checks passed.
    - **Two post-merge fixes on `main`:** a lock around ACL edits (concurrent starts dropped each other's grants), and reclaiming a slot left mapped by a killed run.
-   - **Open:** `delegate.ps1` gives a raw error, not JSON, for a missing `-TaskFile`; delete the scratch folder `D:\xagent-g4-agents` by hand (the harness blocked its removal).
+   - **Fixed 2026-11-16:** `delegate.ps1` now fails with one JSON line (not a raw PowerShell error) for a missing `-TaskFile`, a missing `-Repo` and a non-git `-Repo`.
    - **Design write-back (folded into the design, marked "(as built)", 2026-11-16):**
      - RA on folders goes through `NtSetSecurityObject`, and `icacls` needs `(RA)`;
      - `SystemDrive` and `ProgramData` were added to the container environment;
