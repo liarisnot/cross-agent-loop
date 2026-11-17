@@ -80,7 +80,7 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
 
 ## The loop
 
-1. **Plan.** Break the issue into subtasks that are independent and well scoped. Keep architecture, cross-cutting changes and anything security-sensitive for yourself.
+1. **Plan.** Break the work into tasks as [Breaking work into tasks](#breaking-work-into-tasks) says. Keep anything security-sensitive for yourself.
 2. **Write a task file** for each subtask at `<repo>/.xagent/tasks/<taskId>.md` (`.xagent/` is git-excluded by the script). Include:
    - **Goal**: one or two sentences.
    - **Scope**: files and dirs it may touch, and what it must not touch.
@@ -98,6 +98,31 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
 5. **Iterate if needed.** Write `<taskId>.review-N.md` with specific, actionable feedback and rerun with the same `-TaskId`, `-TaskFile <review file>` and `-Resume <sessionId>`. Stop after about 3 rounds and do it yourself or rethink the split. If the next round starts a **fresh** session (no `-Resume`, e.g. after a timeout), the follow-up file is the whole task for a worker with no context: give it the comprehension preflight first, and readiness too if it changes scope.
 6. **Merge.** Commit in the worktree on the `xagent/<taskId>` branch (you write the commit message), then `git merge` it into the main branch from the main checkout. Resolve conflicts between parallel tasks yourself. (The `feature` skill merges with `--no-ff` and an `Xagent-Task: <id>` trailer, which its records read.)
 7. **Cleanup** with `-Cleanup -Repo <repo>`. Tell the user what each worker did, what you changed during review, and anything left open.
+
+## Breaking work into tasks
+
+This applies whether the work is one issue or a whole design the user already wrote. The user owns scope and priority; how the work is cut into tasks and handed to workers is your call as lead.
+
+**Start from the design.** List what changes, by component and file. Mark the interfaces other code depends on (signatures, data formats, file layouts): those are what tasks hand to each other, so they must be fixed in the task files before parallel tasks start. Anything the design leaves for someone to discover (undocumented platform behaviour, a protocol to probe) gets probed first, by you or by a small probe task, never folded into a timed task.
+
+**What makes a good task.**
+- One cohesive outcome, with its own files (the task file's Scope) and its own narrow test command that proves it.
+- Testable on its own. A helper nothing calls yet is tested against a stub.
+- About 20 worker minutes or 600 lines of code and tests at most. Past that, high-reasoning models (`code-hard`) slow down sharply (a 1,840-line `code-hard` task took about 44 minutes on 2026-11-14). Calibration is in `personas/task-size-standard.md`.
+- **Size alone is never the reason to split.** Split along a **seam**: a point where one part's output is a stable interface for the next (native layer, then the module functions that call it, then the integration), or between parts that are independent (two unrelated bugs). A cohesive unit whose halves cannot be tested apart (a harness and the one test that proves it) stays one task, even when big.
+- Split rather than drop a `code-hard` task to a cheaper model.
+- Small edits, a few lines in one or two files, are cheaper to make yourself than to write a task file for.
+
+**Order and parallel runs.**
+- Interfaces before their callers: a task starts only when the tasks it depends on are merged.
+- Run at most **2 runs at once**, workers, preflights and reviews together: there are two sandbox slots, and a third sandboxed run fails with `sandbox: no free slot (both slots busy)`. They also share one Cursor allowance. Two tasks run in parallel only when their files don't overlap and neither depends on the other; launch both in one message, each with its own wait. Otherwise run them one after another.
+- After each batch is merged, run the full test suite once. Task test commands only cover their own change.
+
+**Write the breakdown down** when there are more than about three tasks: a short list in `<repo>/.xagent/tasks/plan.md` with each task's id, files, test command, profile and what it depends on. It is your working plan: it lets you resume after a lost session and shows the user the shape of the work. Change it freely as you learn.
+
+**Re-splitting is normal.** A preflight `split` verdict, a worker that times out, or a task that turns out bigger than it looked: split it along a seam, or keep it whole and say why. That is your decision and needs no approval. Stop for the user only when **scope or cost** grows: the design must change, the work needs files or behaviour the design didn't cover, or it looks much bigger than expected (roughly half again). Present that as a priority choice, each option with its cost (do it now, defer it, or cut something else), not as a yes/no on your plan.
+
+The `feature` skill builds on this section: it records the breakdown as a plan with phases and gates, and its `schedule` command enforces the order and parallel rules.
 
 ## Goldfish preflight & review (from Google's Elephant-Goldfish Model)
 

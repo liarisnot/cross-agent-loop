@@ -56,7 +56,7 @@ Read `reviewFile`. Triage per `delegate`'s rule (fix what would make two workers
 
 ## Splitting a task in build
 
-Roles: the user is the product owner and sets scope and priority. You are the lead engineer. How tasks are cut and assigned is yours, as long as the locked design and the phase's scope do not change.
+Roles: the user is the product owner and sets scope and priority. You are the lead engineer. How tasks are cut and assigned is yours, as long as the locked design and the phase's scope do not change. Cut along a seam as `<delegate dir>/SKILL.md`, "Breaking work into tasks", says; these steps record the split.
 
 1. Write a new complete plan input file to `<repo>/.xagent/features/<name>/plan-input.json`, as in `stages/plan.md`: every phase unchanged (`n`, `rationale`, `test`), every task that is merged or not `pending` unchanged, and the task being split replaced by its parts (new ids). The parts' `files` must stay inside what that phase's tasks already declared.
 2. Run `feature.ps1 plan -Repo <repo> -Name <name> -PlanFile <that file>`. In stage `build` it refuses a phase change, a change to a task that is not `pending`, or a file outside the phase's declared files. Any of those is scope growth, not a split.

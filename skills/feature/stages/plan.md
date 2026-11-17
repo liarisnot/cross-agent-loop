@@ -24,13 +24,14 @@ The plan has a `summary`, then `phases`, then each phase's `tasks`. Each phase h
 
 ## Plan rules
 
+Cut the design into tasks the way `<delegate dir>/SKILL.md`, "Breaking work into tasks", says: task size, seams, cohesion, interfaces first, probes before timed tasks, and profile choice. The rules below are what `feature` adds.
+
 - Every task is a worker task. Architecture is settled in the design. Cross-cutting changes become worker tasks with broad `files`.
 - Steps that `delegate` never delegates (secrets, credentials, deploys) are listed in the plan summary as steps for the user. They are not tasks.
 - The last phase's test is the full suite. Sign-off runs the same command.
 - Every phase's test runs the full suite (or its fast subset). After the merge, it catches what the narrow task tests miss.
-- **Aim for tasks of about 20 worker minutes or 600 lines of code and tests.** Past that, high-reasoning models (`code-hard`) slow down sharply: a 1,840-line `code-hard` task took about 44 minutes on 2026-11-14 (`docs/test-plan.md`). Split a big task along a seam where one task's output is a stable interface for the next (native layer, then the module functions that call it, then the integration), each with its own files and tests. Split rather than drop a `code-hard` task to a cheaper model. But size alone is not a reason to split: a cohesive unit whose halves cannot be tested apart (a harness and the one test that proves it) stays one task, even when big.
 - **Plan later phases loosely.** Phase goals, tests and files are fixed at approval. Tasks in later phases may be rough; the lead refines and splits them in build within the phase's scope (`stages/build.md`, "Splitting a task in build"), without a new review or gate.
-- Anything the design leaves for the worker to discover (undocumented platform behaviour, a protocol to probe) is a probe for the design stage, not part of a timed task.
+- Anything the design leaves for the worker to discover is probed in the design stage, not in a timed task.
 
 ## Import and check
 
