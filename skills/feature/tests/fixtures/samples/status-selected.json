@@ -4,6 +4,7 @@
   "stage": "build",
   "phase": { "current": 1, "total": 2 },
   "checkin": "on-problems",
+  "designDoc": "docs/designs/fb-schemas.md",
   "branch": "feature/fb-schemas",
   "treeClean": true,
   "tasks": [
