@@ -2029,7 +2029,10 @@ function New-SandboxCanaryScript {
         [Parameter(Mandatory)][string]$ProfileCanary,
         [Parameter(Mandatory)][string]$RepoCanary,
         [Parameter(Mandatory)][string]$ProfilePath,
-        [Parameter(Mandatory)][string]$NodeExe
+        [Parameter(Mandatory)][string]$NodeExe,
+        [Parameter(Mandatory)][string]$ProfileWrite,
+        [Parameter(Mandatory)][string]$RepoWrite,
+        [Parameter(Mandatory)][string]$WorktreeWrite
     )
     $text = @'
 $ErrorActionPreference = 'Stop'
@@ -2109,6 +2112,19 @@ try {
     Write-CanaryLine 'list-profile' (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
 }
 
+function Invoke-CanaryWrite([string]$Name, [string]$Path) {
+    try {
+        [IO.File]::WriteAllText($Path, 'xagent-canary-write')
+        Write-CanaryLine $Name 'ok' 'wrote'
+    } catch {
+        Write-CanaryLine $Name (Get-CanaryFailure $_) (Get-CanaryErrorDetail $_)
+    }
+}
+
+Invoke-CanaryWrite 'write-profile' '__PROFILE_WRITE__'
+Invoke-CanaryWrite 'write-repo-beside' '__REPO_WRITE__'
+Invoke-CanaryWrite 'write-worktree' '__WORKTREE_WRITE__'
+
 function Invoke-CanaryGit([string]$Name, [string[]]$GitArgs) {
     try {
         $output = @(& git @GitArgs 2>&1)
@@ -2171,7 +2187,10 @@ exit 0
         Replace('__PROFILE_CANARY__', (ConvertTo-SandboxPsLiteral $ProfileCanary)).
         Replace('__REPO_CANARY__', (ConvertTo-SandboxPsLiteral $RepoCanary)).
         Replace('__PROFILE_PATH__', (ConvertTo-SandboxPsLiteral $ProfilePath)).
-        Replace('__NODE_EXE__', (ConvertTo-SandboxPsLiteral $NodeExe))
+        Replace('__NODE_EXE__', (ConvertTo-SandboxPsLiteral $NodeExe)).
+        Replace('__PROFILE_WRITE__', (ConvertTo-SandboxPsLiteral $ProfileWrite)).
+        Replace('__REPO_WRITE__', (ConvertTo-SandboxPsLiteral $RepoWrite)).
+        Replace('__WORKTREE_WRITE__', (ConvertTo-SandboxPsLiteral $WorktreeWrite))
 }
 
 function Read-SandboxCanaryChecks([string]$Text) {
@@ -2213,6 +2232,9 @@ function Invoke-SandboxCanary {
     $worktreeAdded = $false
     $profileCanary = $null
     $repoCanary = $null
+    $profileWrite = $null
+    $repoWrite = $null
+    $writeLeaks = New-Object System.Collections.Generic.List[string]
     $secret = $null
     $slot = $null
     $run = $null
@@ -2257,6 +2279,9 @@ function Invoke-SandboxCanary {
         $repoCanary = Join-Path $xagentDir ('xagent-canary-' + $rand + '.txt')
         [IO.File]::WriteAllText($profileCanary, $secret, $utf8)
         [IO.File]::WriteAllText($repoCanary, $secret, $utf8)
+        # Targets the sandbox must not be able to create. They must not exist before the run.
+        $profileWrite = Join-Path $script:LoginProfile ('xagent-canary-' + $rand + '-w.txt')
+        $repoWrite = Join-Path $xagentDir ('xagent-canary-' + $rand + '-w.txt')
 
         $slot = Get-SandboxSlot -TimeoutSec 60
         $run = New-SandboxRun -Slot $slot -Runtime $runtime -Repo $repoFull -Worktree $worktree -WtName $wtName
@@ -2264,7 +2289,8 @@ function Invoke-SandboxCanary {
         $runtimeLetter = [string](Get-ObjectProperty $run 'runtimeLetter')
         $runtimeVersion = [string](Get-ObjectProperty $runtime 'version')
         $nodeExe = '{0}:\{1}\node.exe' -f $runtimeLetter, $runtimeVersion
-        $scriptText = New-SandboxCanaryScript -ProfileCanary $profileCanary -RepoCanary $repoCanary -ProfilePath $script:LoginProfile -NodeExe $nodeExe
+        $worktreeWrite = '{0}:\.xagent\canary-write.txt' -f $run.slot
+        $scriptText = New-SandboxCanaryScript -ProfileCanary $profileCanary -RepoCanary $repoCanary -ProfilePath $script:LoginProfile -NodeExe $nodeExe -ProfileWrite $profileWrite -RepoWrite $repoWrite -WorktreeWrite $worktreeWrite
         $scriptDir = Join-Path $worktree '.xagent'
         New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
         [IO.File]::WriteAllText((Join-Path $scriptDir 'canary.ps1'), $scriptText, $utf8)
@@ -2303,7 +2329,13 @@ function Invoke-SandboxCanary {
 
         try {
             $problems = New-Object System.Collections.Generic.List[string]
-            foreach ($path in @($profileCanary, $repoCanary)) {
+            # Checked on the host: a write target that exists after the run means the sandbox wrote it.
+            foreach ($path in @($profileWrite, $repoWrite)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$path) -and (Test-Path -LiteralPath $path)) {
+                    $writeLeaks.Add([string]$path)
+                }
+            }
+            foreach ($path in @($profileCanary, $repoCanary, $profileWrite, $repoWrite)) {
                 if ([string]::IsNullOrWhiteSpace([string]$path)) { continue }
                 if (-not (Test-Path -LiteralPath $path)) { continue }
                 try {
@@ -2372,6 +2404,9 @@ function Invoke-SandboxCanary {
         @{ name = 'read-profile-canary'; expect = 'denied' }
         @{ name = 'read-repo-canary'; expect = 'denied' }
         @{ name = 'list-profile'; expect = 'denied' }
+        @{ name = 'write-profile'; expect = 'denied' }
+        @{ name = 'write-repo-beside'; expect = 'denied' }
+        @{ name = 'write-worktree'; expect = 'ok' }
         @{ name = 'git-status'; expect = 'ok' }
         @{ name = 'git-diff'; expect = 'ok' }
         @{ name = 'git-log'; expect = 'ok' }
@@ -2404,6 +2439,12 @@ function Invoke-SandboxCanary {
         $rows.Add((New-SandboxCanaryEntry 'no-leak' 'absent' 'present' $false 'secret found in stdout|stderr'))
     } else {
         $rows.Add((New-SandboxCanaryEntry 'no-leak' 'absent' 'absent' $true 'secret not in output'))
+    }
+
+    if ($writeLeaks.Count -gt 0) {
+        $rows.Add((New-SandboxCanaryEntry 'no-write-outside' 'absent' 'present' $false ('created: ' + ($writeLeaks.ToArray() -join '; '))))
+    } else {
+        $rows.Add((New-SandboxCanaryEntry 'no-write-outside' 'absent' 'absent' $true 'no file created outside the worktree'))
     }
 
     if ($timedOut -or $exitCode -ne 0) {

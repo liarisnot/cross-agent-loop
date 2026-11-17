@@ -103,7 +103,7 @@ Cursor's plan has two monthly pools: Cursor models (Composer, Grok) and other mo
 
 This applies whether the work is one issue or a whole design the user already wrote. The user owns scope and priority; how the work is cut into tasks and handed to workers is your call as lead.
 
-**Start from the design.** List what changes, by component and file. Mark the interfaces other code depends on (signatures, data formats, file layouts): those are what tasks hand to each other, so they must be fixed in the task files before parallel tasks start. Anything the design leaves for someone to discover (undocumented platform behaviour, a protocol to probe) gets probed first, by you or by a small probe task, never folded into a timed task.
+**Start from the design.** List what changes, by component and file. Mark the interfaces other code depends on (signatures, data formats, file layouts): those are what tasks hand to each other, so they must be fixed in the task files before parallel tasks start. Anything the design leaves for someone to discover (undocumented platform behaviour, a protocol to probe) gets probed first, by you or by a small probe task, never folded into a timed task. A probe task goes to a `code` worker (or you run the check yourself on the host and read the outcome there). Council seats refuse probe tasks, and review lenses treat the steps as a document to review instead of running them. A probe of the sandbox itself runs on the host: `-SandboxCheck -Repo <repo>` is the built-in one.
 
 **What makes a good task.**
 - One cohesive outcome, with its own files (the task file's Scope) and its own narrow test command that proves it.

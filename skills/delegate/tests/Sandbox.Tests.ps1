@@ -3116,12 +3116,16 @@ function Get-RunAccessOutcome([string]$Path) {
                 'read-profile-canary',
                 'read-repo-canary',
                 'list-profile',
+                'write-profile',
+                'write-repo-beside',
+                'write-worktree',
                 'git-status',
                 'git-diff',
                 'git-log',
                 'node-pipe',
                 'network',
-                'no-leak'
+                'no-leak',
+                'no-write-outside'
             ) -Because $because
             $canaryDirs = @(Get-ChildItem -LiteralPath $repoXagent -Force -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like 'canary-*' })
