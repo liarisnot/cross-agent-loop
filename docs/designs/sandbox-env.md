@@ -28,11 +28,11 @@ The general shape: the sandbox is safe because it sees little, and a repo's tool
 
 ## Goals
 
-*   **G1. Detect before a worker runs.** `delegate.ps1` can run a plain command (no Cursor) inside the sandbox, in a fresh worktree of the repo, and return its exit code, the first lines of its output and a diagnosis: command not found, module or package missing, access denied, or other. It takes seconds and uses no Cursor allowance.
+*   **G1. Detect before a worker runs.** `delegate.ps1` can run a plain command (no Cursor) inside the sandbox, in a fresh worktree of the repo, and return its exit code, the first lines of its output and a diagnosis: command not found, module or package missing, access denied, or other. It takes seconds and uses none of the user's Cursor plan usage.
 *   **G2. Propose, with the cost, before changing anything.** A diagnosis that has a known fix produces a proposal in plain words: what will be created, where, and roughly how much disk and time. Nothing is created until the user says yes, once per repo. After that, rebuilds for a changed lockfile run without asking and are reported in one line, unless one would add more than 5 GB to `.envs`, which is proposed again.
 *   **G3. Set up Python on approval.** For a Python project the skill finds the interpreter and packages it declares, builds an environment the sandbox can read, and makes it visible to every sandboxed run of that repo. A repo with several projects gets one environment per project. Pass: the G1 probe that failed now passes.
 *   **G4. No hand setup.** The user never edits `sandbox.json`, never runs a setup command and never needs to know the sandbox's rules. Every step is proposed in chat and run by the skill. The one prerequisite is `uv` on the host, which the README lists.
-*   **G5. Built into the flow.** `feature.ps1 doctor` reports whether the repo's environment is ready for the sandbox. Before the build starts, `feature` runs each phase's test command once in the sandbox, so a broken environment is found before the first worker's time is spent. A lead using `delegate` alone runs the same probe before its first worker.
+*   **G5. Built into the flow.** `feature.ps1 doctor` reports whether the repo's environment is ready for the sandbox. Before the build starts, `feature` runs each phase's test command (the `test` of each phase in the approved plan) once in the sandbox, so a broken environment is found before the first worker's time is spent. A lead using `delegate` alone runs the same probe before its first worker.
 *   **G6. Stale environments are caught.** When a project's lockfile changes, or the sandboxed probe starts failing, the same detection offers to bring the environment up to date.
 *   **G7. The sandbox does not get wider than needed.** A run is granted read access to the environments it links, for that run only, through the same per-run grant list as every other path. Nothing under the profile root, `AppData\Roaming`, `.ssh`, `.aws`, `.gnupg` or Cursor's folders is ever granted, and the existing read-list refusals stay as they are.
 
@@ -49,7 +49,7 @@ The general shape: the sandbox is safe because it sees little, and a repo's tool
 
 *   **GPU.** Whether an AppContainer can use the GPU at all is unverified.
 
-Settled since the first draft: editable installs (probe P3), disk (no cap; unused environments are pruned after 14 days and every proposal shows the total size of `.envs`), and projects without a lockfile (D3).
+Settled since the first draft: how a worker's tests import its own worktree's code (a probe confirmed the fix, see Probes); disk (no cap; unused environments are pruned after 14 days, and every proposal shows the total size of `.envs`); and projects without a lockfile (resolved afresh with `uv`, see the Decisions table).
 
 ## Technical Plan
 
@@ -57,7 +57,7 @@ Settled since the first draft: editable installs (probe P3), disk (no cap; unuse
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | Environments live per repo in `<repo>.xagent\.envs\`, one folder per environment, named `py<major.minor>-<first 12 hex of the project's hash>`. | Everything for a repo sits beside its worktrees and goes away with it. Sharing one root across repos saves almost nothing: lockfiles rarely match, and `uv`'s cache is on another drive, so packages are copied either way. A task id can't start with `.`, so no worktree can land on `.envs`. |
+| D1 | Environments live per repo in `<repo>.xagent\.envs\` (`<repo>.xagent` is the folder beside the repo where `delegate` already puts its worktrees; there is one `.envs` per repo, not per worktree), one folder per environment, named `py<major.minor>-<first 12 hex of the project's hash>`. | Everything for a repo sits beside its worktrees and goes away with it. Sharing one root across repos saves almost nothing: lockfiles rarely match, and `uv`'s cache is on another drive, so packages are copied either way. A task id can't start with `.`, so no worktree can land on `.envs`. |
 | D2 | Interpreters are always copied with `uv` into `<repo>.xagent\.envs\python\`. The user's installed Pythons are never granted. | One rule for every case; nothing outside `<repo>.xagent` is granted; upgrading or removing one of the user's Pythons never breaks a worker. |
 | D3 | A project with `uv.lock` is installed with `uv sync --frozen`. A project without one is resolved afresh with `uv` from its `pyproject.toml` or `requirements*.txt`, outside the repo. | The lockfile is the record the user committed, with every package's version and download address. Without one, a fresh resolve is the only automatic answer that doesn't guess where installed packages came from; versions may differ slightly from the user's `.venv`. |
 | D4 | Before each sandboxed worker run and probe, the host links each project's environment into the worktree as `.venv` (a directory junction). A copy of `uv.exe` is on the sandbox `PATH`. Review lenses and council seats run no tests and get no environments. | The worktree then looks like the user's checkout. `.venv\Scripts\python -m pytest`, `uv run pytest` and the repo's own instructions work unchanged. |
@@ -70,13 +70,13 @@ Settled since the first draft: editable installs (probe P3), disk (no cap; unuse
 
 A project is a folder in the tracked files of the ref being run that holds `uv.lock` (a `lock` project), or holds `pyproject.toml` or `requirements*.txt` with no `lock` project above it (a `resolve` project). A `uv` workspace has one `uv.lock` at its root and one `.venv` there, so it is one project. Projects are found with `git ls-files`, so ignored folders (the user's own `.venv` folders, other tools' worktrees) are never scanned.
 
-A project's interpreter version comes from, in order: `.python-version` in the project folder or above it; `requires-python` in `uv.lock` or `pyproject.toml`; the `version_info` in the user's `.venv\pyvenv.cfg`, if there is one. The newest patch release of that minor version is used. `uv` takes it from its own cache, or downloads it.
+A project's interpreter version comes from, in order: `.python-version` in the project folder or above it; `requires-python` in `uv.lock` or `pyproject.toml`; the `version_info` in the user's `.venv\pyvenv.cfg`, if there is one (a last resort, read from the checkout, and named in the report when used). The newest patch release of that minor version is used. `uv` takes it from its own cache, or downloads it.
 
 ### Components
 
 ```text
 delegate.ps1
-  -SandboxEnv [-Apply]          --> SandboxEnv.psm1 (new): find, report, build, prune
+  -SandboxEnv -Repo [-Apply]    --> SandboxEnv.psm1 (new): find, report, build, prune
   -SandboxRun -Command "<cmd>"  --> Sandbox.psm1 run path, no Cursor
   every sandboxed run           --> link .venv junctions; grant them for the run;
                                     .envs\bin on PATH
@@ -91,7 +91,7 @@ stages/build.md, delegate SKILL --> before the first worker: -SandboxEnv, then
 *   **`delegate.ps1 -SandboxRun -Repo <repo> -Command "<cmd>" [-Base <ref>] [-TimeoutSec <n>]` (G1).** Creates a detached worktree, links the environments, runs the command in a sandbox slot with the same grants and `PATH` a worker gets, removes the worktree, and prints one JSON object: `exitCode`, the first 40 lines of output, `seconds` and `diagnosis` (`ok`, `environment-missing`, `command-not-found`, `module-missing`, `access-denied`, `timeout`, `other`). `environment-missing` means a project in the worktree has no `ready` environment for its lockfile; the command is not run. The others are matched from the output. It takes one of the two slots, like any run.
 *   **Every worker run and probe** (not review lenses or council seats). Before the process starts, the host creates `<worktree>\<project>\.venv` as a junction to the environment matching that worktree's lockfile (D8), when it is `ready`, and adds read grants for those environments to the run's grant list (D6). `SandboxEnv.psm1` supplies the `PATH` entry for `.envs\bin` (holding `uv.exe`), `XAGENT_WORKTREE` (D7) and the `uv` variables that make `uv run` use the linked environment and never change it; `Get-SandboxEnvironment` appends what it is given. For a worker, a missing environment doesn't stop the run; it is listed in `sandboxNotes`. A worker that tries `pip install` or `uv add` gets an access error, because the environment is read-only.
 *   **`feature.ps1 doctor`** adds the `-SandboxEnv` summary for the repo, and the proposal when something is missing.
-*   **`stages/build.md` and `delegate`'s SKILL.md.** Before the first worker, the lead runs `-SandboxEnv`. If something is missing and the user hasn't approved this repo's first setup, the lead shows the proposal and asks once. After that, rebuilds on that repo (for example after a lockfile change) run without asking and are reported in one line. Then the lead runs each phase's test command once with `-SandboxRun`. A failure is fixed, or reported, before any worker starts.
+*   **`stages/build.md` and `delegate`'s SKILL.md.** Before the first worker, the lead runs `-SandboxEnv`. If something is missing and the user hasn't approved this repo's first setup, the lead shows the proposal and asks once. After that, rebuilds on that repo (for example after a lockfile change) run without asking and are reported in one line. Then the lead runs each phase's test command once with `-SandboxRun`; a lead using `delegate` alone runs the test command it is about to give its first worker. A failure is fixed, or reported, before any worker starts.
 
 ### Flow on first use
 
@@ -157,7 +157,7 @@ A pinned release with a checked hash, so no prerequisite is left. Rejected by au
 
 ### Probes
 
-Run by the lead on 2026-11-17 against a scratch repo (a small `hatchling` package with `numpy` and `pytest`), with the private repo's text-to-speech `pyproject.toml` and `uv.lock` copied in for the large case.
+Run by the lead on 2026-11-17 against a scratch repo (a small `hatchling` package with `numpy` and `pytest`), with the private repo's text-to-speech `pyproject.toml` and `uv.lock` copied in for the large case. P4 tested the `.venv` copy path, which was dropped before it ran.
 
 | # | Check | Result |
 |---|---|---|
@@ -190,7 +190,30 @@ Run by the lead on 2026-11-17 against a scratch repo (a small `hatchling` packag
 }
 ```
 
-**Hash.** `lock`: the SHA-256 of `uv.lock`, with the existing `Get-SandboxFileHash`. `resolve`: the SHA-256 of the project's declaration files (`pyproject.toml`, `requirements*.txt`), each file's repo-relative path and bytes, in sorted order. A changed declaration gives a new hash, so it is caught as stale (G6).
+**Hash.** `lock`: the SHA-256 of the bytes of `uv.lock`, with the existing `Get-SandboxFileHash` in `Sandbox.psm1`. `resolve`: the SHA-256 of the project's declaration files (`pyproject.toml`, `requirements*.txt`), each file's repo-relative path and bytes, in sorted order. A changed declaration gives a new hash, so it is caught as stale (G6).
+
+**`-SandboxEnv` output** (one line on stdout):
+
+```text
+{
+  "ok": true,
+  "repo": "<path>", "ref": "<ref>",
+  "uv": "<host uv path or null>",
+  "envsBytes": <current size of .envs>,
+  "approved": <true or false>,
+  "projects": [
+    { "project": "src/tts", "kind": "lock" | "resolve", "status": "ready" | "missing" | "stale" | "unsupported",
+      "reason": "<for unsupported: uv-missing, python-version-unknown, ...>", "env": "py3.12-<hash12>", "python": "3.12" }
+  ],
+  "proposal": null | {
+    "needsApproval": <true or false>,
+    "interpreters": ["3.11"], "envs": ["py3.12-<hash12>"],
+    "estimateBytes": <n>, "estimateSeconds": <n>,
+    "text": "<the proposal in plain words>"
+  },
+  "built": [ ... ], "pruned": [ ... ]       // with -Apply only
+}
+```
 
 **Last use.** Linking touches `.envs\linked\<env name>` (an empty file; its write time is the last link). Runs never write `envs.json`, so two runs starting together, or a review lens, can't overwrite the approval record.
 
@@ -214,7 +237,7 @@ Run by the lead on 2026-11-17 against a scratch repo (a small `hatchling` packag
 *   **Linking** (each worker run and probe, after the worktree exists, before the process starts). Find the projects in the worktree and hash each one's files there. For each project whose hash has a `ready` environment: if `<worktree>\<project>\.venv` does not exist, create a junction there and touch its `linked` stamp. If it exists and is a junction, replace it. If it is a real folder, leave it, and add a `sandboxNotes` line. A project with no `ready` environment gets a `sandboxNotes` line (worker) or makes the probe return `environment-missing`.
 *   **Unlinking.** Before any worktree removal (`-Cleanup`, `-Cleanup -Discard`, read-only worktree removal, `-SandboxRun`, the canary), delete every `.venv` junction in the worktree. A junction is deleted as a link only, never with a recursive delete.
 *   **Environment variables**, from `SandboxEnv.psm1` when the repo has a `.envs\bin` and the run is a worker or probe: `.envs\bin` appended to `PATH`; `XAGENT_WORKTREE=<slot>:\`; `UV_FROZEN=1`, `UV_NO_SYNC=1`, `UV_PYTHON_DOWNLOADS=never`.
-*   **`-SandboxRun` diagnosis.** From the combined output and exit code: `ok`, `command-not-found`, `module-missing` (with the module name), `access-denied` (with the path when present), `timeout` or `other`. The text patterns are set in the build task and its tests.
+*   **`-SandboxRun` diagnosis.** `environment-missing` is decided before the command runs (see Linking). Otherwise, from the combined output and exit code: `ok`, `command-not-found`, `module-missing` (with the module name), `access-denied` (with the path when present), `timeout` or `other`. The text patterns are set in the build task and its tests.
 
 ### Files
 
