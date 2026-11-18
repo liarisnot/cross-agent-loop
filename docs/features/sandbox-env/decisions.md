@@ -12,3 +12,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:06:37Z [decision] design: disk is managed by the 14-day prune only, no size cap; each proposal shows the total size of .envs
 - 2026-11-18T19:06:38Z [decision] design D6: environments are granted per run through the existing grant list; the lasting .envs grant and envGrants are dropped (probe P2: 2.7 s grant, 2.8 s removal on a 4.8 GB env)
 - 2026-11-18T19:06:38Z [decision] design D7: editable installs redirect to the run's worktree via a .pth that reads XAGENT_WORKTREE (probe P3); runs never write envs.json, last use is a per-env stamp file
+- 2026-11-18T19:07:08Z [dismiss] ic-p5 Major 2 (disk ceiling with LRU eviction) — user chose the 14-day prune only; proposals show the .envs total and rebuilds are cheap
