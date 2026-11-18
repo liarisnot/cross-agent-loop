@@ -8,3 +8,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T04:20:41Z [decision] design D4: before each sandboxed run the host links every project's environment into the worktree as a .venv junction; a copy of uv.exe goes on the sandbox PATH; principle: decide automatically and correctly, ask the user only for cost approval
 - 2026-11-18T05:19:28Z [stage] design -> design-review
 - 2026-11-18T19:06:35Z [decision] design D3 revised: without uv.lock, resolve afresh with uv from pyproject.toml or requirements outside the repo (B); the .venv copy path is dropped (both phase-5 lenses: a second installer)
+- 2026-11-18T19:06:36Z [decision] design: uv must be on the host; a missing uv is reported (uv-missing) and the README lists it; no pinned download (user: installing uv is a setup change the user decides)
