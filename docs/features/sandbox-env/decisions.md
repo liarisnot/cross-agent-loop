@@ -18,3 +18,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:15:53Z [decision] design D8: an environment belongs to the tree being run; runs link the env matching their worktree's lockfile hash; -SandboxEnv builds for a ref (zo-p5 d2 Major 1)
 - 2026-11-18T19:15:54Z [decision] design: only worker runs and -SandboxRun probes link and grant environments; review lenses and council seats get none (zo-p5 d2 Major 2)
 - 2026-11-18T19:15:54Z [decision] design: -SandboxRun returns environment-missing without running when a project in the worktree has no ready environment (ic-p5 d2 Major 3, first half)
+- 2026-11-18T19:15:55Z [decision] design: a rebuild whose estimate adds more than 5 GB to .envs is proposed again; smaller rebuilds run without asking (ic-p5 d2 Major 1)
