@@ -25,3 +25,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:15:58Z [dismiss] zo-p5 d2 Nit 3, second half (requirements-only projects unsupported) — the user chose an automatic fresh resolve; uv pip install -r is a few lines
 - 2026-11-18T19:24:23Z [dismiss] sandbox-env-d2-zo-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-zo-p5 on the same doc (tracker bug: a mid-round synthesis started round d2, then reaudit added r1 rows)
 - 2026-11-18T19:24:24Z [dismiss] sandbox-env-d2-ic-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-ic-p5 on the same doc (same tracker bug)
+- 2026-11-18T19:26:18Z [dismiss] cm-p6 d2 Nit 10 (separate delegate-only recipe) — the Components bullet now says a delegate-only lead probes the test command for its first worker; the SKILL.md change carries the steps
