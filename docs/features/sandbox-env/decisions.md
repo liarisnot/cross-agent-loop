@@ -23,3 +23,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:15:57Z [dismiss] ic-p5 d2 Major 2 (shared content store across repos) — reopens D1, which the user chose; D6 grants go through the same refusal-free per-run list wherever the bytes are, so it saves nothing on isolation
 - 2026-11-18T19:15:57Z [dismiss] ic-p5 d2 Major 3, second half (a lighter probe path outside New-SandboxRun) — one run path for workers and probes keeps the probe faithful; setup cost is seconds
 - 2026-11-18T19:15:58Z [dismiss] zo-p5 d2 Nit 3, second half (requirements-only projects unsupported) — the user chose an automatic fresh resolve; uv pip install -r is a few lines
+- 2026-11-18T19:24:23Z [dismiss] sandbox-env-d2-zo-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-zo-p5 on the same doc (tracker bug: a mid-round synthesis started round d2, then reaudit added r1 rows)
