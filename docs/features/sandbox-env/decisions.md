@@ -10,3 +10,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:06:35Z [decision] design D3 revised: without uv.lock, resolve afresh with uv from pyproject.toml or requirements outside the repo (B); the .venv copy path is dropped (both phase-5 lenses: a second installer)
 - 2026-11-18T19:06:36Z [decision] design: uv must be on the host; a missing uv is reported (uv-missing) and the README lists it; no pinned download (user: installing uv is a setup change the user decides)
 - 2026-11-18T19:06:37Z [decision] design: disk is managed by the 14-day prune only, no size cap; each proposal shows the total size of .envs
+- 2026-11-18T19:06:38Z [decision] design D6: environments are granted per run through the existing grant list; the lasting .envs grant and envGrants are dropped (probe P2: 2.7 s grant, 2.8 s removal on a 4.8 GB env)
