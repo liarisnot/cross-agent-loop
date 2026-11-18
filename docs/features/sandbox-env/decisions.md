@@ -16,3 +16,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:07:09Z [dismiss] ic-p5 Nit 5 (shared read-only uv cache for runs) — runs use uv run on a frozen env with UV_NO_SYNC, which reads no cache (P1)
 - 2026-11-18T19:07:21Z [reaudit] d2: phase 5
 - 2026-11-18T19:15:53Z [decision] design D8: an environment belongs to the tree being run; runs link the env matching their worktree's lockfile hash; -SandboxEnv builds for a ref (zo-p5 d2 Major 1)
+- 2026-11-18T19:15:54Z [decision] design: only worker runs and -SandboxRun probes link and grant environments; review lenses and council seats get none (zo-p5 d2 Major 2)
