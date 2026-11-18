@@ -14,3 +14,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:06:38Z [decision] design D7: editable installs redirect to the run's worktree via a .pth that reads XAGENT_WORKTREE (probe P3); runs never write envs.json, last use is a per-env stamp file
 - 2026-11-18T19:07:08Z [dismiss] ic-p5 Major 2 (disk ceiling with LRU eviction) — user chose the 14-day prune only; proposals show the .envs total and rebuilds are cheap
 - 2026-11-18T19:07:09Z [dismiss] ic-p5 Nit 5 (shared read-only uv cache for runs) — runs use uv run on a frozen env with UV_NO_SYNC, which reads no cache (P1)
+- 2026-11-18T19:07:21Z [reaudit] d2: phase 5
