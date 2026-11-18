@@ -124,7 +124,7 @@ Observations:
 - The worker CLIs produce CRLF files on this machine (git autocrlf). Harmless.
 - Calls from Claude Code ran one after another, not at the same time. True parallel runs need `run_in_background` (still to test).
 
-Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro tiers, true parallel runs in the background, a real-repo trial (e.g. MyApp).
+Still open: T0 (Antigravity ToS on a consumer Pro plan), quota burn on the Pro tiers, true parallel runs in the background, a real-repo trial.
 
 ## Results log, 2026-11-09: model profiles + council ✅
 

@@ -19,7 +19,7 @@ Probe 'read profile canary'   DENIED { Get-Content -Raw $in.profCanary }
 Probe 'read D: canary'        DENIED { Get-Content -Raw $in.dCanary }
 Probe 'list real profile'     DENIED { (Get-ChildItem $in.realProfile -Force | Select-Object -First 3).Name }
 Probe 'list ~/.ssh'           DENIED { (Get-ChildItem (Join-Path $in.realProfile '.ssh') -Force).Name }
-Probe 'list D:\MyApp'       DENIED { (Get-ChildItem 'D:\MyApp' -Force | Select-Object -First 3).Name }
+Probe 'list D:\OtherRepo'       DENIED { (Get-ChildItem 'D:\OtherRepo' -Force | Select-Object -First 3).Name }
 Probe 'list D:\'              DENIED { (Get-ChildItem 'D:\' -Force | Select-Object -First 3).Name }
 Probe 'write D:\ root'        DENIED { Set-Content 'D:\xagent-probe-write.txt' x; 'written' }
 Probe 'write real user TEMP'  DENIED { Set-Content (Join-Path $in.realTemp 'xagent-probe-write.txt') x; 'written' }

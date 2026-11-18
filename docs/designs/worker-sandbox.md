@@ -24,7 +24,7 @@ The build has two rules:
 
 ## The Problem
 
-*   **Workers can read the whole machine.** The first design's Risks table (`docs/designs/feature-skill.md`, row "Workers can read any file and reach the network") lists this as unmitigated in v1. Files on disk are readable by any worker: `~/.ssh`, `~/.aws/credentials`, `~/.npmrc`, browser profiles, and other repos such as `D:\MyApp`. A worker reads repository text, web pages and tool output, and any of these can carry a prompt injection. One injected instruction can make a worker read a secret and print it into a commit, a log, or a network request.
+*   **Workers can read the whole machine.** The first design's Risks table (`docs/designs/feature-skill.md`, row "Workers can read any file and reach the network") lists this as unmitigated in v1. Files on disk are readable by any worker: `~/.ssh`, `~/.aws/credentials`, `~/.npmrc`, browser profiles, and other repos such as `D:\OtherRepo`. A worker reads repository text, web pages and tool output, and any of these can carry a prompt injection. One injected instruction can make a worker read a secret and print it into a commit, a log, or a network request.
 *   **Workers can write outside their worktree.** A wrong `rm -rf`, a bad path in a script, or a test that writes to `%TEMP%` paths it doesn't own can damage the user's files. Diff review sees only the worktree, so damage outside it is invisible to the lead.
 *   **Shell commands can reach any host.** A worker's commands can upload anything they can read. Today's only mitigation is a denylist in `delegate.ps1` (`$secretPattern`, added in the `feature` skill's build step 1). It strips environment variables whose names look like secrets (`*_API_KEY`, `*_TOKEN`, `AWS_*` and similar) and does nothing about files or the network.
 *   **Read-only runs are only read-only by request.** Review lenses run in Cursor's `ask` mode and council seats in `plan` mode. These modes stop edits, but the agent can still read outside the worktree.
@@ -92,7 +92,7 @@ The `feature` skill moves a feature through stages (`design`, `design-review`, `
 
 ### CUJ 3: A prompt injection tries to read a secret
 
-*   **Given**: A worker whose task text tells it to read `~/.ssh/id_ed25519` and `D:\MyApp\.env` and paste them into a file.
+*   **Given**: A worker whose task text tells it to read `~/.ssh/id_ed25519` and `D:\OtherRepo\.env` and paste them into a file.
 *   **When**: The worker tries this with its shell and with its own file-read tool.
 *   **Then**: Every attempt fails with "access denied". The worker reports the failure in `result.json`. Nothing outside the worktree appears in the branch, the summary or the logs.
 
@@ -128,7 +128,7 @@ The `feature` skill moves a feature through stages (`design`, `design-review`, `
 
 Feasibility probes on this machine (2026-11-13 and 14; scripts and findings in `docs/designs/worker-sandbox-probe/`) confirmed:
 
-*   **Blocked:** the shell and the agent's own file-read tool were denied on canaries in the user's profile and on `D:\`, on `~\.ssh`, on `D:\MyApp`, and on the real Cursor login. The host's `localhost` was blocked.
+*   **Blocked:** the shell and the agent's own file-read tool were denied on canaries in the user's profile and on `D:\`, on `~\.ssh`, on `D:\OtherRepo`, and on the real Cursor login. The host's `localhost` was blocked.
 *   **Working:**
     *   git (init, commit, log), in a folder outside the user profile;
     *   Pester 6.2.0 from `C:\Program Files`;
@@ -244,7 +244,7 @@ Every grant below goes to the slot's container SID, is made at the start of the 
 AppContainers cannot reach the host's `localhost`. Windows offers a per-container exemption: `CheckNetIsolation LoopbackExempt -a -p=<container SID>`, run as administrator. The 2026-11-14 probe showed a container blocked, then reaching a host HTTP server after the exemption, then blocked again after `-d`.
 
 *   **Once per slot:** because containers are permanent per slot, an exemption is a one-time step per slot, not per run.
-*   **Not granted by this feature.** The first feature that needs a host service (for example MyApp and ComfyUI) designs the opt-in: where it is recorded and how it is granted and revoked. This feature adds only one thing: `-Release` lists exemptions still registered for slot SIDs.
+*   **Not granted by this feature.** The first feature that needs a host service (for example a project that calls ComfyUI) designs the opt-in: where it is recorded and how it is granted and revoked. This feature adds only one thing: `-Release` lists exemptions still registered for slot SIDs.
 *   **What it opens:** every host `localhost` port, not just one service.
 
 ### The patched `node.exe`
@@ -378,7 +378,7 @@ Run each agent as a separate standard Windows account (for example `xagent-worke
 *   **Pros:** a normal account has none of the AppContainer gaps. git, Node, `taskkill` and the Cursor CLI work unpatched, and drive roots are readable.
 *   **Cons:**
     *   An administrator must create the account, and its password must be stored where `delegate.ps1` can read it.
-    *   `D:\` gives "Authenticated Users" modify access on every folder (checked on this machine), so the account can read and write `D:\MyApp` until deny entries are added to every folder that matters. New folders are open by default.
+    *   `D:\` gives "Authenticated Users" modify access on every folder (checked on this machine), so the account can read and write `D:\OtherRepo` until deny entries are added to every folder that matters. New folders are open by default.
     *   The worktree's `.git` lives in the user's repo, where a writable hooks folder runs code as the user. Avoiding that needs a per-run clone.
     *   Windows Firewall cannot reliably filter by local user.
     *   Every new public user repeats the account setup.
@@ -393,7 +393,7 @@ Run the Cursor CLI inside its own WSL2 distribution, with Windows drives not mou
     *   Windows-only tests cannot run there. This repo's Pester suite uses Windows paths and processes. A worker that cannot run its tests hands that job to the lead, which defeats the skill's purpose.
     *   Each repo needs setup in the distribution: toolchain installs and a second Cursor login.
     *   A worktree on `/mnt/d` is slow, and one inside the Linux file system must be synced back.
-    *   All WSL distributions share one VM, whose memory competes with ComfyUI for MyApp.
+    *   All WSL distributions share one VM, whose memory competes with ComfyUI.
 *   **Reason for rejection:** Rejected by author: workers must run their own tests, and most target repos here are Windows-first.
 
 ### Alternative C: Both A and B, chosen per repo
@@ -488,7 +488,7 @@ Grant the runtime cache and each repo's `.git` to named capabilities that every 
 ### Alternative O: No read list until one is needed
 
 *   **Pros:** no hole-punching rules to get wrong now.
-*   **Cons:** the first expected outside use, MyApp with ComfyUI's per-user Python, would block.
+*   **Cons:** the first expected outside use, a project with ComfyUI's per-user Python, would block.
 *   **Reason for rejection:** Rejected by author: the skill should be ready for per-user tools.
 
 ### Alternative P: Copy a refreshed Cursor token back to the user's login

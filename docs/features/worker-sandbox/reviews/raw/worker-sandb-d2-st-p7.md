@@ -23,7 +23,7 @@ Round-1 structural items that hold: M30 (the Risks heading, the three alternativ
 
 **Affected scope:** `## Open Questions`, third bullet (line 74).
 
-**Discrepancy:** M30 kept only questions that are still open. Token refresh and per-run permission cost are still measurements, so they belong here. "Which host services MyApp needs" says it is settled when a later feature is designed. The same deferral is already a Non-Goal (line 68) and a Future Improvements bullet (line 505). It is not an open question in this spec.
+**Discrepancy:** M30 kept only questions that are still open. Token refresh and per-run permission cost are still measurements, so they belong here. "Which host services the first outside project needs" says it is settled when a later feature is designed. The same deferral is already a Non-Goal (line 68) and a Future Improvements bullet (line 505). It is not an open question in this spec.
 
 ### 4. Severity: Nit
 
