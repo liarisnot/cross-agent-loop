@@ -19,3 +19,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:15:54Z [decision] design: only worker runs and -SandboxRun probes link and grant environments; review lenses and council seats get none (zo-p5 d2 Major 2)
 - 2026-11-18T19:15:54Z [decision] design: -SandboxRun returns environment-missing without running when a project in the worktree has no ready environment (ic-p5 d2 Major 3, first half)
 - 2026-11-18T19:15:55Z [decision] design: a rebuild whose estimate adds more than 5 GB to .envs is proposed again; smaller rebuilds run without asking (ic-p5 d2 Major 1)
+- 2026-11-18T19:15:56Z [decision] design: builds read uv.lock, pyproject.toml, uv.toml, .python-version and workspace members at the ref into .envs\work and sync with --no-install-workspace; uv.exe recopied on every -Apply with its version recorded (ic-p5 d2 Nits 4, 5)
