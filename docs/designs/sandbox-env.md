@@ -114,3 +114,44 @@ lead: delegate.ps1 -SandboxRun -Repo R -Command "<phase 1 test command>"
 *   **P2.** Time an `icacls` grant and removal on a built CUDA `torch` environment, to confirm the lasting grant is needed.
 *   **P3.** After `uv sync --frozen` into an outside environment, a test run in a worktree through the link imports the worktree's code, not the checkout's.
 *   **P4.** The D3 copy path on one small `.venv` without a lockfile, to size the fix-up code against the one-task limit.
+
+## Alternatives Considered
+
+### Run such repos with `-NoSandbox`
+
+Works today with no new code. Rejected by author: it drops the protection exactly where it matters most. The first repo that needs this holds a live database that experiments must never touch.
+
+### Grant the user's own environments in place
+
+Add the user's `.venv` folders and interpreters to the read list, and nothing is copied. Rejected for three reasons:
+*   Most interpreters are under `AppData\Roaming`, which the read list refuses on purpose.
+*   A venv loads its interpreter from the `home` path in `pyvenv.cfg` on every run, so granting the `.venv` alone is not enough.
+*   An editable install in the user's `.venv` points at the user's checkout, so workers would test the checkout's code, not their worktree's.
+
+### Let each worker build its own `.venv` inside its worktree
+
+The closest match to the user's setup, with no shared state. Rejected by author: every task would install CUDA `torch` again (several GB, minutes). The worker's `uv` cache is inside its own run home, so nothing would be reused between tasks.
+
+### Where the environments live (D1)
+
+*   **One root shared by all repos, picked once by the user.** Environments named by lockfile could be shared between repos. Rejected by author: two repos rarely have identical lockfiles, so the saving is close to zero. And unless everything is on C:, where `uv`'s cache is, packages are copied anyway.
+*   **`%LOCALAPPDATA%\xagent\envs\`.** On the same drive as `uv`'s cache, so packages could be hard-linked and cost little disk. Rejected by author: it is inside the user's profile and inside the folder the read list refuses. Granting a hard-linked file also changes permissions on `uv`'s cached copy, which is the same file.
+
+### Where interpreters come from (D2)
+
+Use the user's installed Python where the read list allows it (`C:\Program Files`, `C:\Python314`), and copy only the ones under `AppData\Roaming`. That gives the same builds the user tests with, and fewer copies. Rejected by author: it needs two rules instead of one. It grants folders outside the repo, including anything later installed into them globally. And upgrading or removing one of the user's Pythons would break workers until a rebuild.
+
+### Projects without a lockfile (D3)
+
+*   **Install from `requirements.txt` or `pyproject.toml`, resolving versions afresh.** Kept as the fallback if the copy path's fix-up grows past one task. Not the first choice: versions can differ from what the user runs, so a worker might see failures the user doesn't.
+*   **Read the packages installed in the user's `.venv` and reinstall them.** Rejected by author: the installed list doesn't record which index each package came from. CUDA `torch` and similar would need guessing, or a question to the user, and that layer of complexity shouldn't reach users.
+*   **Report and stop.** Rejected by author: it forces a tool choice (`uv` with a committed lock) on the user's repo.
+
+### How a test command finds its environment (D4)
+
+*   **Explicit interpreter paths in every test command.** No hidden behaviour. Rejected by author: commands get long and stop matching the repo's own instructions, and a worker that types `python` gets the wrong one.
+*   **A `python` shim on `PATH` that picks the environment from the current folder.** Plain `python` works everywhere. Rejected by author: it is custom code imitating `uv run`, and tools that look for `.venv` still find none.
+
+### Grant `.envs` per run, like other read-list entries
+
+Keeps today's rule that grants last only for a run. Rejected: on each grant and each removal, `icacls` rewrites the permissions of every file below the folder, and a CUDA `torch` environment has tens of thousands of files. Probe P2 measures it, and the plan switches back if it's fast enough.
