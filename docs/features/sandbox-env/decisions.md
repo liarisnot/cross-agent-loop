@@ -27,3 +27,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:24:24Z [dismiss] sandbox-env-d2-ic-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-ic-p5 on the same doc (same tracker bug)
 - 2026-11-18T19:26:18Z [dismiss] cm-p6 d2 Nit 10 (separate delegate-only recipe) — the Components bullet now says a delegate-only lead probes the test command for its first worker; the SKILL.md change carries the steps
 - 2026-11-18T19:34:19Z [dismiss] dc-p7 d2 Major 3 (disk soft cap) and Major 4 (share interpreters across repos) — user chose no cap and per-repo .envs (D1); now listed under Risks and Mitigations
+- 2026-11-18T19:34:20Z [dismiss] dc-p7 d2 Major 5 second half (check uv version before each run) — a lockfile change always triggers -Apply, which recopies uv; inside a run uv reads only the environment (Risks table)
