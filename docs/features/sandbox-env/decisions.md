@@ -32,3 +32,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:34:21Z [dismiss] dc-p7 d2 Major 10 (probe with the private CUDA index inside the sandbox) — with UV_FROZEN and UV_NO_SYNC uv run contacts no index; the live sign-off checks run the private repo's tests in the sandbox
 - 2026-11-18T19:34:22Z [dismiss] dc-p7 d2 Major 11 (block pip --user, uv tool install) — pip refuses --user in a venv; other writes land in the run home, removed with the worktree (Risks table)
 - 2026-11-18T19:34:23Z [dismiss] dc-p7 d2 Major 13 (full-hash folder names) — envs.json stores and compares the full hash, so a 12-hex clash shows as not ready (Risks table)
+- 2026-11-18T19:34:24Z [dismiss] st-p7 d2 Nits 4 and 7 (standard heading names, uniform alternative H3s) and sy-p7 d2 Nits 3, 12, 14, 25, 31 and the actor-voice note — repo design docs use these headings; left as small wording preferences
