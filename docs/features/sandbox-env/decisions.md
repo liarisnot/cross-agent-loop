@@ -30,3 +30,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T19:34:20Z [dismiss] dc-p7 d2 Major 5 second half (check uv version before each run) — a lockfile change always triggers -Apply, which recopies uv; inside a run uv reads only the environment (Risks table)
 - 2026-11-18T19:34:21Z [dismiss] dc-p7 d2 Major 6 (third slot for probes) — probes run before any worker starts and wait for a slot like any run (Risks table)
 - 2026-11-18T19:34:21Z [dismiss] dc-p7 d2 Major 10 (probe with the private CUDA index inside the sandbox) — with UV_FROZEN and UV_NO_SYNC uv run contacts no index; the live sign-off checks run the private repo's tests in the sandbox
+- 2026-11-18T19:34:22Z [dismiss] dc-p7 d2 Major 11 (block pip --user, uv tool install) — pip refuses --user in a venv; other writes land in the run home, removed with the worktree (Risks table)
