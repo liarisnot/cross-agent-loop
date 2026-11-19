@@ -65,6 +65,7 @@ Start a new Claude Code session in `D:\cross-agent-loop` and read this file firs
 - **Standards:** the `implementation_readiness` persona appends its standard automatically. For `zoom_out`, paste `personas/zoom-out-standard.md` into the task file (see `fr-s8r3.md`).
 
 ## Open items
+- **Feature `sandbox-env` is in progress (2026-11-19):** design locked on `feature/sandbox-env` (`docs/designs/sandbox-env.md`), next is the plan stage. Two bugs found during its review were fixed on `main` first (D24 in `docs/test-plan.md`): Cursor self-updating inside sandboxed runs (now `--disable-auto-update`, plus long-path-safe cleanup), and the review tracker starting a full round after a mid-round synthesis.
 - **`benchmarks/runs.jsonl` is untracked now** (moved to `%LOCALAPPDATA%\xagent\` in build step 1). Its old lines are still in git history, so delete and recreate the GitHub repo before going public (below).
 - **Worker sandboxing** is live (`worker-sandbox`, Next item 5): every `delegate` run is sandboxed unless `-NoSandbox` is passed.
 - **Watch Node.js for libuv 1.53** (nodejs/node#66374). Once Cursor bundles it, the `node.exe` pipe-name patch in `worker-sandbox` can be removed.
