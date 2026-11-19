@@ -51,3 +51,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T01:59:50Z [dismiss] ir-p9-r1 d3 Major 10 second half (build-inputs-incomplete status) — inputs now include files pyproject names (readme, license); any other missing file surfaces as install-failed with uv's error
 - 2026-11-19T02:06:44Z [decision] review design-3: declined by the user (only the stage-9 re-check runs ir-p9-r1 and cd-p9-r1 were wanted; the other d3 runs came from the tracker starting a round on the design-2 commit)
 - 2026-11-19T02:06:45Z [dismiss] sandbox-env-d3-sy-p9-r1: not run — waived by the user; style was reviewed at d2 and the re-check covered readiness and codebase details only
+- 2026-11-19T02:06:47Z [gate] design-locked: "Lock the design (Recommended)"
