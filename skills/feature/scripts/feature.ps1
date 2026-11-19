@@ -1464,6 +1464,9 @@ function New-PlanMdText {
             $titleCell = Escape-PlanMdCell ([string]$task.title)
             $testCell = Escape-PlanMdCell ([string]$task.test)
             [void]$sb.AppendLine("| $($task.id) | $titleCell | $depCell | $filesCell | $($task.profile) | ``$testCell`` |")
+        }
+        # Briefs after the whole table: a paragraph between rows ends the table in rendered Markdown.
+        foreach ($task in @($phase.tasks)) {
             [void]$sb.AppendLine()
             [void]$sb.AppendLine("**$($task.id).** $([string]$task.brief)")
         }

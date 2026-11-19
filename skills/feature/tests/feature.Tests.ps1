@@ -1009,6 +1009,18 @@ Describe 'feature.ps1 plan' {
         [int][char]$dep | Should -Be 0x2014
     }
 
+    It 'plan.md keeps a phase''s task rows together and puts briefs after the table' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'rows' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $lines = @(& git -C $repo show 'HEAD:docs/features/rows/plan.md')
+        $i1 = [array]::FindIndex($lines, [Predicate[object]] { param($l) $l -match '^\| t1 \|' })
+        $i2 = [array]::FindIndex($lines, [Predicate[object]] { param($l) $l -match '^\| t2 \|' })
+        $b1 = [array]::FindIndex($lines, [Predicate[object]] { param($l) $l -match '^\*\*t1\.\*\*' })
+        $i1 | Should -BeGreaterThan -1
+        $i2 | Should -Be ($i1 + 1)
+        $b1 | Should -BeGreaterThan $i2
+    }
+
     It 'plan.md joins files with br and escapes pipe in title' {
         $repo = New-TestRepo
         $plan = Get-StandardTwoPhasePlan
