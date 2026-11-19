@@ -45,3 +45,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T21:43:29Z [dismiss] ir-p9 d2 Blocker 1 and cd-p9 d2 Major (no phases in the design) — phases and checkpoints are made in the plan stage from the Files table; the doc now says so
 - 2026-11-18T21:43:30Z [dismiss] ir-p9 d2 Nit 27 (Critical User Journeys and NFR sections) — this repo's design docs don't all use them; the failure paths are covered by the Rules, Risks and Verification
 - 2026-11-18T21:43:31Z [dismiss] sy-p9 d2 Nit 4 (GPU risk row) applied by dropping the row; sy-p9 d2 Nit 5 ('in plain words') applied; no other dismissals from sy-p9
+- 2026-11-19T01:48:23Z [reaudit] d3: phase 9
