@@ -73,3 +73,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T06:01:53Z [decision] design (as built): the interpreter is found with 'uv python find <request>' under UV_PYTHON_PREFERENCE=only-managed, not --managed-python; fold into the design at sign-off
 - 2026-11-19T06:07:15Z [decision] env-link: kept whole despite split verdict — prune, gate and links share the module, tests and fixtures; similar Composer tasks finished in under 15 minutes
 - 2026-11-19T06:37:41Z [fix-up] env-link: 1 file, 9 lines — record the interpreter's real folder (uv python find returns the minor-version junction cpython-3.12-..., while pyvenv.cfg home names cpython-3.12.12-...), so the per-run grant covers what python loads; found with a real-uv link check
+- 2026-11-19T06:59:56Z [fix-up] dlg-commands: 2 files, 9 lines — removed a stray root uv.lock the worker left, and the duplicated .xagent exclude block (the worker copied it up instead of moving it)
