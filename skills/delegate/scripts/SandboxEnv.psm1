@@ -1507,8 +1507,9 @@ function Get-SandboxEnvProjectLinkPath {
 function Test-SandboxEnvLinkItemIsJunction {
     param([string]$LinkPath)
 
-    if (-not (Test-Path -LiteralPath $LinkPath)) { return $false }
-    $item = Get-Item -LiteralPath $LinkPath -Force
+    # Get-Item -Force also finds a junction whose target is gone; Test-Path would not.
+    $item = Get-Item -LiteralPath $LinkPath -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $false }
     return ($item.LinkType -ceq 'Junction')
 }
 
@@ -1689,7 +1690,6 @@ function Remove-SandboxEnvLinks {
 
     $removed = 0
     foreach ($path in $candidates) {
-        if (-not (Test-Path -LiteralPath $path)) { continue }
         if (-not (Test-SandboxEnvLinkItemIsJunction -LinkPath $path)) { continue }
         try {
             [IO.Directory]::Delete($path, $false)

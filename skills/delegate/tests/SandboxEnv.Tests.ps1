@@ -1374,3 +1374,21 @@ Describe 'Remove-SandboxEnvLinks' {
         } finally { Exit-SandboxEnvApplyUv }
     }
 }
+
+Describe 'Remove-SandboxEnvLinks dangling junction' {
+    It 'removes a .venv junction whose target no longer exists' {
+        $wt = Join-Path $TestDrive ('dangle-wt-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $target = Join-Path $TestDrive ('dangle-target-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path $wt, $target | Out-Null
+        $link = Join-Path $wt '.venv'
+        try {
+            New-Item -ItemType Junction -Path $link -Target $target -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'cannot create a junction here'
+            return
+        }
+        Remove-Item -LiteralPath $target -Recurse -Force
+        (Remove-SandboxEnvLinks -Worktree $wt) | Should -Be 1
+        $null -eq (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue) | Should -BeTrue
+    }
+}
