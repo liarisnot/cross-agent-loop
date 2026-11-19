@@ -1,0 +1,7 @@
+{
+  "name": "sandbox-verify",
+  "stage": "design",
+  "checkin": "on-problems",
+  "designDoc": "docs/designs/sandbox-verify.md",
+  "gates": {}
+}
