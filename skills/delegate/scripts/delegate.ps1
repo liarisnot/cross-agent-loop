@@ -384,6 +384,11 @@ if ($readOnly) {
 
 # ---------- cleanup mode ----------
 if ($Cleanup) {
+    function Remove-DelegateEnvLinks([string]$Path) {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try { Import-Module (Join-Path $PSScriptRoot 'SandboxEnv.psm1') -Force -ErrorAction Stop } catch { return }
+        Remove-SandboxEnvLinks -Worktree $Path | Out-Null
+    }
     $notes = @()
     # read-only worktrees of this task: <TaskId>-<label>, detached. The label has no '-', so the
     # read-only worktrees of a longer task id (<TaskId>-pc-cursor) are never matched.
@@ -397,6 +402,7 @@ if ($Cleanup) {
     foreach ($d in @(Get-ChildItem -LiteralPath $wtRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^$prefix-[a-z0-9]+$" })) {
         $cwt = $d.FullName.TrimEnd('\')
         if (-not $detached.ContainsKey($cwt.ToLowerInvariant())) { continue }   # a worker worktree of another task
+        Remove-DelegateEnvLinks $cwt
         Restore-RuleFiles $cwt
         $dirty = @(& git -C $cwt status --porcelain --untracked-files=no 2>$null)
         if ($dirty.Count -gt 0) { Fail "Read-only worktree $cwt has tracked changes (read-only violation?); inspect before removing" }
@@ -409,6 +415,7 @@ if ($Cleanup) {
         if (Test-Path $wt) {
             New-Item -ItemType Directory -Force $runDir | Out-Null
             $patch = Join-Path $runDir ("discarded-{0}.patch" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            Remove-DelegateEnvLinks $wt
             & git -C $wt add -A -- . ':!.xagent' 2>$null | Out-Null
             & git -C $wt diff --cached HEAD | Set-Content -LiteralPath $patch
             Remove-Worktree $wt | Out-Null; $notes += "discarded worktree $wt (diff saved to $patch)"
@@ -418,6 +425,7 @@ if ($Cleanup) {
         Out-Summary @{ ok = $true; cleanup = $notes }
     }
     if (Test-Path $wt) {
+        Remove-DelegateEnvLinks $wt
         $dirtyTracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
         & git -C $Repo merge-base --is-ancestor $branch HEAD 2>$null
         $merged = ($LASTEXITCODE -eq 0)
@@ -474,6 +482,7 @@ if ($isReview) {
     }
 }
 
+$envGate = $null; $envLinks = $null; $gateSha = $null
 # ---------- sandbox setup (before any worktree, so a failure leaves none) ----------
 $cursorRoot = if ($env:XAGENT_CURSOR_ROOT) { $env:XAGENT_CURSOR_ROOT } else { Join-Path $env:LOCALAPPDATA 'cursor-agent' }
 $sandboxed = ($Agent -eq 'cursor' -and -not $NoSandbox)
@@ -492,6 +501,21 @@ if ($sandboxed) {
     } catch {
         Fail $_.Exception.Message
     }
+    if (-not $readOnly) {
+        if (Test-Path $wt) { try { $gateSha = (Invoke-Git -C $wt rev-parse HEAD | Select-Object -First 1).Trim() } catch { Fail "sandbox: cannot read the worktree HEAD in $wt" } }
+        else {
+            $branchSha = @(& git.exe -C $Repo rev-parse --verify --quiet "refs/heads/$branch" 2>$null)
+            if ($LASTEXITCODE -eq 0) { $gateSha = ("$($branchSha | Select-Object -First 1)").Trim() }
+            else {
+                $baseShaOut = @(& git.exe -C $Repo rev-parse --verify "$Base^{commit}" 2>&1)
+                if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read $Base in $Repo" }
+                $gateSha = ("$($baseShaOut | Select-Object -First 1)").Trim()
+            }
+        }
+        Import-DelegateSandboxEnv
+        try { $envGate = Test-SandboxEnvReady -Repo $Repo -Commit $gateSha } catch { Fail $_.Exception.Message }
+        if (-not $envGate.ready) { Fail $envGate.message }
+    }
 }
 
 # ---------- create or reuse worktree ----------
@@ -508,6 +532,16 @@ if (-not (Test-Path $wt)) {
 }
 $wtTop = (Invoke-Git -C $wt rev-parse --show-toplevel | Select-Object -First 1) -replace '/', '\'
 if ($wtTop.TrimEnd('\') -ne $wt -or $wt -eq $Repo) { Fail "Safety check failed: worktree toplevel is $wtTop, expected $wt" }
+
+if ($null -ne $envGate) {
+    $hasReadyProject = $false
+    foreach ($p in @($envGate.projects)) {
+        if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
+    }
+    if ($hasReadyProject) {
+        try { $envLinks = Add-SandboxEnvLinks -Repo $Repo -Worktree $wt -Projects $envGate.projects } catch { Fail $_.Exception.Message }
+    }
+}
 
 # ---------- hand-off files ----------
 $xDir = Join-Path $wt '.xagent'
@@ -639,7 +673,20 @@ try {
     if ($sandboxed) {
         $slot = Get-SandboxSlot -TimeoutSec 60
         $wtName = [IO.Path]::GetFileName(((Get-Content -Raw -LiteralPath (Join-Path $wt '.git')) -replace '^gitdir:\s*', '').Trim())
-        $run = New-SandboxRun -Slot $slot -Runtime $runtime -Repo $Repo -Worktree $wt -WtName $wtName -ReadOnly:$readOnly
+        $runArgs = @{
+            Slot     = $slot
+            Runtime  = $runtime
+            Repo     = $Repo
+            Worktree = $wt
+            WtName   = $wtName
+            ReadOnly = $readOnly
+        }
+        if ($null -ne $envLinks) {
+            $runArgs.EnvPaths = $envLinks.envPaths
+            $runArgs.ExtraEnv = $envLinks.extraEnv
+            $runArgs.PathSuffix = $envLinks.pathSuffix
+        }
+        $run = New-SandboxRun @runArgs
         $sandboxExe = "$($run.runtimeLetter):\$($run.runtimeVersion)\node.exe"
         $sandboxArgs = [string[]](@("$($run.runtimeLetter):\$($run.runtimeVersion)\index.js") + $cursorArgs)
         $h = Start-SandboxProcess -Run $run -Exe $sandboxExe -Arguments $sandboxArgs -StdoutPath $stdoutF -StderrPath $stderrF
@@ -701,6 +748,12 @@ if ($sandboxed -and $null -ne $run) {
         patched        = [bool]$run.patched
     }
 }
+if ($null -ne $envLinks) {
+    foreach ($envNote in @($envLinks.notes)) {
+        if ($null -ne $envNote) { $sandboxNotes += [string]$envNote }
+    }
+}
+
 $flatNotes = New-Object System.Collections.Generic.List[string]
 foreach ($note in @($sandboxNotes)) {
     if ($null -eq $note) { continue }
@@ -738,7 +791,9 @@ if (-not $result -and $finalText) {
     }
 }
 
-$changes = @(& git -C $wt status --porcelain --untracked-files=all 2>$null | Where-Object { $_ -notmatch '\.xagent/' })
+$changes = @(& git -C $wt status --porcelain --untracked-files=all 2>$null | Where-Object {
+    $_ -notmatch '\.xagent/' -and ($_ -replace '^.. ', '') -notmatch '(^|/)\.venv/?$'
+})
 $diffStat = (& git -C $wt diff --shortstat 2>$null) -join ' '
 $stderrTail = if (Test-Path $stderrF) {
     ((Get-Content -LiteralPath $stderrF | Where-Object { $_ -notmatch 'logging before google.Init' }) | Select-Object -Last 5) -join "`n"
