@@ -767,18 +767,42 @@ function Assert-SandboxOutsideProfile {
     }
 }
 
+function Get-SandboxRunExtraEnv([hashtable]$ExtraEnv, [string]$Letter, [bool]$WithWorktree) {
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            if ([string]::Equals([string]$key, 'XAGENT_WORKTREE', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'sandbox: extra environment variable XAGENT_WORKTREE is set by New-SandboxRun'
+            }
+        }
+    }
+    $result = @{}
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            $result[$key] = $ExtraEnv[$key]
+        }
+    }
+    if ($WithWorktree) {
+        $result['XAGENT_WORKTREE'] = "$($Letter):\"
+    }
+    return $result
+}
+
 function Get-SandboxEnvironment {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Slot,
-        [AllowNull()][AllowEmptyCollection()][object[]]$ReadList
+        [AllowNull()][AllowEmptyCollection()][object[]]$ReadList,
+        [AllowNull()][hashtable]$ExtraEnv,
+        [AllowNull()][AllowEmptyCollection()][string[]]$PathSuffix
     )
     # SandboxNative.cs sorts the block. The names are the whole environment the child receives.
     $list = New-Object System.Collections.Generic.List[string]
+    $reserved = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($name in @('SystemRoot', 'windir', 'SystemDrive', 'ProgramData', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS')) {
         $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         if ($null -eq $value) { $value = '' }
         $list.Add("${name}=${value}")
+        $null = $reserved.Add($name)
     }
 
     $pathValue = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd'
@@ -792,21 +816,49 @@ function Get-SandboxEnvironment {
             $pathValue = $pathValue + ';' + [string]$entryPath
         }
     }
+    if ($null -ne $PathSuffix) {
+        foreach ($suffix in @($PathSuffix)) {
+            if ([string]::IsNullOrWhiteSpace($suffix)) { continue }
+            $pathValue = $pathValue + ';' + [string]$suffix
+        }
+    }
     $list.Add("PATH=$pathValue")
+    $null = $reserved.Add('PATH')
     $list.Add('PSModulePath=C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules')
+    $null = $reserved.Add('PSModulePath')
 
     $homeDir = $Slot + ':\.xagent\sandbox\home'
     $tmp = $Slot + ':\.xagent\sandbox\tmp'
     $list.Add("USERPROFILE=$homeDir")
+    $null = $reserved.Add('USERPROFILE')
     $list.Add("HOME=$homeDir")
+    $null = $reserved.Add('HOME')
     $list.Add("APPDATA=$homeDir\AppData\Roaming")
+    $null = $reserved.Add('APPDATA')
     $list.Add("LOCALAPPDATA=$homeDir\AppData\Local")
+    $null = $reserved.Add('LOCALAPPDATA')
     $list.Add("TEMP=$tmp")
+    $null = $reserved.Add('TEMP')
     $list.Add("TMP=$tmp")
+    $null = $reserved.Add('TMP')
     $list.Add('CURSOR_INVOKED_AS=agent.cmd')
+    $null = $reserved.Add('CURSOR_INVOKED_AS')
     $list.Add("NODE_COMPILE_CACHE=$tmp\node-compile-cache")
+    $null = $reserved.Add('NODE_COMPILE_CACHE')
+
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            $name = [string]$key
+            if ($reserved.Contains($name)) {
+                throw "sandbox: extra environment variable $name is already set"
+            }
+            $null = $reserved.Add($name)
+            $list.Add("${name}=$([string]$ExtraEnv[$key])")
+        }
+    }
     Write-Output -NoEnumerate $list.ToArray()
 }
+
 
 function Get-WindowsBuild {
     return [int][Environment]::OSVersion.Version.Build
@@ -1162,6 +1214,7 @@ function Get-SandboxGrantList {
         [Parameter(Mandatory)][string]$RuntimeRoot,
         [Parameter(Mandatory)][string]$RuntimeVersion,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$ReadList,
+        [AllowNull()][AllowEmptyCollection()][object[]]$EnvPaths,
         [switch]$ReadOnly
     )
     if ([string]::IsNullOrEmpty($WtName) -or $WtName -eq '.' -or $WtName -eq '..' -or $WtName.Contains('\') -or $WtName.Contains('/')) {
@@ -1214,6 +1267,28 @@ function Get-SandboxGrantList {
                 foreach ($ancestor in $chain) {
                     Add-SandboxGrantRow $rows $seen $ancestor 'RA'
                 }
+            }
+        }
+    }
+    if ($null -ne $EnvPaths) {
+        foreach ($item in @($EnvPaths)) {
+            if ($null -eq $item) { continue }
+            $pathRaw = Get-ObjectProperty $item 'path'
+            if ($null -eq $pathRaw) { $pathRaw = '' }
+            $project = Get-ObjectProperty $item 'project'
+            $resolved = Resolve-SandboxReadEntry @{ path = [string]$pathRaw }
+            if ($null -ne $resolved.reason) {
+                $tail = "run -SandboxEnv -Repo $Repo -Apply"
+                if (-not [string]::IsNullOrEmpty([string]$project)) {
+                    $tail = $tail + " -Rebuild $project"
+                }
+                throw "sandbox: environment path '$pathRaw' $($resolved.reason); $tail"
+            }
+            $entryPath = [string]$resolved.path
+            Add-SandboxGrantRow $rows $seen $entryPath '(OI)(CI)RX'
+            $envAncestors = Get-SandboxGrantAncestors $entryPath
+            foreach ($ancestor in $envAncestors) {
+                Add-SandboxGrantRow $rows $seen $ancestor 'RA'
             }
         }
     }
@@ -1740,6 +1815,9 @@ function New-SandboxRun {
         [Parameter(Mandatory)][string]$Repo,
         [Parameter(Mandatory)][string]$Worktree,
         [Parameter(Mandatory)][string]$WtName,
+        [AllowNull()][AllowEmptyCollection()][object[]]$EnvPaths,
+        [AllowNull()][hashtable]$ExtraEnv,
+        [AllowNull()][AllowEmptyCollection()][string[]]$PathSuffix,
         [switch]$ReadOnly
     )
 
@@ -1775,6 +1853,7 @@ function New-SandboxRun {
         RuntimeVersion = $runtimeVersion
         ReadList = $read
     }
+    if ($null -ne $EnvPaths) { $grantArgs['EnvPaths'] = $EnvPaths }
     if ($ReadOnly) { $grantArgs['ReadOnly'] = $true }
     $fresh = Get-SandboxGrantList @grantArgs
 
@@ -1857,7 +1936,15 @@ function New-SandboxRun {
     }
     Invoke-SubstMap -Letter $letterKey -Target $worktreeFull
 
-    $envVars = Get-SandboxEnvironment -Slot $letter -ReadList $read
+    $withWorktree = (@($EnvPaths | Where-Object { $null -ne $_ }).Count -gt 0)
+    $mergedExtra = Get-SandboxRunExtraEnv -ExtraEnv $ExtraEnv -Letter $letter -WithWorktree $withWorktree
+    $envParams = @{
+        Slot = $letter
+        ReadList = $read
+    }
+    if ($mergedExtra.Count -gt 0) { $envParams['ExtraEnv'] = $mergedExtra }
+    if ($null -ne $PathSuffix) { $envParams['PathSuffix'] = $PathSuffix }
+    $envVars = Get-SandboxEnvironment @envParams
     return [pscustomobject]@{
         slot = $letter
         container = $Slot.container
@@ -2470,4 +2557,4 @@ function Invoke-SandboxCanary {
     }
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxCanary
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxCanary, Resolve-SandboxReadEntry

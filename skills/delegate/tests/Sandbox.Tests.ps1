@@ -3344,3 +3344,239 @@ exit 0
         }
     }
 }
+
+Describe 'Sandbox environment paths' {
+    BeforeAll {
+        $script:EpRoot = Join-Path $TestDrive 'envpaths-root'
+        $env:XAGENT_SANDBOX_ROOT = $script:EpRoot
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'envpaths-cursor'
+        New-Item -ItemType Directory -Force -Path $script:EpRoot, $env:XAGENT_CURSOR_ROOT | Out-Null
+        Import-Module $script:ModulePath -Force
+
+        $script:EpRepoParent = Join-Path $TestDrive 'envpaths-repos'
+        $script:EpRepoName = 'envrepo'
+        $script:EpRepo = Join-Path $script:EpRepoParent $script:EpRepoName
+        $script:EpWorktree = Join-Path $script:EpRepoParent ($script:EpRepoName + '.xagent\task-env')
+        $script:EpRuntime = Join-Path $TestDrive 'envpaths-runtime'
+        $script:EpVersion = 'env-ver'
+        $script:EpWtName = 'wt-env'
+        $git = Join-Path $script:EpRepo '.git'
+        foreach ($dir in @('objects', 'refs', 'worktrees\wt-env')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $git $dir) | Out-Null
+        }
+        Set-Content -LiteralPath (Join-Path $git 'HEAD') -Value 'x' -Encoding ascii
+        New-Item -ItemType Directory -Force -Path $script:EpWorktree, (Join-Path $script:EpRuntime $script:EpVersion) | Out-Null
+
+        $script:EpFixture = Join-Path $TestDrive 'envpaths-fixture'
+        $script:EpA = Join-Path $script:EpFixture 'a'
+        $script:EpB = Join-Path $script:EpA 'b'
+        $script:EpLeaf = Join-Path $script:EpB 'c'
+        New-Item -ItemType Directory -Force -Path $script:EpLeaf | Out-Null
+
+        function Resolve-EpPath([string]$Path) {
+            if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+            return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+        }
+
+        function Get-EpRowsUnder([object[]]$Rows, [string]$Root) {
+            $norm = Resolve-EpPath $Root
+            $prefix = $norm + '\'
+            foreach ($row in @($Rows)) {
+                if ([string]::Equals($row.path, $norm, [StringComparison]::OrdinalIgnoreCase)) { $row }
+                elseif ($row.path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $row }
+            }
+        }
+
+        function Format-EpRows($Rows) {
+            foreach ($row in @($Rows)) { '{0} | {1}' -f $row.path, $row.spec }
+        }
+    }
+
+    AfterAll {
+        $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'root'
+        $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor'
+        Import-Module $script:ModulePath -Force
+    }
+
+    It 'adds an environment path RX row and ancestor RA rows in order' {
+        $leaf = Resolve-EpPath $script:EpLeaf
+        $packed = InModuleScope Sandbox -Parameters @{
+            Repo = $script:EpRepo
+            Worktree = $script:EpWorktree
+            WtName = $script:EpWtName
+            RuntimeRoot = $script:EpRuntime
+            RuntimeVersion = $script:EpVersion
+            Leaf = $leaf
+        } {
+            param($Repo, $Worktree, $WtName, $RuntimeRoot, $RuntimeVersion, $Leaf)
+            Get-SandboxGrantList -Repo $Repo -Worktree $Worktree -WtName $WtName -RuntimeRoot $RuntimeRoot -RuntimeVersion $RuntimeVersion -ReadList $null -EnvPaths @(
+                $null
+                [pscustomobject]@{ path = $Leaf }
+            )
+        }
+        $under = @(Get-EpRowsUnder $packed $script:EpFixture)
+        $b = Resolve-EpPath $script:EpB
+        $a = Resolve-EpPath $script:EpA
+        $fixture = Resolve-EpPath $script:EpFixture
+        @(Format-EpRows $under) | Should -Be @(
+            "$leaf | (OI)(CI)RX"
+            "$b | RA"
+            "$a | RA"
+            "$fixture | RA"
+        )
+    }
+
+    It 'refuses a missing environment path with and without a project' {
+        $missing = Join-Path $TestDrive 'envpaths-missing-dir'
+        $withProj = InModuleScope Sandbox -Parameters @{
+            Repo = $script:EpRepo
+            Path = $missing
+        } {
+            param($Repo, $Path)
+            try {
+                Get-SandboxGrantList -Repo $Repo -Worktree 'D:\wt' -WtName 'w' -RuntimeRoot 'D:\rt' -RuntimeVersion 'v' -ReadList $null -EnvPaths @(
+                    [pscustomobject]@{ path = $Path; project = 'myproj' }
+                ) | Out-Null
+                return $null
+            } catch { return $_.Exception.Message }
+        }
+        $withProj | Should -Be "sandbox: environment path '$missing' does not exist; run -SandboxEnv -Repo $($script:EpRepo) -Apply -Rebuild myproj"
+
+        $plain = InModuleScope Sandbox -Parameters @{ Repo = $script:EpRepo; Path = $missing } {
+            param($Repo, $Path)
+            try {
+                Get-SandboxGrantList -Repo $Repo -Worktree 'D:\wt' -WtName 'w' -RuntimeRoot 'D:\rt' -RuntimeVersion 'v' -ReadList $null -EnvPaths @(
+                    [pscustomobject]@{ path = $Path }
+                ) | Out-Null
+                return $null
+            } catch { return $_.Exception.Message }
+        }
+        $plain | Should -Be "sandbox: environment path '$missing' does not exist; run -SandboxEnv -Repo $($script:EpRepo) -Apply"
+    }
+
+    It 'leaves grant rows unchanged when EnvPaths is omitted' {
+        $bare = InModuleScope Sandbox -Parameters @{
+            Repo = $script:EpRepo
+            Worktree = $script:EpWorktree
+            WtName = $script:EpWtName
+            RuntimeRoot = $script:EpRuntime
+            RuntimeVersion = $script:EpVersion
+        } {
+            param($Repo, $Worktree, $WtName, $RuntimeRoot, $RuntimeVersion)
+            $common = @{
+                Repo = $Repo
+                Worktree = $Worktree
+                WtName = $WtName
+                RuntimeRoot = $RuntimeRoot
+                RuntimeVersion = $RuntimeVersion
+                ReadList = $null
+            }
+            $without = Get-SandboxGrantList @common
+            $nullParam = Get-SandboxGrantList @common -EnvPaths $null
+            [pscustomobject]@{ Without = $without; NullParam = $nullParam }
+        }
+        @(Format-EpRows $bare.Without) | Should -Be @(Format-EpRows $bare.NullParam)
+    }
+
+    It 'sets XAGENT_WORKTREE through Get-SandboxRunExtraEnv without mutating the caller hashtable' {
+        $caller = @{ FOO = 'bar' }
+        $copyBefore = $caller.Clone()
+        $with = InModuleScope Sandbox -Parameters @{ Table = $caller.Clone() } {
+            param($Table)
+            Get-SandboxRunExtraEnv -ExtraEnv $Table -Letter 'S' -WithWorktree $true
+        }
+        $with['XAGENT_WORKTREE'] | Should -Be 'S:\'
+        $with['FOO'] | Should -Be 'bar'
+
+        $without = InModuleScope Sandbox {
+            Get-SandboxRunExtraEnv -ExtraEnv @{ FOO = 'bar' } -Letter 'S' -WithWorktree $false
+        }
+        $without.ContainsKey('XAGENT_WORKTREE') | Should -BeFalse
+        $caller.Keys | Should -Be $copyBefore.Keys
+        $caller['FOO'] | Should -Be 'bar'
+
+        $thrown = InModuleScope Sandbox {
+            try {
+                Get-SandboxRunExtraEnv -ExtraEnv @{ XAGENT_WORKTREE = 'X:\' } -Letter 'S' -WithWorktree $false | Out-Null
+                return $null
+            } catch { return $_.Exception.Message }
+        }
+        $thrown | Should -Be 'sandbox: extra environment variable XAGENT_WORKTREE is set by New-SandboxRun'
+    }
+
+    It 'exports Resolve-SandboxReadEntry' {
+        Get-Command -Module Sandbox -Name Resolve-SandboxReadEntry | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Sandbox extra environment' {
+    BeforeAll {
+        Import-Module $script:ModulePath -Force
+        $script:EnvBasePath = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd'
+
+        function Get-EnvMap([string[]]$Block) {
+            $map = @{}
+            foreach ($item in @($Block)) {
+                $pair = $item -split '=', 2
+                $map[$pair[0]] = $pair[1]
+            }
+            return $map
+        }
+    }
+
+    It 'appends PathSuffix after read-list addToPath entries and skips empty suffixes' {
+        $tool = Join-Path $TestDrive 'suffix-tool'
+        New-Item -ItemType Directory -Force -Path $tool | Out-Null
+        $toolPath = [IO.Path]::GetFullPath($tool).TrimEnd('\', '/')
+        $suffixA = Join-Path $TestDrive 'suffix-a'
+        $suffixB = Join-Path $TestDrive 'suffix-b'
+        New-Item -ItemType Directory -Force -Path $suffixA, $suffixB | Out-Null
+        $got = InModuleScope Sandbox -Parameters @{
+            Tool = $toolPath
+            SuffixA = $suffixA
+            SuffixB = $suffixB
+        } {
+            param($Tool, $SuffixA, $SuffixB)
+            $read = Test-SandboxReadList -Entries @([pscustomobject]@{ path = $Tool; addToPath = $true })
+            Get-SandboxEnvironment -Slot 'S' -ReadList $read -PathSuffix @($SuffixA, '   ', $SuffixB)
+        }
+        $map = Get-EnvMap $got
+        $map['PATH'] | Should -Be ($script:EnvBasePath + ';' + $toolPath + ';' + $suffixA + ';' + $suffixB)
+    }
+
+    It 'adds ExtraEnv names and refuses overrides of built-in names' {
+        $got = InModuleScope Sandbox {
+            Get-SandboxEnvironment -Slot 'S' -ReadList $null -ExtraEnv @{ UV_FROZEN = 1; MY_FLAG = 'yes' }
+        }
+        $map = Get-EnvMap $got
+        $map['UV_FROZEN'] | Should -Be '1'
+        $map['MY_FLAG'] | Should -Be 'yes'
+
+        foreach ($case in @(
+                @{ Key = 'PATH'; Spell = 'PATH' }
+                @{ Key = 'path'; Spell = 'path' }
+            )) {
+            $message = InModuleScope Sandbox -Parameters @{ Key = $case.Key } {
+                param($Key)
+                try {
+                    $extra = @{}
+                    $extra[$Key] = 'x'
+                    Get-SandboxEnvironment -Slot 'S' -ReadList $null -ExtraEnv $extra | Out-Null
+                    return $null
+                } catch { return $_.Exception.Message }
+            }
+            $message | Should -Be "sandbox: extra environment variable $($case.Spell) is already set"
+        }
+    }
+
+    It 'matches the baseline environment when neither extra parameter is passed' {
+        $today = InModuleScope Sandbox {
+            Get-SandboxEnvironment -Slot 'S' -ReadList $null
+        }
+        $again = InModuleScope Sandbox {
+            Get-SandboxEnvironment -Slot 'S' -ReadList $null -ExtraEnv $null -PathSuffix $null
+        }
+        @($today) | Should -Be @($again)
+    }
+}
+
