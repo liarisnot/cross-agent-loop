@@ -53,3 +53,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T02:06:45Z [dismiss] sandbox-env-d3-sy-p9-r1: not run — waived by the user; style was reviewed at d2 and the re-check covered readiness and codebase details only
 - 2026-11-19T02:06:47Z [gate] design-locked: "Lock the design (Recommended)"
 - 2026-11-19T02:06:48Z [stage] design-review -> plan
+- 2026-11-19T02:58:09Z [decision] merged main into feature/sandbox-env (Cursor self-update and review-round fixes, name cleanup)
