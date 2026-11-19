@@ -24,3 +24,24 @@ What the build settled or changed relative to the locked design (`docs/designs/s
 5. `-Cleanup -Discard` of that worker left `.envs` intact: 46,230 files before and after.
 6. `-SandboxCheck -Repo` canary: all 13 rows pass.
 Not run live: the older-lockfile case and the review-lens case (covered by unit tests).
+
+## Drift check findings accepted as built
+
+The sign-off drift check (`reviews/raw/sandbox-env-s1-dr.md`) also listed these. Each was decided in a task file during the build:
+
+- **Linking notes.** Linking adds notes for a missing project folder, a missing environment folder and a `.venv` that is a real folder or a non-junction link, and still passes `.envs\bin`, the `uv` variables and `XAGENT_WORKTREE` when a ready project could not be linked.
+- **Phase end.** The lead runs `-SandboxEnv` (and `-Apply` if needed) before the phase test, to decide whether the repo has Python projects and to make sure the environments are ready.
+- **`-Rebuild`.** Throws (exit 1) for a project not found at the ref or `unsupported`; it rebuilds only the environment of the project's current hash, and an older one is left to the 14-day prune.
+- **Prune.** Removes the `envs` entry and lists the environment in `pruned` even if deleting its folder fails, with a warning. It deletes the interpreter's real folder; `uv` recreates the minor-version junction on the next install.
+- **`-SandboxRun`.** A failed worktree removal after the run does not change the result (the run's own outcome is what the lead needs).
+- **Estimate.** Each package counts its largest matching wheel, not the sum of several matching wheels (one wheel is installed). `envsBytes` and the size in `proposal.text` are the sum of recorded environment sizes, not a walk of `.envs`. An interpreter counts as installed when any `pythons` key has the same major.minor (the request names a major.minor).
+- **Interpreter request.** The first clause of `requires-python` that matches a known form wins (later clauses are tried when the first is not one of them); `>=X.Y.Z` gives `X.Y`.
+- **`uv` lookup.** `Get-SandboxUvPath` is evaluated on every call (no cache).
+- **Build failure text.** The last 20 lines of the failing step's stderr followed by its stdout.
+- **`--python <exact version>`** is passed to `uv lock` and `uv sync`, so the environment uses the interpreter the build installed.
+- **`.envs` lock timeout.** `-Apply` waits up to 1800 s (builds take minutes); linking waits 60 s.
+- **`doctor`'s `sandbox-env` check** uses the readiness gate's rule: `unsupported` projects for other reasons do not fail it, and the detail lists only blocking projects.
+- **Refused environment path message.** Says `run -SandboxEnv -Repo <repo> -Apply` (plus `-Rebuild <project>` when the path belongs to a project).
+- **Discovery.** A lock at the repo root does not cover projects in subfolders; a lock in a subfolder covers that folder's `pyproject.toml` and `requirements*.txt` files below it.
+- **Unlinking** removes junctions in the project folders at the worktree's `HEAD` and the root; if `HEAD` cannot be read, only the root. `Remove-Worktree`'s recursive delete does not follow junctions in PowerShell 7.
+- **Canary.** Links no environments, so it has nothing to unlink; its fallback delete skips reparse points.
