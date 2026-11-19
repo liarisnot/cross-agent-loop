@@ -61,3 +61,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T03:44:11Z [gate] plan-approved: "Approve the plan (Recommended)"
 - 2026-11-19T03:44:11Z [decision] checkin: on-problems
 - 2026-11-19T03:44:12Z [stage] plan -> build
+- 2026-11-19T04:04:14Z [fix-up] sbx-command: 1 file, 0 lines — removed a stray probe file Sandbox.psm1.testwrite the worker left
