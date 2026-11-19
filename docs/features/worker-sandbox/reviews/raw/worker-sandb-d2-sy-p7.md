@@ -28,7 +28,7 @@ No round-1 style finding that the resolution fixed or deliberately decided is re
 
 ### Finding S2 — "Proven" overruns the evidence
 - **Severity:** Nit
-- **Affected Scope:** Open Questions, "Which host services MyApp needs" (line ~76).
+- **Affected Scope:** Open Questions, "Which host services the first outside project needs" (line ~76).
 - **Style Rationale:** "the mechanism is proven (see 'Host services')" — "proven" is a strong word for a single probe run on one machine. The Host services section itself is more careful ("the 2026-11-14 probe showed …").
 - **Recommended action (CALIBRATE):** "the mechanism is demonstrated by the probe (see 'Host services')."
 

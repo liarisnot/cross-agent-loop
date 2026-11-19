@@ -563,11 +563,14 @@ Describe 'unsandboxed delegate' {
     }
 
     It 'runs -NoSandbox with sandboxed false and skillDir' -Skip:$script:NsSkip {
+        $argsFile = Join-Path $TestDrive 'ns-cursor-args.json'
+        $envMap = Get-ChildEnv $script:FakeCursor $script:SafeRoot $script:NsLog
+        $envMap['FAKE_CURSOR_ARGS_FILE'] = $argsFile
         $r = Invoke-DelegateChild -ArgumentList @(
             '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
             '-Repo', $script:NsRepo, '-TaskId', 'ns-worker', '-TaskFile', $script:TaskFile,
             '-TimeoutSec', '120', '-NoSandbox'
-        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SafeRoot $script:NsLog)
+        ) -ExtraEnv $envMap
         $because = Format-DelegateResult $r
         @($r.JsonLines).Count | Should -Be 1 -Because $because
         $r.ExitCode | Should -Be 0 -Because $because
@@ -583,6 +586,36 @@ Describe 'unsandboxed delegate' {
         $last.sandboxed | Should -BeFalse
         (ConvertTo-LaunchFullPath $last.skillDir) | Should -Be $script:SkillDir
         $last.taskId | Should -Be 'ns-worker'
+        Test-Path -LiteralPath $argsFile | Should -BeTrue -Because $because
+        $recorded = @(Get-Content -Raw -LiteralPath $argsFile | ConvertFrom-Json)
+        $recorded | Should -Contain '--disable-auto-update' -Because $because
+    }
+
+    It 'removes worktree on -Cleanup when nested paths exceed MAX_PATH' -Skip:$script:NsSkip {
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:NsRepo, '-TaskId', 'ns-worker', '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '120', '-NoSandbox'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SafeRoot $script:NsLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        Invoke-LaunchGit -ArgumentList @('-C', $script:NsRepo, 'merge', '--ff-only', 'xagent/ns-worker')
+        $wt = Get-LaunchWorktree $script:NsRepo 'ns-worker'
+        $seg = 'a' * 50
+        $nested = $wt
+        foreach ($i in 1..6) { $nested = Join-Path $nested $seg }
+        $marker = [IO.Path]::GetFullPath((Join-Path $nested 'marker.txt'))
+        $marker.Length | Should -BeGreaterThan 260
+        New-Item -Path ('\\?\' + $marker) -ItemType File -Force | Out-Null
+        $cr = Invoke-DelegateChild -ArgumentList @(
+            '-Cleanup', '-Repo', $script:NsRepo, '-TaskId', 'ns-worker'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SafeRoot $script:NsLog)
+        $cbecause = Format-DelegateResult $cr
+        @($cr.JsonLines).Count | Should -Be 1 -Because $cbecause
+        $cr.ExitCode | Should -Be 0 -Because $cbecause
+        $cr.Json.ok | Should -BeTrue -Because $cbecause
+        Test-Path -LiteralPath $wt | Should -BeFalse -Because $cbecause
     }
 }
 
