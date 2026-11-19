@@ -534,7 +534,7 @@ function Test-SandboxProjectStale {
     foreach ($key in @($Index.envs.Keys)) {
         if ($key -ceq $Hash) { continue }
         $entry = $Index.envs[$key]
-        if ($entry -isnot [hashtable]) { continue }
+        if ($entry -is [string] -or $entry -isnot [System.Collections.IDictionary]) { continue }
         $projs = $entry['projects']
         if ($projs -isnot [System.Array]) { continue }
         foreach ($p in $projs) {
@@ -890,7 +890,7 @@ function Get-SandboxEnvsBytesTotal {
     $sum = [long]0
     foreach ($key in @($Index.envs.Keys)) {
         $entry = $Index.envs[$key]
-        if ($entry -isnot [hashtable]) { continue }
+        if ($entry -is [string] -or $entry -isnot [System.Collections.IDictionary]) { continue }
         $b = $entry['bytes']
         if ($b -is [int] -or $b -is [long] -or $b -is [double] -or $b -is [decimal]) {
             $sum += [long]$b
@@ -912,8 +912,8 @@ function Get-SandboxEnvReport {
     $read = Read-SandboxEnvsIndex -EnvsRoot $envsRoot
     $index = $read.index
 
-    $discovered = Get-SandboxEnvProjects -Repo $Repo -Commit $commit
-    $statuses = Get-SandboxEnvStatuses -Projects $discovered -Index $index -EnvsRoot $envsRoot -UvPath $uvPath
+    $discovered = @(Get-SandboxEnvProjects -Repo $Repo -Commit $commit); if ($null -eq $discovered) { $discovered = @() }
+    if ($discovered.Count -eq 0) { $statuses = @() } else { $statuses = @(Get-SandboxEnvStatuses -Projects $discovered -Index $index -EnvsRoot $envsRoot -UvPath $uvPath) }
 
     $projectOut = [System.Collections.Generic.List[object]]::new()
     foreach ($st in $statuses) {
@@ -1262,6 +1262,445 @@ function Add-SandboxEnvBuildFailure {
         })
 }
 
+
+function Get-SandboxEnvBuiltTime {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return [DateTimeOffset]::MinValue }
+    try {
+        return [DateTimeOffset]::Parse($Text, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    } catch {
+        return [DateTimeOffset]::MinValue
+    }
+}
+
+function Get-SandboxEnvLinkedStampTime {
+    param([string]$StampPath)
+
+    if (-not (Test-Path -LiteralPath $StampPath)) { return [DateTimeOffset]::MinValue }
+    $item = Get-Item -LiteralPath $StampPath -Force
+    return [DateTimeOffset]::new($item.LastWriteTimeUtc, [TimeSpan]::Zero)
+}
+
+function Get-SandboxEnvPruneReferenceTime {
+    param(
+        [string]$EnvsRoot,
+        [string]$EnvName,
+        [hashtable]$Entry
+    )
+
+    $stampPath = Join-Path (Join-Path $EnvsRoot 'linked') $EnvName
+    $builtText = Get-SandboxDictValue -Object $Entry -Key 'built'
+    if ($builtText -is [DateTimeOffset]) {
+        $built = $builtText
+    } elseif ($builtText -is [DateTime]) {
+        $built = [DateTimeOffset]::new($builtText.ToUniversalTime(), [TimeSpan]::Zero)
+    } else {
+        $built = Get-SandboxEnvBuiltTime -Text $(if ($builtText -is [string]) { $builtText } else { $null })
+    }
+    $linked = Get-SandboxEnvLinkedStampTime -StampPath $stampPath
+    if ($linked -gt $built) { return $linked }
+    return $built
+}
+
+function Test-SandboxEnvPruneOld {
+    param([DateTimeOffset]$Reference)
+
+    $cutoff = [DateTimeOffset]::UtcNow.AddDays(-14)
+    return ($Reference -lt $cutoff)
+}
+
+function Get-SandboxEnvCurrentHashes {
+    param([object[]]$Projects)
+
+    $set = @{}
+    foreach ($p in @($Projects)) {
+        $h = Get-SandboxDictValue -Object $p -Key 'hash'
+        if ($h -is [string] -and -not [string]::IsNullOrEmpty($h)) { $set[$h] = $true }
+    }
+    return $set
+}
+
+function Get-SandboxEnvPythonVersionsInUse {
+    param([hashtable]$Index)
+
+    $used = @{}
+    foreach ($key in @($Index.envs.Keys)) {
+        $entry = $Index.envs[$key]
+        if ($entry -is [string] -or $entry -isnot [System.Collections.IDictionary]) { continue }
+        $py = Get-SandboxDictValue -Object $entry -Key 'python'
+        if ($py -is [string] -and -not [string]::IsNullOrEmpty($py)) { $used[$py] = $true }
+    }
+    return $used
+}
+
+function Invoke-SandboxEnvPrune {
+    param(
+        [hashtable]$Index,
+        [string]$EnvsRoot,
+        [object[]]$Projects,
+        [AllowNull()][string]$Warning
+    )
+
+    $current = Get-SandboxEnvCurrentHashes -Projects $Projects
+    $prunedList = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($hash in @($Index.envs.Keys)) {
+        if ($current.ContainsKey($hash)) { continue }
+        $entry = $Index.envs[$hash]
+        if ($entry -is [string] -or $entry -isnot [System.Collections.IDictionary]) { continue }
+        $name = Get-SandboxDictValue -Object $entry -Key 'name'
+        if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { continue }
+
+        $refTime = Get-SandboxEnvPruneReferenceTime -EnvsRoot $EnvsRoot -EnvName $name -Entry $entry
+        if (-not (Test-SandboxEnvPruneOld -Reference $refTime)) { continue }
+
+        $bytesVal = Get-SandboxDictValue -Object $entry -Key 'bytes'
+        $bytes = [long]0
+        if ($bytesVal -is [int] -or $bytesVal -is [long] -or $bytesVal -is [double] -or $bytesVal -is [decimal]) {
+            $bytes = [long]$bytesVal
+        }
+
+        $deleteFailed = $false
+        foreach ($path in @(
+                (Join-Path $EnvsRoot $name),
+                (Join-Path (Join-Path $EnvsRoot 'work') $name),
+                (Join-Path (Join-Path $EnvsRoot 'linked') $name)
+            )) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            try {
+                Remove-SandboxEnvPath -Path $path
+                if (Test-Path -LiteralPath $path) { $deleteFailed = $true }
+            } catch {
+                $deleteFailed = $true
+            }
+        }
+
+        [void]$Index.envs.Remove($hash)
+        $prunedList.Add([ordered]@{ env = $name; bytes = $bytes })
+        if ($deleteFailed) {
+            $Warning = Add-SandboxEnvWarningText -Existing $Warning -Message "environment $name could not be fully removed"
+        }
+    }
+
+    foreach ($hash in @($Index.failed.Keys)) {
+        if (-not $current.ContainsKey($hash)) { [void]$Index.failed.Remove($hash) }
+    }
+
+    $inUse = Get-SandboxEnvPythonVersionsInUse -Index $Index
+    foreach ($ver in @($Index.pythons.Keys)) {
+        if ($inUse.ContainsKey($ver)) { continue }
+        $folder = $Index.pythons[$ver]
+        if ($folder -isnot [string] -or [string]::IsNullOrWhiteSpace($folder)) { continue }
+        Remove-SandboxEnvPath -Path $folder
+        [void]$Index.pythons.Remove($ver)
+    }
+
+    return @{
+        pruned  = $prunedList
+        warning = $Warning
+    }
+}
+
+function Test-SandboxEnvProjectBlocks {
+    param(
+        [string]$Status,
+        [AllowNull()][string]$Reason
+    )
+
+    if ($Status -ceq 'missing' -or $Status -ceq 'stale' -or $Status -ceq 'install-failed') { return $true }
+    if ($Status -ceq 'unsupported' -and $Reason -ceq 'uv-missing') { return $true }
+    return $false
+}
+
+function Get-SandboxEnvReadyMessageStatus {
+    param(
+        [string]$Status,
+        [AllowNull()][string]$Reason,
+        [bool]$UvCopyMissing
+    )
+
+    if ($UvCopyMissing) { return 'uv-copy-missing' }
+    return $Status
+}
+
+function Test-SandboxEnvReady {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Commit
+    )
+
+    $report = Get-SandboxEnvReport -Repo $Repo -Ref $Commit
+    $envsRoot = Get-SandboxEnvsRoot -Repo $Repo
+    $uvExe = Join-Path (Join-Path $envsRoot 'bin') 'uv.exe'
+    $uvCopyMissing = $false
+    $hasReady = $false
+    foreach ($p in @($report.projects)) {
+        if ([string]$p.status -ceq 'ready') { $hasReady = $true; break }
+    }
+    if ($hasReady -and -not (Test-Path -LiteralPath $uvExe)) { $uvCopyMissing = $true }
+
+    $projectsOut = [System.Collections.Generic.List[object]]::new()
+    $blockers = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in @($report.projects)) {
+        $status = [string]$p.status
+        $reason = $p.reason
+        $blocks = Test-SandboxEnvProjectBlocks -Status $status -Reason $reason
+        $uvBlock = $false
+        if ($uvCopyMissing -and $status -ceq 'ready') {
+            $blocks = $true
+            $uvBlock = $true
+        }
+        $outStatus = Get-SandboxEnvReadyMessageStatus -Status $status -Reason $reason -UvCopyMissing $uvBlock
+        $projectsOut.Add([ordered]@{
+                project = [string]$p.project
+                kind    = [string]$p.kind
+                status  = $outStatus
+                reason  = $reason
+                env     = $p.env
+                python  = $p.python
+            })
+        if ($blocks) {
+            $blockers.Add([ordered]@{ project = [string]$p.project; status = $outStatus })
+        }
+    }
+
+    $ready = ($blockers.Count -eq 0)
+    $message = $null
+    if (-not $ready) {
+        $parts = [System.Collections.Generic.List[string]]::new()
+        foreach ($b in $blockers) { $parts.Add("$($b.project) ($($b.status))") }
+        $base = "sandbox: environment not ready: $($parts -join ', '); run -SandboxEnv -Repo $Repo -Base $Commit -Apply."
+        $propText = $null
+        if ($null -ne $report.proposal) {
+            $propText = Get-SandboxDictValue -Object $report.proposal -Key 'text'
+        }
+        if ($propText -is [string] -and -not [string]::IsNullOrEmpty($propText)) {
+            $message = "$base $propText"
+        } else {
+            $message = $base
+        }
+    }
+
+    return [ordered]@{
+        ready     = $ready
+        projects  = @($projectsOut)
+        message   = $message
+        proposal  = $report.proposal
+    }
+}
+
+function Get-SandboxEnvProjectLinkPath {
+    param(
+        [string]$Worktree,
+        [string]$Project
+    )
+
+    if ([string]::Equals($Project, '.', [StringComparison]::Ordinal)) {
+        return Join-Path $Worktree '.venv'
+    }
+    $rel = $Project -replace '/', [IO.Path]::DirectorySeparatorChar
+    return Join-Path (Join-Path $Worktree $rel) '.venv'
+}
+
+function Test-SandboxEnvLinkItemIsJunction {
+    param([string]$LinkPath)
+
+    if (-not (Test-Path -LiteralPath $LinkPath)) { return $false }
+    $item = Get-Item -LiteralPath $LinkPath -Force
+    return ($item.LinkType -ceq 'Junction')
+}
+
+function Set-SandboxEnvLinkedStamp {
+    param(
+        [string]$EnvsRoot,
+        [string]$EnvName
+    )
+
+    $linkedDir = Join-Path $EnvsRoot 'linked'
+    if (-not (Test-Path -LiteralPath $linkedDir)) {
+        New-Item -ItemType Directory -Force -Path $linkedDir | Out-Null
+    }
+    $stamp = Join-Path $linkedDir $EnvName
+    if (-not (Test-Path -LiteralPath $stamp)) {
+        New-Item -ItemType File -Force -Path $stamp | Out-Null
+    }
+    (Get-Item -LiteralPath $stamp -Force).LastWriteTimeUtc = [DateTime]::UtcNow
+}
+
+function Get-SandboxEnvIndexEntryByName {
+    param(
+        [hashtable]$Index,
+        [string]$EnvName
+    )
+
+    foreach ($key in @($Index.envs.Keys)) {
+        $entry = $Index.envs[$key]
+        if ($entry -is [string] -or $entry -isnot [System.Collections.IDictionary]) { continue }
+        $name = Get-SandboxDictValue -Object $entry -Key 'name'
+        if ($name -is [string] -and [string]::Equals($name, $EnvName, [StringComparison]::Ordinal)) {
+            return @{ hash = $key; entry = $entry }
+        }
+    }
+    return $null
+}
+
+function Add-SandboxEnvLinksCore {
+    param(
+        [string]$Repo,
+        [string]$Worktree,
+        [object[]]$Projects,
+        [string]$EnvsRoot
+    )
+
+    $read = Read-SandboxEnvsIndex -EnvsRoot $EnvsRoot
+    $index = $read.index
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $linkedEnvs = [System.Collections.Generic.List[object]]::new()
+    $seenEnv = @{}
+
+    foreach ($p in @($Projects)) {
+        if ([string]$p.status -cne 'ready') { continue }
+        $project = [string]$p.project
+        $envName = [string]$p.env
+        if ([string]::IsNullOrWhiteSpace($envName)) { continue }
+
+        Set-SandboxEnvLinkedStamp -EnvsRoot $EnvsRoot -EnvName $envName
+
+        $projectDir = if ([string]::Equals($project, '.', [StringComparison]::Ordinal)) {
+            $Worktree
+        } else {
+            Join-Path $Worktree ($project -replace '/', [IO.Path]::DirectorySeparatorChar)
+        }
+        if (-not (Test-Path -LiteralPath $projectDir)) {
+            $notes.Add("$project is not in the worktree; environment not linked")
+            continue
+        }
+
+        $target = Join-Path $EnvsRoot $envName
+        if (-not (Test-Path -LiteralPath $target)) {
+            $notes.Add("$project environment $envName is missing; environment not linked")
+            continue
+        }
+
+        $link = Get-SandboxEnvProjectLinkPath -Worktree $Worktree -Project $project
+        $linkParent = Split-Path -Parent $link
+        if (-not (Test-Path -LiteralPath $linkParent)) {
+            New-Item -ItemType Directory -Force -Path $linkParent | Out-Null
+        }
+
+        if (Test-Path -LiteralPath $link) {
+            if (Test-SandboxEnvLinkItemIsJunction -LinkPath $link) {
+                try { [IO.Directory]::Delete($link, $false) } catch { $notes.Add("$project junction could not be replaced; environment not linked"); continue }
+            } else {
+                $notes.Add(".venv in $project is a real folder; environment not linked")
+                continue
+            }
+        }
+
+        try {
+            $null = New-Item -ItemType Junction -Path $link -Target $target -Force
+        } catch {
+            $notes.Add("$project junction could not be created; environment not linked")
+            continue
+        }
+
+        if (-not $seenEnv.ContainsKey($envName)) {
+            $seenEnv[$envName] = $true
+            $linkedEnvs.Add([ordered]@{ env = $envName; project = $project })
+        }
+    }
+
+    $envPaths = [System.Collections.Generic.List[object]]::new()
+    $seenInterp = @{}
+    foreach ($le in $linkedEnvs) {
+        $envName = [string]$le.env
+        $envPaths.Add([ordered]@{ path = (Join-Path $EnvsRoot $envName); project = [string]$le.project })
+        $found = Get-SandboxEnvIndexEntryByName -Index $index -EnvName $envName
+        if ($null -eq $found) { continue }
+        $pyVer = Get-SandboxDictValue -Object $found.entry -Key 'python'
+        if ($pyVer -isnot [string] -or [string]::IsNullOrEmpty($pyVer)) { continue }
+        if (-not $index.pythons.ContainsKey($pyVer)) { continue }
+        $interpFolder = [string]$index.pythons[$pyVer]
+        if ([string]::IsNullOrWhiteSpace($interpFolder)) { continue }
+        if ($seenInterp.ContainsKey($interpFolder)) { continue }
+        $seenInterp[$interpFolder] = $true
+        $envPaths.Add([ordered]@{ path = $interpFolder; project = $null })
+    }
+    $envPaths.Add([ordered]@{ path = (Join-Path $envsRoot 'bin'); project = $null })
+
+    return [ordered]@{
+        envPaths   = @($envPaths)
+        pathSuffix = @($envsRoot + '\bin')
+        extraEnv   = @{
+            UV_FROZEN              = '1'
+            UV_NO_SYNC             = '1'
+            UV_PYTHON_DOWNLOADS    = 'never'
+        }
+        notes      = @($notes)
+    }
+}
+
+function Add-SandboxEnvLinks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][object[]]$Projects
+    )
+
+    $hasReady = $false
+    foreach ($p in @($Projects)) {
+        if ([string]$p.status -ceq 'ready') { $hasReady = $true; break }
+    }
+    if (-not $hasReady) {
+        return [ordered]@{
+            envPaths   = @()
+            pathSuffix = @()
+            extraEnv   = @{}
+            notes      = @()
+        }
+    }
+
+    $envsRoot = Get-SandboxEnvsRoot -Repo $Repo
+    $lockName = Get-SandboxEnvsLockName -EnvsRoot $envsRoot
+    $timeoutMessage = "sandbox: timed out waiting for -SandboxEnv -Apply to finish on $envsRoot"
+    return Invoke-SandboxLocked -Name $lockName -TimeoutSec 60 -TimeoutMessage $timeoutMessage -ScriptBlock {
+        Add-SandboxEnvLinksCore -Repo $Repo -Worktree $Worktree -Projects $Projects -EnvsRoot $envsRoot
+    }
+}
+
+function Remove-SandboxEnvLinks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Worktree
+    )
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $candidates.Add((Join-Path $Worktree '.venv'))
+    try {
+        $commit = Get-SandboxGitCommit -Repo $Worktree -Ref 'HEAD'
+        foreach ($p in @(Get-SandboxEnvProjects -Repo $Worktree -Commit $commit)) {
+            $candidates.Add((Get-SandboxEnvProjectLinkPath -Worktree $Worktree -Project ([string]$p.project)))
+        }
+    } catch {
+    }
+
+    $removed = 0
+    foreach ($path in $candidates) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if (-not (Test-SandboxEnvLinkItemIsJunction -LinkPath $path)) { continue }
+        try {
+            [IO.Directory]::Delete($path, $false)
+            $removed++
+        } catch {
+            continue
+        }
+    }
+    return $removed
+}
+
 function Invoke-SandboxEnvApplyCore {
     [CmdletBinding()]
     param(
@@ -1428,7 +1867,15 @@ function Invoke-SandboxEnvApplyCore {
                     $failed = $true
                     $errorText = Get-SandboxUvStreamError $probe
                 } else {
-                    $index.pythons[$exact] = (Split-Path -Parent $py)
+                    # uv python find returns the minor-version junction (cpython-3.12-...); record the real folder,
+                    # which pyvenv.cfg's home names and which a sandbox grant must cover.
+                    $interpDir = Split-Path -Parent $py
+                    $interpItem = Get-Item -LiteralPath $interpDir -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $interpItem -and $interpItem.LinkType) {
+                        $resolved = [IO.Directory]::ResolveLinkTarget($interpDir, $true)
+                        if ($null -ne $resolved) { $interpDir = $resolved.FullName }
+                    }
+                    $index.pythons[$exact] = $interpDir
                 }
             }
         }
@@ -1499,6 +1946,10 @@ function Invoke-SandboxEnvApplyCore {
             })
     }
 
+    $pruneResult = Invoke-SandboxEnvPrune -Index $index -EnvsRoot $EnvsRoot -Projects $projects -Warning $warning
+    $warning = $pruneResult.warning
+    $prunedArr = New-SandboxObjectArray -Items $pruneResult.pruned
+
     if ($null -eq $index.approved -and $builtList.Count -gt 0) {
         $index.approved = Get-SandboxUtcStamp
     }
@@ -1510,10 +1961,9 @@ function Invoke-SandboxEnvApplyCore {
     return [ordered]@{
         built     = $builtArr
         failedNow = $failedArr
-        pruned    = [object[]]@()
+        pruned    = $prunedArr
         warning   = $warning
-    }
-}
+    }}
 
 function Invoke-SandboxEnvApply {
     [CmdletBinding()]
@@ -1549,5 +1999,5 @@ function Invoke-SandboxEnvApply {
     }
     return $result
 }
-Export-ModuleMember -Function Get-SandboxEnvProjects, Get-SandboxUvPath, Invoke-SandboxUv, Get-SandboxEnvReport, Invoke-SandboxEnvApply
+Export-ModuleMember -Function Get-SandboxEnvProjects, Get-SandboxUvPath, Invoke-SandboxUv, Get-SandboxEnvReport, Invoke-SandboxEnvApply, Test-SandboxEnvReady, Add-SandboxEnvLinks, Remove-SandboxEnvLinks
 
