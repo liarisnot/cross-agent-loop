@@ -12,7 +12,8 @@ if ($fail -and $args.Count -gt 0 -and $args[0] -eq $fail) {
 }
 
 if ($args.Count -ge 1 -and $args[0] -eq '--version') {
-    Write-Output 'uv 0.0.0-fake'
+    if ($env:FAKE_UV_VERSION) { Write-Output $env:FAKE_UV_VERSION }
+    else { Write-Output 'uv 0.0.0-fake' }
     exit 0
 }
 
@@ -29,8 +30,8 @@ if ($args.Count -ge 3 -and $args[0] -eq 'python' -and $args[1] -eq 'install') {
     exit 0
 }
 
-if ($args.Count -ge 4 -and $args[0] -eq 'python' -and $args[1] -eq 'find' -and $args[2] -eq '--managed-python') {
-    $req = $args[3]
+if ($args.Count -ge 3 -and $args[0] -eq 'python' -and $args[1] -eq 'find') {
+    $req = $args[$args.Count - 1]
     $py = Join-Path $env:UV_PYTHON_INSTALL_DIR "cpython-$req-fake\python.cmd"
     Write-Output $py
     exit 0
@@ -40,15 +41,15 @@ if ($args.Count -ge 1 -and $args[0] -eq 'sync') {
     $root = $env:UV_PROJECT_ENVIRONMENT
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'Scripts') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'Lib\site-packages') | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $root 'Scripts\python.exe') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $root 'Scripts\python.exe'), 'fake', [Text.UTF8Encoding]::new($false))
     exit 0
 }
 
 if ($args.Count -ge 2 -and $args[0] -eq 'venv') {
-    $root = $args[1]
+    $root = $args[$args.Count - 1]
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'Scripts') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'Lib\site-packages') | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $root 'Scripts\python.exe') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $root 'Scripts\python.exe'), 'fake', [Text.UTF8Encoding]::new($false))
     exit 0
 }
 
