@@ -1,6 +1,6 @@
 {
   "name": "sandbox-env",
-  "stage": "build",
+  "stage": "signoff",
   "checkin": "on-problems",
   "designDoc": "docs/designs/sandbox-env.md",
   "gates": {

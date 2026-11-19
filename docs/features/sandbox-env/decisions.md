@@ -78,3 +78,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T07:26:28Z [decision] design (as built, phase 5): the phase test runs through -SandboxRun only when the repo's -SandboxEnv report lists Python projects; other repos run it in the checkout as before (this repo's own Pester suite cannot run inside the sandbox: no HKCU test registry, real-path writes denied); fold into the design at sign-off
 - 2026-11-19T07:39:42Z [fix-up] phase 5: 2 files, 30 lines — project discovery skips folders under a fixtures, testdata, test_data or __fixtures__ path segment; the gate had refused both phase 5 workers because the test fixture's uv.lock counted as a project (found by dogfooding)
 - 2026-11-19T07:39:42Z [decision] design (as built): discovery ignores test data folders (fixtures, testdata, test_data, __fixtures__); fold into the design at sign-off
+- 2026-11-19T07:58:38Z [stage] build -> signoff
