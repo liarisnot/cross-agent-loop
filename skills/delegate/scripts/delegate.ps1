@@ -121,6 +121,14 @@ $OutputEncoding = [Text.UTF8Encoding]::new($false)
 function Out-Summary([hashtable]$h) { $h | ConvertTo-Json -Depth 6 -Compress; exit 0 }
 function Fail([string]$msg) { @{ ok = $false; error = $msg } | ConvertTo-Json -Compress; exit 1 }
 function Invoke-Git { param([Parameter(ValueFromRemainingArguments)] $a) $out = & git.exe @a 2>&1; if ($LASTEXITCODE -ne 0) { throw "git $($a -join ' '): $out" }; $out }
+function Remove-Worktree([string]$Path) {
+    & git.exe -c core.longpaths=true -C $Repo worktree remove --force $Path 2>&1 | Out-Null
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath ('\\?\' + [IO.Path]::GetFullPath($Path)) -Recurse -Force
+        & git.exe -C $Repo worktree prune 2>&1 | Out-Null
+    }
+    if (Test-Path -LiteralPath $Path) { throw "could not remove worktree $Path" }
+}
 function Quote([string]$s) {
     # MSVCRT/Go command-line escaping: backslashes are literal unless they precede a quote
     if ($s -and $s -notmatch '[\s"]') { return $s }
@@ -262,7 +270,7 @@ if ($Cleanup) {
         Restore-RuleFiles $cwt
         $dirty = @(& git -C $cwt status --porcelain --untracked-files=no 2>$null)
         if ($dirty.Count -gt 0) { Fail "Read-only worktree $cwt has tracked changes (read-only violation?); inspect before removing" }
-        Invoke-Git -C $Repo worktree remove --force $cwt | Out-Null; $notes += "removed read-only worktree $cwt"
+        Remove-Worktree $cwt | Out-Null; $notes += "removed read-only worktree $cwt"
     }
     if ($readOnly) { Out-Summary @{ ok = $true; cleanup = $notes } }
     $wt = Join-Path $wtRoot $TaskId
@@ -273,7 +281,7 @@ if ($Cleanup) {
             $patch = Join-Path $runDir ("discarded-{0}.patch" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
             & git -C $wt add -A -- . ':!.xagent' 2>$null | Out-Null
             & git -C $wt diff --cached HEAD | Set-Content -LiteralPath $patch
-            Invoke-Git -C $Repo worktree remove --force $wt | Out-Null; $notes += "discarded worktree $wt (diff saved to $patch)"
+            Remove-Worktree $wt | Out-Null; $notes += "discarded worktree $wt (diff saved to $patch)"
         }
         & git -C $Repo branch -D $branch 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { $notes += "deleted branch $branch" }
@@ -286,7 +294,7 @@ if ($Cleanup) {
         if ($dirtyTracked.Count -gt 0) { Fail "Worktree $wt has uncommitted changes to tracked files; not removing" }
         if (-not $merged) { Fail "Branch $branch is not merged into $Repo HEAD; not removing worktree" }
         # merged + no tracked changes: only untracked leftovers (__pycache__, .xagent logs) remain
-        Invoke-Git -C $Repo worktree remove --force $wt | Out-Null; $notes += "removed worktree $wt"
+        Remove-Worktree $wt | Out-Null; $notes += "removed worktree $wt"
     }
     & git -C $Repo branch -d $branch 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $notes += "deleted merged branch $branch" }
@@ -439,7 +447,7 @@ switch ($Agent) {
     'cursor' {
         # Cursor arguments only. The unsandboxed path prefixes powershell.exe -File <launcher>.
         # The sandboxed path runs <R>:\<version>\node.exe <R>:\<version>\index.js with these.
-        $cursorArgs = @('-p', '--trust', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
+        $cursorArgs = @('-p', '--trust', '--disable-auto-update', '--output-format', 'json', '--workspace', $wt, '--model', $Model)
         # review: ask mode (read-only Q&A; plan mode made composer narrate without reporting)
         # council: plan mode (read-only analysis). Neither gets --force.
         if ($isReview) { $cursorArgs += @('--mode', 'ask') } elseif ($readOnly) { $cursorArgs += @('--mode', 'plan') } else { $cursorArgs += '--force' }
