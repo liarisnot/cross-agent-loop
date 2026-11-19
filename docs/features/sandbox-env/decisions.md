@@ -55,3 +55,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T02:06:48Z [stage] design-review -> plan
 - 2026-11-19T02:58:09Z [decision] merged main into feature/sandbox-env (Cursor self-update and review-round fixes, name cleanup)
 - 2026-11-19T03:21:24Z [decision] merged main into feature/sandbox-env (fix: plan counts only the feature's own task merges)
+- 2026-11-19T03:30:50Z [decision] merged main into feature/sandbox-env (fix: plan.md keeps task rows together)
