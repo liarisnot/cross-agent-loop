@@ -46,3 +46,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-18T21:43:30Z [dismiss] ir-p9 d2 Nit 27 (Critical User Journeys and NFR sections) — this repo's design docs don't all use them; the failure paths are covered by the Rules, Risks and Verification
 - 2026-11-18T21:43:31Z [dismiss] sy-p9 d2 Nit 4 (GPU risk row) applied by dropping the row; sy-p9 d2 Nit 5 ('in plain words') applied; no other dismissals from sy-p9
 - 2026-11-19T01:48:23Z [reaudit] d3: phase 9
+- 2026-11-19T01:59:48Z [decision] design (stage 9 re-check): interpreter = .python-version, else the lowest minor from requires-python's first lower-bound clause; uv workspaces unsupported in v1 (the private repo has none); a line-based pyproject reader, no TOML parser
