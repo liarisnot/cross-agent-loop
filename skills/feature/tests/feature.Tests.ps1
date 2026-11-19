@@ -3107,8 +3107,70 @@ Describe 'feature.ps1 doctor' {
             Set-ItResult -Inconclusive -Because "build $build is below 26300"
         }
     }
-}
 
+    It 'adds a sandbox-env check with -Repo' -Tag 'Slow' {
+        $sandboxRoot = Join-Path $TestDrive ("sandbox-{0}" -f [guid]::NewGuid())
+        $cursorRoot = Join-Path $TestDrive ("cursor-{0}" -f [guid]::NewGuid())
+        $logDir = Join-Path $TestDrive ("log-{0}" -f [guid]::NewGuid())
+        $fixtureRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../delegate/tests/fixtures/sandbox-env')).Path
+        $fakeUv = Join-Path $fixtureRoot 'fake-uv.cmd'
+        $uvLockSrc = Join-Path $fixtureRoot 'uv.lock'
+        $prevSandbox = $env:XAGENT_SANDBOX_ROOT
+        $prevCursor = $env:XAGENT_CURSOR_ROOT
+        $prevLog = $env:XAGENT_LOG_DIR
+        $prevUv = $env:XAGENT_UV_PATH
+
+        function Invoke-DoctorWithRepo {
+            param([string]$TargetRepo)
+            $env:XAGENT_SANDBOX_ROOT = $sandboxRoot
+            $env:XAGENT_CURSOR_ROOT = $cursorRoot
+            $env:XAGENT_LOG_DIR = $logDir
+            return Invoke-Feature @('doctor', '-Repo', $TargetRepo) -WorkingDirectory $TestDrive
+        }
+
+        try {
+            $emptyRepo = New-TestRepo
+            $r = Invoke-DoctorWithRepo -TargetRepo $emptyRepo
+            $r.ExitCode | Should -Be 0
+            $r.Json.ok | Should -BeTrue
+            @($r.Json.checks).Count | Should -Be 11
+            $envCheck = $r.Json.checks[-1]
+            $envCheck.name | Should -Be 'sandbox-env'
+            $envCheck.ok | Should -BeTrue
+            $envCheck.required | Should -BeFalse
+            $envCheck.detail | Should -Be 'no Python projects'
+            $uvRepo = Join-Path $TestDrive ("uvrepo-{0}" -f [guid]::NewGuid())
+            New-Item -ItemType Directory -Force -Path $uvRepo | Out-Null
+            & git -C $uvRepo init -q -b main 2>&1 | Out-Null
+            & git -C $uvRepo config user.name test 2>&1 | Out-Null
+            & git -C $uvRepo config user.email test@example.invalid 2>&1 | Out-Null
+            Copy-Item -LiteralPath $uvLockSrc -Destination (Join-Path $uvRepo 'uv.lock') -Force
+            Set-Content -LiteralPath (Join-Path $uvRepo '.python-version') -Value '3.12' -NoNewline
+            & git -C $uvRepo add -A 2>&1 | Out-Null
+            & git -C $uvRepo commit -q -m init 2>&1 | Out-Null
+            $env:XAGENT_UV_PATH = $fakeUv
+            $r2 = Invoke-DoctorWithRepo -TargetRepo $uvRepo
+            $r2.Json.ok | Should -BeTrue
+            $check2 = $r2.Json.checks | Where-Object { $_.name -eq 'sandbox-env' } | Select-Object -First 1
+            $check2.ok | Should -BeFalse
+            $check2.detail.StartsWith('. missing') | Should -BeTrue
+            $notGit = Join-Path $TestDrive ("notgit-{0}" -f [guid]::NewGuid())
+            New-Item -ItemType Directory -Force -Path $notGit | Out-Null
+            $r3 = Invoke-DoctorWithRepo -TargetRepo $notGit
+            $r3.Json.ok | Should -BeTrue
+            $check3 = $r3.Json.checks | Where-Object { $_.name -eq 'sandbox-env' } | Select-Object -First 1
+            $check3.ok | Should -BeFalse
+            $check3.detail.StartsWith('sandbox-env: ') | Should -BeTrue
+                    }
+        finally {
+            if ($null -eq $prevSandbox) { Remove-Item Env:XAGENT_SANDBOX_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_SANDBOX_ROOT = $prevSandbox }
+            if ($null -eq $prevCursor) { Remove-Item Env:XAGENT_CURSOR_ROOT -ErrorAction SilentlyContinue } else { $env:XAGENT_CURSOR_ROOT = $prevCursor }
+            if ($null -eq $prevLog) { Remove-Item Env:XAGENT_LOG_DIR -ErrorAction SilentlyContinue } else { $env:XAGENT_LOG_DIR = $prevLog }
+            if ($null -eq $prevUv) { Remove-Item Env:XAGENT_UV_PATH -ErrorAction SilentlyContinue } else { $env:XAGENT_UV_PATH = $prevUv }
+        }
+    }
+
+}
 Describe 'Stop-ProcessTree' {
     BeforeAll {
         . (Get-FeatureFunctionScript -Name @('Stop-ProcessTree'))
