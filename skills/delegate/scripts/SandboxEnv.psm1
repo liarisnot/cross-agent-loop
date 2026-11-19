@@ -442,4 +442,532 @@ function Invoke-SandboxUv {
     }
 }
 
-Export-ModuleMember -Function Get-SandboxEnvProjects, Get-SandboxUvPath, Invoke-SandboxUv
+function Get-SandboxEnvsRoot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo
+    )
+    $full = [IO.Path]::GetFullPath($Repo).TrimEnd('\', '/')
+    $parent = Split-Path -Parent $full
+    $leaf = Split-Path -Leaf $full
+    return Join-Path $parent "$leaf.xagent\.envs"
+}
+
+function New-SandboxEmptyEnvsIndex {
+    return @{
+        version   = $null
+        approved  = $null
+        uv        = $null
+        uvVersion = $null
+        pythons   = @{}
+        envs      = @{}
+        failed    = @{}
+    }
+}
+
+function Read-SandboxEnvsIndex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$EnvsRoot
+    )
+
+    $path = Join-Path $EnvsRoot 'envs.json'
+    if (-not (Test-Path -LiteralPath $path)) {
+        return @{ index = (New-SandboxEmptyEnvsIndex); warning = $null }
+    }
+
+    try {
+        $raw = [IO.File]::ReadAllText($path)
+        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        if ($null -eq $parsed -or $parsed -isnot [hashtable]) {
+            return @{ index = (New-SandboxEmptyEnvsIndex); warning = 'envs.json unreadable; rebuilding on -Apply' }
+        }
+    } catch {
+        return @{ index = (New-SandboxEmptyEnvsIndex); warning = 'envs.json unreadable; rebuilding on -Apply' }
+    }
+
+    $index = New-SandboxEmptyEnvsIndex
+    foreach ($key in @('version', 'approved', 'uv', 'uvVersion')) {
+        if ($parsed.ContainsKey($key)) { $index[$key] = $parsed[$key] }
+    }
+    foreach ($mapKey in @('pythons', 'envs', 'failed')) {
+        $val = $parsed[$mapKey]
+        if ($val -is [hashtable]) { $index[$mapKey] = $val } else { $index[$mapKey] = @{} }
+    }
+    return @{ index = $index; warning = $null }
+}
+
+function Get-SandboxEnvName {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][string]$Request,
+        [Parameter(Mandatory)][string]$Hash
+    )
+    if ([string]::IsNullOrWhiteSpace($Request)) { return $null }
+    if ($Request -notmatch '^(\d+)\.(\d+)') { return $null }
+    $majorMinor = "$($Matches[1]).$($Matches[2])"
+    $short = if ($Hash.Length -ge 12) { $Hash.Substring(0, 12) } else { $Hash }
+    return "py$majorMinor-$short"
+}
+
+function Get-SandboxEnvIndexEnvEntry {
+    param([hashtable]$Index, [string]$Hash)
+    if (-not $Index.envs.ContainsKey($Hash)) { return $null }
+    $entry = $Index.envs[$Hash]
+    if ($entry -isnot [hashtable]) { return $null }
+    $name = $entry['name']
+    if ($name -isnot [string]) { return $null }
+    return $entry
+}
+
+function Get-SandboxEnvIndexFailedEntry {
+    param([hashtable]$Index, [string]$Hash)
+    if (-not $Index.failed.ContainsKey($Hash)) { return $null }
+    $entry = $Index.failed[$Hash]
+    if ($entry -isnot [hashtable]) { return $null }
+    return $entry
+}
+
+function Test-SandboxProjectStale {
+    param([string]$Project, [string]$Hash, [hashtable]$Index)
+
+    foreach ($key in @($Index.envs.Keys)) {
+        if ($key -ceq $Hash) { continue }
+        $entry = $Index.envs[$key]
+        if ($entry -isnot [hashtable]) { continue }
+        $projs = $entry['projects']
+        if ($projs -isnot [System.Array]) { continue }
+        foreach ($p in $projs) {
+            if ([string]$p -ceq $Project) { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-SandboxEnvStatuses {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object[]]$Projects,
+        [Parameter(Mandatory)][hashtable]$Index,
+        [Parameter(Mandatory)][string]$EnvsRoot,
+        [AllowNull()][string]$UvPath
+    )
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($proj in $Projects) {
+        $project = [string]$proj.project
+        $kind = [string]$proj.kind
+        $hash = [string]$proj.hash
+        $request = $proj.request
+        $python = $request
+        $env = $null
+        $status = $null
+        $reason = $null
+
+        if ([string]::IsNullOrEmpty($UvPath)) {
+            $status = 'unsupported'
+            $reason = 'uv-missing'
+        } elseif ($null -ne $proj.status -and $proj.status -ceq 'unsupported') {
+            $status = 'unsupported'
+            $reason = [string]$proj.reason
+        } else {
+            $env = Get-SandboxEnvName -Request $request -Hash $hash
+            $envEntry = Get-SandboxEnvIndexEnvEntry -Index $Index -Hash $hash
+            $ready = $false
+            if ($null -ne $envEntry) {
+                $pyExe = Join-Path $EnvsRoot (Join-Path $envEntry['name'] 'Scripts\python.exe')
+                if (Test-Path -LiteralPath $pyExe) { $ready = $true }
+            }
+            if ($ready) {
+                $status = 'ready'
+                $reason = $null
+            } else {
+                $failedEntry = Get-SandboxEnvIndexFailedEntry -Index $Index -Hash $hash
+                if ($null -ne $failedEntry) {
+                    $status = 'install-failed'
+                    $err = $failedEntry['error']
+                    $reason = if ($err -is [string]) { $err } else { [string]$err }
+                } elseif (Test-SandboxProjectStale -Project $project -Hash $hash -Index $Index) {
+                    $status = 'stale'
+                    $reason = $null
+                } else {
+                    $status = 'missing'
+                    $reason = $null
+                }
+            }
+        }
+
+        if ($status -ceq 'unsupported') { $env = $null }
+
+        $results.Add([ordered]@{
+                project = $project
+                kind    = $kind
+                status  = $status
+                reason  = $reason
+                env     = $env
+                python  = $python
+                hash    = $hash
+            })
+    }
+    return @($results)
+}
+
+function Get-SandboxWheelTags {
+    param([string]$FileName)
+
+    if (-not $FileName.EndsWith('.whl', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $base = $FileName.Substring(0, $FileName.Length - 4)
+    if ($base -match '-(?<py>cp\d+|py\d+(?:\.py\d+)?)-(?<abi>[^-]+)-(?<plat>[^-]+)$') {
+        return @{ python = $Matches['py']; abi = $Matches['abi']; platform = $Matches['plat'] }
+    }
+    if ($base -match '-(?<py>cp\d+)-(?<plat>win_amd64)$') {
+        return @{ python = $Matches['py']; abi = 'none'; platform = $Matches['plat'] }
+    }
+    return $null
+}
+
+function Test-SandboxWheelMatches {
+    param(
+        [string]$FileName,
+        [string]$Request
+    )
+
+    $tags = Get-SandboxWheelTags -FileName $FileName
+    if ($null -eq $tags) { return $false }
+    if ($tags.platform -cne 'win_amd64' -and $tags.platform -cne 'any') { return $false }
+
+    if ($tags.python -ceq 'py3' -or $tags.python -ceq 'py2.py3') { return $true }
+    if ($tags.abi -ceq 'abi3') { return $true }
+    if ($Request -match '^(\d+)\.(\d+)') {
+        $want = "cp$($Matches[1])$($Matches[2])"
+        if ($tags.python -ceq $want) { return $true }
+    }
+    return $false
+}
+
+function Split-SandboxUvLockPackages {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return @() }
+    $lines = @($Text -split "`r?`n")
+    $blocks = [System.Collections.Generic.List[string]]::new()
+    $current = [System.Collections.Generic.List[string]]::new()
+    $inPackage = $false
+    foreach ($line in $lines) {
+        if ($line.Trim() -ceq '[[package]]') {
+            if ($current.Count -gt 0) {
+                $blocks.Add(($current -join "`n"))
+                $current.Clear()
+            }
+            $inPackage = $true
+            continue
+        }
+        if ($inPackage) { $current.Add($line) }
+    }
+    if ($current.Count -gt 0) { $blocks.Add(($current -join "`n")) }
+    return @($blocks)
+}
+
+function Test-SandboxSkipUvLockPackage {
+    param([string]$Block)
+
+    foreach ($line in ($Block -split "`r?`n")) {
+        if ($line -match '^\s*source\s*=\s*\{') {
+            if ($line -match 'editable|virtual|directory') { return $true }
+        }
+    }
+    return $false
+}
+
+function Get-SandboxUvLockPackageWheels {
+    param([string]$Block)
+
+    # A wheel entry has a url; size is optional (the PyTorch index records none).
+    $wheels = [System.Collections.Generic.List[hashtable]]::new()
+    $inWheels = $false
+    foreach ($line in ($Block -split "`r?`n")) {
+        $trim = $line.Trim()
+        if ($trim -match '^wheels\s*=\s*\[') { $inWheels = $true; continue }
+        if ($inWheels) {
+            if ($trim -eq ']') { break }
+            if ($line -match '\{' -and $line -match 'url\s*=\s*"([^"]+)"') {
+                $url = $Matches[1]
+                $size = $null
+                if ($line -match 'size\s*=\s*(\d+)') { $size = [long]$Matches[1] }
+                $seg = ($url -split '/')[-1]
+                $wheels.Add(@{ file = $seg; size = $size })
+            }
+        }
+    }
+    return @($wheels)
+}
+
+function Measure-SandboxUvLockEstimate {
+    param(
+        [string]$LockText,
+        [string]$Request
+    )
+
+    # Returns $null when the lock cannot be read, else @{ bytes; unknown }. bytes sums the
+    # recorded download sizes; unknown lists packages whose size the lock does not record.
+    if ([string]::IsNullOrEmpty($LockText)) { return $null }
+    $sum = [long]0
+    $unknown = [System.Collections.Generic.List[string]]::new()
+    foreach ($block in (Split-SandboxUvLockPackages $LockText)) {
+        if (Test-SandboxSkipUvLockPackage $block) { continue }
+        $name = if ($block -match '(?m)^\s*name\s*=\s*"([^"]+)"') { $Matches[1] } else { '?' }
+        $wheels = @(Get-SandboxUvLockPackageWheels $block)
+        if ($wheels.Count -eq 0) {
+            # Source only: count the source download.
+            if ($block -match '(?m)^\s*sdist\s*=\s*\{[^}]*size\s*=\s*(\d+)') { $sum += [long]$Matches[1] }
+            else { $unknown.Add($name) }
+            continue
+        }
+        $matching = @($wheels | Where-Object { Test-SandboxWheelMatches -FileName $_.file -Request $Request })
+        if ($matching.Count -eq 0) { continue }   # not installed on Windows
+        $sized = @($matching | Where-Object { $null -ne $_.size })
+        if ($sized.Count -eq 0) { $unknown.Add($name); continue }
+        $best = [long]0
+        foreach ($w in $sized) { if ($w.size -gt $best) { $best = $w.size } }
+        $sum += $best
+    }
+    return @{ bytes = $sum; unknown = @($unknown) }
+}
+
+function Get-SandboxEnvMajorMinor {
+    param([string]$Request)
+    if ([string]::IsNullOrWhiteSpace($Request)) { return $null }
+    if ($Request -match '^(\d+)\.(\d+)') { return "$($Matches[1]).$($Matches[2])" }
+    return $null
+}
+
+function Test-SandboxInterpreterInstalled {
+    param([hashtable]$Index, [string]$MajorMinor)
+
+    foreach ($key in @($Index.pythons.Keys)) {
+        if ([string]$key -ceq $MajorMinor) { return $true }
+        if ([string]$key.StartsWith("$MajorMinor.", [StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
+function Get-SandboxEnvEstimate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Commit,
+        [Parameter(Mandatory)][object[]]$Statuses,
+        [Parameter(Mandatory)][hashtable]$Index
+    )
+
+    $seenHash = @{}
+    $envNames = [System.Collections.Generic.List[string]]::new()
+    $majMins = [System.Collections.Generic.List[string]]::new()
+    $unknown = [System.Collections.Generic.List[string]]::new()
+    $estimateSum = [long]0
+    $bytesKnown = $true
+
+    foreach ($st in $Statuses) {
+        if ($st.status -cnotin @('missing', 'stale', 'install-failed')) { continue }
+        $hash = [string]$st.hash
+        if ($seenHash.ContainsKey($hash)) { continue }
+        $seenHash[$hash] = $true
+        if (-not [string]::IsNullOrEmpty($st.env)) { $envNames.Add([string]$st.env) }
+
+        $majMin = Get-SandboxEnvMajorMinor -Request $st.python
+        if ($majMin -and -not $majMins.Contains($majMin)) { $majMins.Add($majMin) }
+
+        if ($st.kind -ceq 'resolve') { $bytesKnown = $false; continue }
+
+        $lockPath = if ($st.project -ceq '.') { 'uv.lock' } else { "$($st.project)/uv.lock" }
+        $lockText = Get-SandboxGitFileText -Repo $Repo -Commit $Commit -Path $lockPath
+        $m = Measure-SandboxUvLockEstimate -LockText $lockText -Request $st.python
+        if ($null -eq $m) { $bytesKnown = $false; continue }
+        $estimateSum += $m.bytes
+        foreach ($u in $m.unknown) { if (-not $unknown.Contains($u)) { $unknown.Add($u) } }
+    }
+
+    $newInterpreters = [System.Collections.Generic.List[string]]::new()
+    foreach ($mm in $majMins) {
+        if (-not (Test-SandboxInterpreterInstalled -Index $Index -MajorMinor $mm)) { $newInterpreters.Add($mm) }
+    }
+    $newInterpreters.Sort([StringComparer]::Ordinal)
+    $unknown.Sort([StringComparer]::Ordinal)
+
+    $bytes = $null
+    $seconds = $null
+    if ($bytesKnown) {
+        $bytes = [long][math]::Round($estimateSum * 2.5) + ($newInterpreters.Count * 100000000)
+        $seconds = [int][math]::Ceiling(30 + ($bytes / 20000000.0))
+    }
+    return @{
+        bytes        = $bytes
+        seconds      = $seconds
+        interpreters = @($newInterpreters)
+        envs         = @($envNames)
+        unknown      = @($unknown)
+    }
+}
+
+function Test-SandboxEnvNeedsApproval {
+    param(
+        $Approved,
+        $EstimateBytes
+    )
+    if ($null -eq $Approved) { return $true }
+    if ($null -ne $EstimateBytes -and $EstimateBytes -gt 5000000000) { return $true }
+    return $false
+}
+
+function Get-SandboxEnvProposalText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$EnvsRoot,
+        [Parameter(Mandatory)][int]$EnvCount,
+        [Parameter(Mandatory)][string[]]$Projects,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Interpreters,
+        [AllowEmptyCollection()][string[]]$Unknown = @(),
+        $Bytes,
+        $Seconds,
+        [Parameter(Mandatory)][long]$EnvsBytes
+    )
+
+    if ($EnvCount -eq 0) { return '' }
+    $envWord = if ($EnvCount -eq 1) { 'environment' } else { 'environments' }
+    $projList = ($Projects -join ', ')
+
+    $interpPart = ''
+    if ($Interpreters.Count -gt 0) {
+        $m = $Interpreters.Count
+        $iWord = if ($m -eq 1) { 'interpreter' } else { 'interpreters' }
+        $interpPart = " and $m $iWord ($($Interpreters -join ', '))"
+    }
+
+    if ($null -eq $Bytes) {
+        $estPart = 'size and time unknown'
+    } else {
+        $gb = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0}', $Bytes / 1000000000.0)
+        $min = [int][math]::Ceiling($Seconds / 60.0)
+        $minWord = if ($min -eq 1) { 'minute' } else { 'minutes' }
+        $estPart = "about $gb GB and $min $minWord"
+        if ($Unknown.Count -gt 0) {
+            $estPart = "$estPart, plus $($Unknown -join ', ') (size not recorded in uv.lock)"
+        }
+    }
+
+    $envsGb = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0}', $EnvsBytes / 1000000000.0)
+    return "Build $EnvCount $envWord ($projList)$interpPart in ${EnvsRoot}: $estPart; .envs is now $envsGb GB."
+}
+
+function Get-SandboxGitCommit {
+    param([string]$Repo, [string]$Ref)
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'git'
+    $null = $psi.ArgumentList.Add('-C')
+    $null = $psi.ArgumentList.Add($Repo)
+    $null = $psi.ArgumentList.Add('rev-parse')
+    $null = $psi.ArgumentList.Add('--verify')
+    $null = $psi.ArgumentList.Add("${Ref}^{commit}")
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $proc = [Diagnostics.Process]::Start($psi)
+    try {
+        $stdout = $proc.StandardOutput.ReadToEnd().Trim()
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) {
+            throw "sandbox: cannot read $Ref in $Repo"
+        }
+        return $stdout
+    } finally { $proc.Dispose() }
+}
+
+function Get-SandboxEnvsBytesTotal {
+    param([hashtable]$Index)
+
+    $sum = [long]0
+    foreach ($key in @($Index.envs.Keys)) {
+        $entry = $Index.envs[$key]
+        if ($entry -isnot [hashtable]) { continue }
+        $b = $entry['bytes']
+        if ($b -is [int] -or $b -is [long] -or $b -is [double] -or $b -is [decimal]) {
+            $sum += [long]$b
+        }
+    }
+    return $sum
+}
+
+function Get-SandboxEnvReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Ref
+    )
+
+    $commit = Get-SandboxGitCommit -Repo $Repo -Ref $Ref
+    $uvPath = Get-SandboxUvPath
+    $envsRoot = Get-SandboxEnvsRoot -Repo $Repo
+    $read = Read-SandboxEnvsIndex -EnvsRoot $envsRoot
+    $index = $read.index
+
+    $discovered = Get-SandboxEnvProjects -Repo $Repo -Commit $commit
+    $statuses = Get-SandboxEnvStatuses -Projects $discovered -Index $index -EnvsRoot $envsRoot -UvPath $uvPath
+
+    $projectOut = [System.Collections.Generic.List[object]]::new()
+    foreach ($st in $statuses) {
+        $projectOut.Add([ordered]@{
+                project = $st.project
+                kind    = $st.kind
+                status  = $st.status
+                reason  = $st.reason
+                env     = $st.env
+                python  = $st.python
+            })
+    }
+
+    $toBuild = @($statuses | Where-Object { $_.status -cin @('missing', 'stale', 'install-failed') })
+    $proposal = $null
+    if ($toBuild.Count -gt 0) {
+        $est = Get-SandboxEnvEstimate -Repo $Repo -Commit $commit -Statuses $statuses -Index $index
+        $distinctProjects = [System.Collections.Generic.List[string]]::new()
+        $seenProj = @{}
+        foreach ($st in $statuses) {
+            if ($st.status -cnotin @('missing', 'stale', 'install-failed')) { continue }
+            if (-not $seenProj.ContainsKey($st.project)) {
+                $seenProj[$st.project] = $true
+                $distinctProjects.Add([string]$st.project)
+            }
+        }
+        $needsApproval = Test-SandboxEnvNeedsApproval -Approved $index.approved -EstimateBytes $est.bytes
+        $envsBytes = Get-SandboxEnvsBytesTotal -Index $index
+        $text = Get-SandboxEnvProposalText -EnvsRoot $envsRoot -EnvCount @($est.envs).Count -Projects @($distinctProjects) `
+            -Interpreters @($est.interpreters) -Unknown @($est.unknown) -Bytes $est.bytes -Seconds $est.seconds -EnvsBytes $envsBytes
+        $proposal = [ordered]@{
+            needsApproval   = $needsApproval
+            interpreters    = @($est.interpreters)
+            envs            = @($est.envs)
+            estimateBytes   = $est.bytes
+            estimateSeconds = $est.seconds
+            unknownSize     = @($est.unknown)
+            text            = $text
+        }
+    }
+
+    $report = [ordered]@{
+        ok        = $true
+        repo      = $Repo
+        ref       = $Ref
+        uv        = $uvPath
+        envsBytes = Get-SandboxEnvsBytesTotal -Index $index
+        approved  = ($null -ne $index.approved)
+        projects  = @($projectOut)
+        proposal  = $proposal
+    }
+    if ($null -ne $read.warning) { $report['warning'] = $read.warning }
+    return $report
+}
+
+Export-ModuleMember -Function Get-SandboxEnvProjects, Get-SandboxUvPath, Invoke-SandboxUv, Get-SandboxEnvReport
+

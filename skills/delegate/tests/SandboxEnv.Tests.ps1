@@ -373,3 +373,331 @@ Describe 'errors' {
         { Get-SandboxEnvProjects -Repo $repo -Commit 'bad' } | Should -Throw '*sandbox: cannot read bad in*'
     }
 }
+
+Describe 'Read-SandboxEnvsIndex' {
+    It 'returns empty index without warning when envs.json is missing' {
+        InModuleScope SandboxEnv {
+            $root = Join-Path $TestDrive 'envs-missing'
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            $r = Read-SandboxEnvsIndex -EnvsRoot $root
+            $r.warning | Should -BeNullOrEmpty
+            $r.index.approved | Should -BeNullOrEmpty
+            $r.index.envs.Count | Should -Be 0
+        }
+    }
+    It 'returns empty index with warning when envs.json is invalid' {
+        InModuleScope SandboxEnv {
+            $root = Join-Path $TestDrive 'envs-bad'
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            [IO.File]::WriteAllText((Join-Path $root 'envs.json'), 'not json', [Text.UTF8Encoding]::new($false))
+            $r = Read-SandboxEnvsIndex -EnvsRoot $root
+            $r.warning | Should -Be 'envs.json unreadable; rebuilding on -Apply'
+        }
+    }
+    It 'reads a valid envs.json' {
+        InModuleScope SandboxEnv {
+            $root = Join-Path $TestDrive 'envs-ok'
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            $json = '{"version":1,"approved":"2020-01-01T00:00:00","uv":"x","uvVersion":"1","pythons":{},"envs":{},"failed":{}}'
+            [IO.File]::WriteAllText((Join-Path $root 'envs.json'), $json, [Text.UTF8Encoding]::new($false))
+            $r = Read-SandboxEnvsIndex -EnvsRoot $root
+            $r.warning | Should -BeNullOrEmpty
+            $r.index.approved | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'Get-SandboxEnvsRoot' {
+    It 'points at sibling repo.xagent\.envs' {
+        InModuleScope SandboxEnv {
+            $repo = (Resolve-Path $TestDrive).Path
+            Get-SandboxEnvsRoot -Repo $repo | Should -Be (Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs")
+        }
+    }
+}
+
+Describe 'sandbox env status' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'marks ready when index and python.exe exist' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $h = $projs[0].hash
+            $name = "py3.12-$($h.Substring(0,12))"
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
+            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = 't' }
+            New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot $name 'Scripts') | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot $name 'Scripts\python.exe'), '', [Text.UTF8Encoding]::new($false))
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $st[0]['status'] | Should -Be 'ready'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'falls back to missing when python.exe is absent' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $h = $projs[0].hash
+            $name = "py3.12-$($h.Substring(0,12))"
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
+            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = 't' }
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $st[0]['status'] | Should -Be 'missing'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'reports install-failed with error reason' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $h = $projs[0].hash
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
+            $index.failed[$h] = @{ at = 't'; error = 'uv sync failed' }
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $st[0]['status'] | Should -Be 'install-failed'
+            $st[0]['reason'] | Should -Be 'uv sync failed'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'reports stale when another hash lists the project' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
+            $index.envs['otherhash00000000000000000000000000000000000000000000000'] = @{ name = 'py3.12-deadbeef0000'; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 1; built = 't' }
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $st[0]['status'] | Should -Be 'stale'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'reports missing with empty index' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = $null; uv = $null; uvVersion = $null; pythons = @{}; envs = @{}; failed = @{} }
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $st[0]['status'] | Should -Be 'missing'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'marks every project uv-missing when uv is absent' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            $index = @{ approved = $null; uv = $null; uvVersion = $null; pythons = @{}; envs = @{}; failed = @{} }
+            $empty = Join-Path $TestDrive 'empty-path-status'
+            New-Item -ItemType Directory -Force -Path $empty | Out-Null
+            Remove-Item Env:XAGENT_UV_PATH -ErrorAction SilentlyContinue
+            $env:PATH = $empty
+            Get-SandboxUvPath | Should -BeNullOrEmpty
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot { param($p,$i,$r) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $null })
+            $st[0]['reason'] | Should -Be 'uv-missing'
+        } finally {
+            $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH']
+            $env:PATH = $script:SavedEnv['PATH']
+        }
+    }
+}
+
+Describe 'Get-SandboxEnvEstimate' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'computes bytes from fixture lock for 3.12' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $index = @{ approved = $null; pythons = @{}; envs = @{}; failed = @{} }
+            $xr = Join-Path $TestDrive 'x'
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $xr, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $est = InModuleScope SandboxEnv -ArgumentList $repo, $sha, $st, $index { param($rp,$c,$s,$i) Get-SandboxEnvEstimate -Repo $rp -Commit $c -Statuses $s -Index $i }
+            $want = [long][math]::Round((2400 + 800) * 2.5) + 100000000
+            $est.bytes | Should -Be $want
+            $est.interpreters | Should -Be @('3.12')
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'returns null bytes for resolve project' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'req/requirements.txt' -Content 'x'
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'req/.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $index = @{ approved = 't'; pythons = @{}; envs = @{}; failed = @{} }
+            $xr = Join-Path $TestDrive 'x'
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $xr, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $bytes = InModuleScope SandboxEnv -ArgumentList $repo, $sha, $st, $index { param($rp,$c,$s,$i) (Get-SandboxEnvEstimate -Repo $rp -Commit $c -Statuses $s -Index $i).bytes }
+            $bytes | Should -BeNullOrEmpty
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'lists a source-only package without a size as unknown' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            $lock = $script:FixtureLock + "`n[[package]]`nname = `"src-only`"`nversion = `"1`"`nsource = { registry = `"https://pypi.org/simple`" }`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $lock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $index = @{ approved = $null; pythons = @{}; envs = @{}; failed = @{} }
+            $xr = Join-Path $TestDrive 'x'
+            $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $xr, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
+            $est = InModuleScope SandboxEnv -ArgumentList $repo, $sha, $st, $index { param($rp,$c,$s,$i) Get-SandboxEnvEstimate -Repo $rp -Commit $c -Statuses $s -Index $i }
+            $est.bytes | Should -Not -BeNullOrEmpty
+            @($est.unknown) | Should -Be @('src-only')
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'counts an sdist size and lists a sized-less Windows wheel as unknown' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            $lock = "version = 1`nrequires-python = `">=3.12`"`n`n[[package]]`nname = `"nosize`"`nversion = `"1`"`nsource = { registry = `"https://example.invalid/simple`" }`nwheels = [`n    { url = `"https://example.invalid/nosize-1-cp312-cp312-win_amd64.whl`", hash = `"sha256:00`" },`n]`n`n[[package]]`nname = `"sdonly`"`nversion = `"1`"`nsource = { registry = `"https://pypi.org/simple`" }`nsdist = { url = `"https://example.invalid/sdonly-1.tar.gz`", hash = `"sha256:00`", size = 4000 }`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $lock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            $r.proposal.estimateBytes | Should -Be ([long][math]::Round(4000 * 2.5) + 100000000)
+            @($r.proposal.unknownSize) | Should -Be @('nosize')
+            $r.proposal.text | Should -Match 'plus nosize \(size not recorded in uv\.lock\)'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+
+    It 'counts each hash once when two projects share it' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            $toml = '[project]' + [char]10 + 'name="same"' + [char]10 + 'requires-python=">=3.12"'
+            foreach ($dir in @('a','b')) {
+                Set-SandboxEnvRepoFile -Repo $repo -RelativePath "$dir/uv.lock" -Content $script:FixtureLock
+                Set-SandboxEnvRepoFile -Repo $repo -RelativePath "$dir/.python-version" -Content '3.12'
+                Set-SandboxEnvRepoFile -Repo $repo -RelativePath "$dir/pyproject.toml" -Content $toml
+            }
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            ($r.proposal.envs | Measure-Object).Count | Should -Be 1
+            $r.proposal.estimateBytes | Should -Be ([long][math]::Round((2400 + 800) * 2.5) + 100000000)
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+}
+
+Describe 'Test-SandboxEnvNeedsApproval' {
+    It 'is true when approved is null' {
+        InModuleScope SandboxEnv { Test-SandboxEnvNeedsApproval -Approved $null -EstimateBytes 100 | Should -Be $true }
+    }
+    It 'is false with approved and small estimate' {
+        InModuleScope SandboxEnv { Test-SandboxEnvNeedsApproval -Approved 't' -EstimateBytes 100 | Should -Be $false }
+    }
+    It 'is true with approved and estimate over 5 GB' {
+        InModuleScope SandboxEnv { Test-SandboxEnvNeedsApproval -Approved 't' -EstimateBytes 5000000001 | Should -Be $true }
+    }
+    It 'is false with approved and null estimate' {
+        InModuleScope SandboxEnv { Test-SandboxEnvNeedsApproval -Approved 't' -EstimateBytes $null | Should -Be $false }
+    }
+}
+
+Describe 'Get-SandboxEnvReport' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'returns expected keys and null proposal when ready' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $h = $projs[0].hash
+            $name = "py3.12-$($h.Substring(0,12))"
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot $name 'Scripts') | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot $name 'Scripts\python.exe'), '', [Text.UTF8Encoding]::new($false))
+            $json = (@{ version = 1; approved = '2020-01-01'; uv = 'x'; uvVersion = '1'; pythons = @{ '3.12.7' = 'p' }; envs = @{ $h = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12.7'; bytes = 250; built = 't' } }; failed = @{} } | ConvertTo-Json -Compress -Depth 6)
+            New-Item -ItemType Directory -Force -Path $envsRoot | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot 'envs.json'), $json, [Text.UTF8Encoding]::new($false))
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            $r.ok | Should -Be $true
+            $r.envsBytes | Should -Be 250
+            $r.approved | Should -Be $true
+            $r.proposal | Should -BeNullOrEmpty
+            ($r.PSObject.Properties.Name -contains 'warning') | Should -Be $false
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'includes warning only for unreadable envs.json' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ('version = 1' + [char]10 + 'requires-python = ">=3.11"')
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
+            New-Item -ItemType Directory -Force -Path $envsRoot | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot 'envs.json'), '{', [Text.UTF8Encoding]::new($false))
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            $r.warning | Should -Be 'envs.json unreadable; rebuilding on -Apply'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'builds proposal text for missing project' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            $r.proposal.text | Should -Match 'Build 1 environment \(\.\)'
+            $r.proposal.needsApproval | Should -Be $true
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'throws for unknown ref' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ('version = 1' + [char]10 + 'requires-python = ">=3.11"')
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            { Get-SandboxEnvReport -Repo $repo -Ref 'not-a-ref' } | Should -Throw '*sandbox: cannot read not-a-ref in*'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'uses size and time unknown when estimate is null' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'only-req/requirements.txt' -Content 'pkg'
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'only-req/.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
+            $r.proposal.text | Should -Match 'size and time unknown'
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+}
+
+Describe 'Test-SandboxWheelMatches' {
+    It 'accepts abi3 win_amd64 wheels' {
+        InModuleScope SandboxEnv { Test-SandboxWheelMatches -FileName 'pkg-1.0-cp39-abi3-win_amd64.whl' -Request '3.12' | Should -Be $true }
+    }
+}
