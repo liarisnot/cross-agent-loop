@@ -63,3 +63,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T03:44:12Z [stage] plan -> build
 - 2026-11-19T04:04:14Z [fix-up] sbx-command: 1 file, 0 lines — removed a stray probe file Sandbox.psm1.testwrite the worker left
 - 2026-11-19T04:08:23Z [fix-up] sbx-command: 2 files, about 15 lines — Invoke-SandboxCommand takes an optional -Runtime (tests pass the lifecycle runtime); output is always a string array (a one-line result came back as a string); the lock-timeout test waits until the job holds the mutex
+- 2026-11-19T04:10:07Z [decision] env-discover: identity-hash lines use paths relative to the project folder ('../' for a .python-version above), not repo-relative, so two projects with identical inputs share an environment as the design's Data section intends
