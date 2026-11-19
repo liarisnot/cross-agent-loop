@@ -1072,3 +1072,184 @@ Describe 'SandboxRun command' -Tag Sandbox {
         @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count | Should -Be $before -Because $because
     }
 }
+
+Describe 'environment gate cleanup' {
+    BeforeDiscovery {
+        $script:EgNsSkipReason = Get-LaunchSkipReason -Kind Cursor
+        $script:EgNsSkip = [bool]$script:EgNsSkipReason
+        if ($script:EgNsSkip) { Write-Host "environment gate cleanup launch skipped: $script:EgNsSkipReason" }
+    }
+
+    BeforeAll {
+        $script:EgCleanParent = Join-Path $TestDrive 'eg-clean'
+        New-Item -ItemType Directory -Force -Path $script:EgCleanParent | Out-Null
+    }
+
+    AfterAll {
+        Remove-LaunchTree -Root $script:EgCleanParent
+    }
+
+    It 'removes a .venv junction on -Cleanup and leaves the target' {
+        $repoDir = Join-Path $script:EgCleanParent 'repo'
+        New-DelegateSeRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $task = 'eg-clean'
+        $wt = Get-LaunchWorktree $repo $task
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '-b', "xagent/$task", '--', $wt)
+        $target = Join-Path $TestDrive ('envtarget-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        [IO.File]::WriteAllText((Join-Path $target 'keep.txt'), "keep`n", [Text.UTF8Encoding]::new($false))
+        try {
+            New-Item -ItemType Junction -Path (Join-Path $wt '.venv') -Target $target -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'cannot create a junction here'
+            return
+        }
+        $r = Invoke-DelegateChild -ArgumentList @('-Cleanup', '-Repo', $repo, '-TaskId', $task) -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        Test-Path -LiteralPath $wt | Should -BeFalse -Because $because
+        Test-Path -LiteralPath (Join-Path $target 'keep.txt') | Should -BeTrue -Because $because
+    }
+
+    It 'runs -NoSandbox in a repo with a Python project' -Skip:$script:EgNsSkip {
+        $repoDir = Join-Path $script:EgCleanParent 'launch-repo'
+        New-DelegateSeRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $repo, '-TaskId', 'eg-nosandbox', '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '120', '-NoSandbox'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+    }
+}
+
+Describe 'environment gate' -Tag Sandbox {
+    BeforeDiscovery {
+        $script:EgSkipReason = Get-LaunchSkipReason -Kind Sandbox
+        $script:EgSkip = [bool]$script:EgSkipReason
+        if ($script:EgSkip) { Write-Host "environment gate skipped: $script:EgSkipReason" }
+    }
+
+    BeforeAll {
+        $script:EgLetters = $null
+        $script:EgTestRoot = $null
+        $script:EgRepo = $null
+        $script:EgPlainRepo = $null
+        $script:EgLinkRepo = $null
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        $script:EgRoot = Join-Path $TestDrive 'eg-root'
+        $script:EgLog = Join-Path $TestDrive 'eg-log'
+        New-Item -ItemType Directory -Force -Path $script:EgRoot, $script:EgLog | Out-Null
+        $env:XAGENT_SANDBOX_ROOT = $script:EgRoot
+        $env:XAGENT_CURSOR_ROOT = $script:FakeCursor
+        Import-Module $script:ModulePath -Force
+        $free = @(Get-TestFreeLetters)
+        if ($free.Count -lt 3) { throw 'sandbox: fewer than three free letters D-Z at reservation time' }
+        $script:EgLetters = @([string]$free[0], [string]$free[1], [string]$free[2])
+        Set-SandboxLetters -Letters $script:EgLetters
+        $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:EgTestRoot = Join-Path (Split-Path $script:RepoRoot -Qualifier) ('xagent-tests-' + $suffix)
+        New-Item -ItemType Directory -Force -Path $script:EgTestRoot | Out-Null
+        $script:EgRepo = Join-Path $script:EgTestRoot 'py-repo'
+        $script:EgPlainRepo = Join-Path $script:EgTestRoot 'plain-repo'
+        $script:EgLinkRepo = Join-Path $script:EgTestRoot 'link-repo'
+        New-DelegateSeRepo $script:EgRepo
+        New-LaunchRepo $script:EgPlainRepo
+        New-DelegateSeRepo $script:EgLinkRepo
+    }
+
+    AfterAll {
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        try {
+            Clear-ReservedLetters -Letters $script:EgLetters
+        } finally {
+            Remove-LaunchTree -Root $script:EgTestRoot
+        }
+    }
+
+    It 'fails a sandboxed launch before creating a worktree when the environment is not ready' -Skip:$script:EgSkip {
+        $task = 'eg-missing'
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:EgRepo, '-TaskId', $task, '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '180'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:EgRoot $script:EgLog)
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.ok | Should -BeFalse -Because $because
+        $r.Json.error | Should -BeLike 'sandbox: environment not ready:*' -Because $because
+        Test-Path -LiteralPath (Get-LaunchWorktree $script:EgRepo $task) | Should -BeFalse -Because $because
+    }
+
+    It 'leaves an existing worktree unchanged when the environment is not ready' -Skip:$script:EgSkip {
+        $task = 'eg-existing'
+        $prep = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:EgRepo, '-TaskId', $task, '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '120', '-NoSandbox'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:EgRoot $script:EgLog)
+        $because = Format-DelegateResult $prep
+        $prep.ExitCode | Should -Be 0 -Because $because
+        $wt = Get-LaunchWorktree $script:EgRepo $task
+        $statusBefore = (@(& git.exe -C $wt status --porcelain --untracked-files=all) | ForEach-Object { "$_" }) -join "`n"
+        $tasksBefore = @((Get-ChildItem -LiteralPath (Join-Path $wt '.xagent') -Filter 'task-*.md' -File | ForEach-Object Name | Sort-Object)) -join "`n"
+        $tasksBefore | Should -Not -BeNullOrEmpty -Because $because
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:EgRepo, '-TaskId', $task, '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '180'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:EgRoot $script:EgLog)
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -BeLike 'sandbox: environment not ready:*' -Because $because
+        $statusAfter = (@(& git.exe -C $wt status --porcelain --untracked-files=all) | ForEach-Object { "$_" }) -join "`n"
+        $tasksAfter = @((Get-ChildItem -LiteralPath (Join-Path $wt '.xagent') -Filter 'task-*.md' -File | ForEach-Object Name | Sort-Object)) -join "`n"
+        $statusAfter | Should -Be $statusBefore -Because $because
+        $tasksAfter | Should -Be $tasksBefore -Because $because
+    }
+
+    It 'runs a sandboxed launch when the repo has no Python projects' -Skip:$script:EgSkip {
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:EgPlainRepo, '-TaskId', 'eg-plain', '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '180'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:EgRoot $script:EgLog)
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        $r.Json.sandboxed | Should -BeTrue -Because $because
+    }
+
+    It 'links a ready environment and omits .venv from changes' -Skip:$script:EgSkip {
+        $envMap = Get-ChildEnv $script:FakeCursor $script:EgRoot $script:EgLog
+        $envMap['XAGENT_UV_PATH'] = [IO.Path]::GetFullPath((Join-Path $script:Here 'fixtures\sandbox-env\fake-uv.cmd'))
+        $apply = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $script:EgLinkRepo, '-Apply') -ExtraEnv $envMap
+        $because = Format-DelegateResult $apply
+        $apply.ExitCode | Should -Be 0 -Because $because
+        $apply.Json.ok | Should -BeTrue -Because $because
+        $apply.Json.projects[0].status | Should -Be 'ready' -Because $because
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-Agent', 'cursor', '-Profile', 'code', '-Model', 'composer-2.5',
+            '-Repo', $script:EgLinkRepo, '-TaskId', 'eg-link', '-TaskFile', $script:TaskFile,
+            '-TimeoutSec', '180'
+        ) -ExtraEnv $envMap
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        $venv = Join-Path (Get-LaunchWorktree $script:EgLinkRepo 'eg-link') '.venv'
+        Test-Path -LiteralPath $venv | Should -BeTrue -Because $because
+        (Get-Item -LiteralPath $venv -Force).LinkType | Should -Be 'Junction' -Because $because
+        @(@($r.Json.changes) | Where-Object { $null -ne $_ -and (($_ -replace '^.. ', '') -match '(^|/)\.venv/?$') }).Count | Should -Be 0 -Because $because
+    }
+}
