@@ -1,0 +1,20 @@
+version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "pkg-a"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://pypi.org/pkg-a-1.0.0-py3-none-any.whl", hash = "sha256:aaaa", size = 1200 },
+    { url = "https://pypi.org/pkg-a-1.0.0-cp312-win_amd64.whl", hash = "sha256:bbbb", size = 2400 },
+]
+
+[[package]]
+name = "pkg-b"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://pypi.org/pkg-b-2.0.0-py3-none-any.whl", hash = "sha256:cccc", size = 800 },
+    { url = "https://pypi.org/pkg-b-2.0.0-cp311-win_amd64.whl", hash = "sha256:dddd", size = 1600 },
+]

@@ -1,0 +1,8 @@
+[project]
+name = "sandbox-env-fixture"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
