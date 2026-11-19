@@ -57,3 +57,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T03:21:24Z [decision] merged main into feature/sandbox-env (fix: plan counts only the feature's own task merges)
 - 2026-11-19T03:30:50Z [decision] merged main into feature/sandbox-env (fix: plan.md keeps task rows together)
 - 2026-11-19T03:31:15Z [dismiss] p1-cm Major 1 (canary unlink) — the canary creates no .venv links; only the reparse-point skip in its fallback walk applies
+- 2026-11-19T03:31:16Z [dismiss] p1-cm Majors 5, 6 and Nits 10, 12 (profile and check-in mode undefined in plan.md; full suite in phase 5; vague test pointers) — defined by the skills and the plan rule; task files carry test details
