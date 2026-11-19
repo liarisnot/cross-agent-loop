@@ -8,6 +8,11 @@ Read and follow `<delegate dir>/SKILL.md`: "The loop", "Goldfish preflight & rev
 
 If `status.waitingOn.stop` is set, do not schedule work. Follow [Problem stop](#problem-stop). If `waitingOn.running` lists a task, do not launch it again. `schedule` will not return a `failed` task. When the user says "continue" and a task is `failed` and no `[stop]` is open, ask once whether to retry it. On a clear yes, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status pending`, then schedule.
 
+
+## Sandbox environments
+
+Before the first worker of the build, run `delegate.ps1 -SandboxEnv -Repo <repo> -Base feature/<name>`. When `proposal.needsApproval` is true, show `proposal.text` and ask once; then run `delegate.ps1 -SandboxEnv -Repo <repo> -Base feature/<name> -Apply` and report the result in one line.
+
 ## Picking tasks
 
 Take tasks only from `feature.ps1 schedule -Repo <repo> -Name <name>`. Read `liveRuns`, `cap` and `tasks`. Each task has `id`, `delegateTaskId`, `profile`, `model` and `files`. When `tasks` lists two, run both in the same message. Do not start a task `schedule` did not return. `code` uses that task's `model` (Composer 2.5, `composer-2.5`). `code-hard` uses that task's `model` (Grok 4.7 high, `grok-4.7-high`). Each task starts on the profile the plan gives it.
@@ -79,7 +84,7 @@ Then read each changed file's diff separately: `git -C <worktree> diff <baseSha>
 
 A usage-limit message is a problem stop at once. Do not retry it. There is no retry timer, no model fallback and no dollar estimate. The user resumes when the allowance is back. If the task is `preflight` or `running`, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`, then make the problem stop even when `failures` is 1.
 
-Every other failed run (`ok: false` or `timedOut: true`) takes the normal failed-run path. Read `stderrTail` and the logs, then retry once with the same command. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. A `sandbox:` error follows the usage-limit steps above: if the task is `preflight` or `running`, it is set `failed`, and a problem stop is made even when `failures` is 1. After a timeout, do not pass `-Resume`: the worktree and its uncommitted changes are reused. If it fails again, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`. Run `feature.ps1 status -Repo <repo> -Name <name>` and read that task's `failures` in `status.tasks`. If `failures` is now 2, make a problem stop. This path covers workers and task preflights. Review lenses are not build tasks; they follow the ladder in `stages/design-review.md`.
+Every other failed run (`ok: false` or `timedOut: true`) takes the normal failed-run path. Read `stderrTail` and the logs, then retry once with the same command. If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem, except `sandbox: environment not ready` — run `delegate.ps1 -SandboxEnv -Repo <repo> -Base feature/<name> -Apply` (ask first when `proposal.needsApproval` is true), then retry the launch once; failing again is a problem stop. Other `sandbox:` errors follow the usage-limit steps above: if the task is `preflight` or `running`, it is set `failed`, and a problem stop is made even when `failures` is 1. After a timeout, do not pass `-Resume`: the worktree and its uncommitted changes are reused. If it fails again, run `feature.ps1 task -Repo <repo> -Name <name> -Task <id> -Status failed`. Run `feature.ps1 status -Repo <repo> -Name <name>` and read that task's `failures` in `status.tasks`. If `failures` is now 2, make a problem stop. This path covers workers and task preflights. Review lenses are not build tasks; they follow the ladder in `stages/design-review.md`.
 
 ## Review rounds
 
@@ -115,7 +120,7 @@ delegate.ps1 -Agent cursor -Profile council -Seat grok -Feature <name> -Repo <re
 delegate.ps1 -Agent cursor -Profile council -Seat glm -Feature <name> -Repo <repo> -TaskId <delegateTaskId>-c<k> -TaskFile <question file>
 ```
 
-Round 2 writes `<repo>/.xagent/features/<name>/<id>.council-<k>.r2.md` and adds `-Resume <that seat's sessionId>`, using that round-2 file as `-TaskFile`. A failed seat follows "Failed delegate.ps1 runs" in SKILL.md (read `stderrTail`, retry once, no `-Resume` after a timeout). If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem. Report it to the user; it is a problem stop at once, handled like a usage limit. A usage-limit message is a problem stop at once.
+Round 2 writes `<repo>/.xagent/features/<name>/<id>.council-<k>.r2.md` and adds `-Resume <that seat's sessionId>`, using that round-2 file as `-TaskFile`. A failed seat follows "Failed delegate.ps1 runs" in SKILL.md (read `stderrTail`, retry once, no `-Resume` after a timeout). If `error` starts with `sandbox:`, do not retry: it is a sandbox setup problem, except `sandbox: environment not ready` — run the same `-SandboxEnv ... -Apply` steps, then retry the launch once; failing again is a problem stop at once, handled like a usage limit. A usage-limit message is a problem stop at once.
 
 Clean up:
 
@@ -157,13 +162,13 @@ This leaves out the Python cache files that `verify` reports as `ignoredCaches`;
 
 When all tasks of a phase are merged:
 
-1. Run the phase test in `<repo>`. The command is that phase's `test` in `docs/features/<name>/feature.json` (also `Test:` under the phase in `plan.md`). If a fix-up solves a failure, log it as an after-merge fix-up. Otherwise make a problem stop.
+1. Run `delegate.ps1 -SandboxEnv -Repo <repo> -Base feature/<name>` (no `-Apply`). If any listed project is not `ready`, run `-SandboxEnv -Repo <repo> -Base feature/<name> -Apply` first (ask only when `proposal.needsApproval` is true). The phase test command is that phase's `test` in `docs/features/<name>/feature.json` (also `Test:` under the phase in `plan.md`). When the report lists at least one Python project, run it with `delegate.ps1 -SandboxRun -Repo <repo> -Base feature/<name> -Command "<test>" -TimeoutSec 3600`; the phase test passes only when `status` is `ran` and `exitCode` is 0, and any other result is a failure (show `output`). A repo with no Python projects runs the phase test in `<repo>` as before. If a fix-up solves a failure, log it as an after-merge fix-up. Otherwise make a problem stop.
 2. If phase check-ins are on (`status.checkin` is `every-phase`), report and stop. The user turns check-ins on, at plan approval or with "check in every phase". You never turn them on yourself.
 3. Otherwise, continue to the next phase.
 
 ## Merging main in
 
-At a phase boundary, when the user asks: run `git -C <repo> merge --no-ff main`. Never rebase. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "merged main into feature/<name>"`, and run the phase test again. On a conflict, run `git -C <repo> merge --abort`, show the files, and stop for the user. Otherwise the branch diverges until sign-off.
+At a phase boundary, when the user asks: run `git -C <repo> merge --no-ff main`. Never rebase. Log `feature.ps1 decision -Repo <repo> -Name <name> -Kind decision -Text "merged main into feature/<name>"`, then run the phase test the same way as [Phase end](#phase-end) step 1 (`-SandboxEnv` and `-SandboxRun` when the repo has Python projects). On a conflict, run `git -C <repo> merge --abort`, show the files, and stop for the user. Otherwise the branch diverges until sign-off.
 
 ## End of build
 

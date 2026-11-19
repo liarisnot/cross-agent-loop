@@ -42,6 +42,8 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Repo D:/pa
 | `-SandboxCheck` | check sandbox support; with `-Repo` runs the canary; use `-Reserve` or `-Release` to manage drive letters |
 | `-Reserve` | three drive letters, comma-separated (`D`–`Z`); the first is the runtime letter, the other two are slots |
 | `-Release` | remove reserved letters, slot containers and the runtime cache (only when the user asks) |
+| `-SandboxEnv` | with `-Repo` (and optional `-Base`): print a JSON report of each Python project's environment `status` (`ready`, `missing`, `stale`, `install-failed`, `unsupported`) and an optional `proposal` (`needsApproval`, `estimateBytes`, `unknownSize`, `text`). With `-Apply`, build missing environments into `<repo>.xagent\.envs\` and report `built`, `failedNow`, `pruned`. With `-Rebuild <project>`, rebuild one environment that looks ready but is wrong |
+| `-SandboxRun` | with `-Repo`, optional `-Base`, `-Command "<cmd>"` and optional `-TimeoutSec`: run one command in the sandbox with linked environments; prints `status` (`ran`, `timeout`, or `environment-missing`), `exitCode`, `output` (first 40 lines) and `seconds` |
 
 To run workers in parallel, issue several Bash calls in one message, each with its own `-TaskId` (or the same id with different `-Seat`s for read-only runs). Set the Bash tool `timeout` above `-TimeoutSec`. Short runs (preflights, reviews) can stay in the foreground.
 
@@ -199,6 +201,9 @@ That reserves the letters, maps them, creates the slot containers and runs the c
 
 **Read list.** Edit `%LOCALAPPDATA%\xagent\sandbox.json` to add toolchain folders under your profile. Each entry can set `addToPath: true`. Refused entries: the profile root itself; anything under `~\.ssh`, `~\.aws`, `~\.gnupg`, `~\.cursor`, `~\AppData\Roaming` or `%LOCALAPPDATA%\cursor-agent`; anything under the sandbox's own folder; and paths that do not exist. A refused entry fails the run with `sandbox: read-list entry '<path>' <reason>; edit sandbox.json`, and `doctor` reports it first.
 
+
+**Environments.** Ready repos build each Python project's dependencies into `<repo>.xagent\.envs\`. In sandboxed runs each project's `.venv` is linked to its built environment read-only, with `uv` on `PATH`; `pip install` and `uv add` fail inside the run. `uv` must be installed on the host; the skill never installs it. Before the first sandboxed worker in a repo with Python projects, run `-SandboxEnv -Repo <repo>` (and `-Base` when workers use a feature branch); if the report proposes a build, ask the user once when `proposal.needsApproval` is true and show `proposal.text`, otherwise run `-SandboxEnv -Repo <repo> -Apply` and report the result in one line. Rebuilds run without asking unless the estimate is over 5 GB; use `-Rebuild <project>` when an environment looks ready but is wrong. The lead uses `-SandboxRun -Repo <repo> -Command "<cmd>"` to run a test command inside the sandbox with these environments; the `feature` skill runs phase tests the same way for such repos.
+
 **Limits.**
 
 - `taskkill.exe` hangs inside the container; use `Stop-Process -Force` or `.Kill($true)` in scripts.
@@ -216,4 +221,4 @@ That reserves the letters, maps them, creates the slot containers and runs the c
 
 - Never delegate secrets, credentials, deploy or publish steps, or anything outside the repo.
 - Workers must not commit or push. If one did, review its commits as part of the diff (`git -C <wt> log <baseSha>..`).
-- If `ok` is false: read `stderrTail` and the log files, then retry once unless `error` starts with `sandbox:`. That is a setup problem: report it to the user and do not retry.
+- If `ok` is false: read `stderrTail` and the log files, then retry once unless `error` starts with `sandbox:`. That is a setup problem: report it to the user and do not retry. The one exception is `sandbox: environment not ready`: run `-SandboxEnv -Repo <repo> -Base <base> -Apply` (ask first when `proposal.needsApproval` is true), then retry the launch once. For your own test runs in the sandbox, use `-SandboxRun` instead of running the command on the host.
