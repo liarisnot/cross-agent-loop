@@ -1403,7 +1403,19 @@ function Get-XagentMergedTaskIds {
     $branch = "feature/$FeatureName"
     & git -C $Repository show-ref --verify --quiet "refs/heads/$branch" 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { return @() }
-    $lines = @(Invoke-GitRepo $Repository 'log' $branch '--format=%(trailers:key=Xagent-Task,valueonly)')
+    # Only this feature's own task merges: first-parent history since 'feature(<name>): start'. A plain log
+    # also reads earlier features' merges (ancestors through main) and tasks merged in with main.
+    $range = $branch
+    $startSubject = "feature($FeatureName): start"
+    foreach ($ln in @(Invoke-GitRepo $Repository 'log' '--first-parent' '--format=%H %P%x09%s' $branch)) {
+        $parts = ([string]$ln).Split("`t", 2)
+        if ($parts.Count -eq 2 -and $parts[1] -ceq $startSubject) {
+            $shas = $parts[0].Split(' ')
+            if ($shas.Count -ge 2 -and $shas[1]) { $range = "$($shas[1])..$branch" }
+            break
+        }
+    }
+    $lines = @(Invoke-GitRepo $Repository 'log' '--first-parent' $range '--format=%(trailers:key=Xagent-Task,valueonly)')
     $ids = [System.Collections.Generic.List[string]]::new()
     foreach ($ln in $lines) {
         $t = ([string]$ln).Trim()

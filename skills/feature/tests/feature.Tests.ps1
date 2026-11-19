@@ -956,6 +956,27 @@ Describe 'feature.ps1 plan' {
         $r.Json.error | Should -Match 'task t1 is already merged'
     }
 
+    It 'ignores task trailers from before the feature started and from merged-in main' {
+        $repo = New-TestRepo
+        & git -C $repo commit --allow-empty -m 'older feature merge' -m 'Xagent-Task: old-task' | Out-Null
+        New-FeatureAtStage -Repo $repo -Name 'own' -Stage 'plan'
+        & git -C $repo switch -q main 2>&1 | Out-Null
+        & git -C $repo commit --allow-empty -m 'side fix on main' -m 'Xagent-Task: side-fix' | Out-Null
+        & git -C $repo switch -q feature/own 2>&1 | Out-Null
+        & git -C $repo merge --no-ff -q -m 'Merge main into feature/own' main 2>&1 | Out-Null
+        $path = Join-Path $TestDrive 'own.json'
+        New-PlanFile -Path $path -Plan (Get-StandardTwoPhasePlan)
+        $r = Invoke-Feature @('plan', '-PlanFile', $path, '-Repo', $repo, '-Name', 'own') -WorkingDirectory $repo
+        $r.Json.ok | Should -BeTrue -Because ($r.Json | ConvertTo-Json -Compress)
+        & git -C $repo commit --allow-empty -m 'merge t1' -m 'Xagent-Task: t1' | Out-Null
+        $plan = Get-StandardTwoPhasePlan
+        $plan.phases[0].tasks = @($plan.phases[0].tasks | Where-Object { $_.id -ne 't1' })
+        $path2 = Join-Path $TestDrive 'own2.json'
+        New-PlanFile -Path $path2 -Plan $plan
+        $r2 = Invoke-Feature @('plan', '-PlanFile', $path2, '-Repo', $repo, '-Name', 'own') -WorkingDirectory $repo
+        $r2.Json.error | Should -Match 'task t1 is already merged'
+    }
+
     It 'rejects re-plan that changes merged task brief' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'rb' -Plan (Get-StandardTwoPhasePlan) | Out-Null
