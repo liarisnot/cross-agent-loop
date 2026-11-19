@@ -125,6 +125,30 @@ function New-LaunchRepo([string]$Path) {
     Invoke-LaunchGit -ArgumentList @('-C', $Path, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-m', 'init', '--quiet')
 }
 
+function New-DelegateSeRepo {
+    param([Parameter(Mandatory)][string]$Path)
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    & git -C $Path init -q -b main 2>&1 | Out-Null
+    & git -C $Path config user.name t
+    & git -C $Path config user.email t@example.invalid
+    $lockSrc = Join-Path $script:Here 'fixtures\sandbox-env\uv.lock'
+    Copy-Item -LiteralPath $lockSrc -Destination (Join-Path $Path 'uv.lock') -Force
+    [IO.File]::WriteAllText((Join-Path $Path '.python-version'), '3.12', [Text.UTF8Encoding]::new($false))
+    & git -C $Path add -A 2>&1 | Out-Null
+    & git -C $Path commit -q -m init 2>&1 | Out-Null
+}
+
+
+function Get-DelegateRepoTop([string]$RepoPath) {
+    $t = (& git.exe -C $RepoPath rev-parse --show-toplevel 2>$null | Select-Object -First 1).ToString().Trim() -replace '/', '\'
+    if ([string]::IsNullOrWhiteSpace($t)) { return [IO.Path]::GetFullPath($RepoPath).TrimEnd('\') }
+    return $t.TrimEnd('\')
+}
+function Get-DelegateWtRoot([string]$Repo) {
+    $name = Split-Path $Repo -Leaf
+    Join-Path (Split-Path $Repo -Parent) ($name + '.xagent')
+}
+
 function Remove-LaunchTree([string]$Root) {
     if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root)) { return }
     foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
@@ -539,6 +563,38 @@ Describe 'delegate parameter sets' {
         $r.Json.ok | Should -BeTrue -Because $because
         Assert-EmptyNoteArray $r.Json.release.released $because
     }
+    It 'exposes Env and SandboxRun parameter sets with mandatory switches' {
+        $c = Get-Command -Name $script:DelegateScript
+        $envPs = @($c.ParameterSets | Where-Object Name -eq 'Env')
+        $envPs.Count | Should -Be 1
+        @($envPs[0].Parameters | Where-Object Name -eq 'SandboxEnv')[0].IsMandatory | Should -BeTrue
+        @($envPs[0].Parameters | Where-Object Name -eq 'Repo')[0].IsMandatory | Should -BeTrue
+        $runPs = @($c.ParameterSets | Where-Object Name -eq 'SandboxRun')
+        $runPs.Count | Should -Be 1
+        @($runPs[0].Parameters | Where-Object Name -eq 'SandboxRun')[0].IsMandatory | Should -BeTrue
+        @($runPs[0].Parameters | Where-Object Name -eq 'Repo')[0].IsMandatory | Should -BeTrue
+        @($runPs[0].Parameters | Where-Object Name -eq 'Command')[0].IsMandatory | Should -BeTrue
+    }
+
+    It 'rejects -NoSandbox with -SandboxEnv, -SandboxRun, and -Rebuild without -Apply' {
+        $repoDir = Join-Path $TestDrive 'param-env-repo'
+        New-LaunchRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $envBase = Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog
+        $cases = @(
+            @{ Args = @('-SandboxEnv', '-Repo', $repo, '-NoSandbox'); Error = '-NoSandbox cannot be used with -SandboxEnv' }
+            @{ Args = @('-SandboxRun', '-Repo', $repo, '-Command', 'exit 0', '-NoSandbox'); Error = '-NoSandbox cannot be used with -SandboxRun' }
+            @{ Args = @('-SandboxEnv', '-Repo', $repo, '-Rebuild', '.'); Error = '-Rebuild requires -Apply' }
+        )
+        foreach ($case in $cases) {
+            $r = Invoke-DelegateChild -ArgumentList $case.Args -ExtraEnv $envBase
+            $because = Format-DelegateResult $r
+            @($r.JsonLines).Count | Should -Be 1 -Because $because
+            $r.ExitCode | Should -Be 1 -Because $because
+            $r.Json.ok | Should -BeFalse -Because $because
+            $r.Json.error | Should -Be $case.Error -Because $because
+        }
+    }
 }
 
 Describe 'unsandboxed delegate' {
@@ -871,5 +927,148 @@ $repoCanary
             $text = $utf8.GetString([IO.File]::ReadAllBytes($file.FullName))
             $text.Contains($secret) | Should -BeFalse -Because $file.FullName
         }
+    }
+}
+
+Describe 'SandboxEnv command' {
+    BeforeAll {
+        $script:SeParent = Join-Path $TestDrive 'se'
+        $script:SeOtherParent = Join-Path $TestDrive 'se-other'
+        New-Item -ItemType Directory -Force -Path $script:SeParent, $script:SeOtherParent | Out-Null
+        $seRepoDir = Join-Path $script:SeParent 'repo'
+        $seOtherRepoDir = Join-Path $script:SeOtherParent 'repo'
+        New-DelegateSeRepo $seRepoDir
+        New-DelegateSeRepo $seOtherRepoDir
+        $script:SeRepo = Get-DelegateRepoTop $seRepoDir
+        $script:SeOtherRepo = Get-DelegateRepoTop $seOtherRepoDir
+        $script:SeUvPath = [IO.Path]::GetFullPath((Join-Path $script:Here 'fixtures\sandbox-env\fake-uv.cmd'))
+        $script:SeChildEnv = Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog
+        $script:SeChildEnv['XAGENT_UV_PATH'] = $script:SeUvPath
+        $script:SeChildEnv['XAGENT_SANDBOX_ROOT'] = Join-Path $TestDrive 'se-sandbox-root'
+        New-Item -ItemType Directory -Force -Path $script:SeChildEnv['XAGENT_SANDBOX_ROOT'] | Out-Null
+    }
+
+    AfterAll {
+        Remove-LaunchTree -Root $script:SeParent
+        Remove-LaunchTree -Root $script:SeOtherParent
+    }
+
+    It 'prints a missing-env report without a built key' {
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $script:SeRepo) -ExtraEnv $script:SeChildEnv
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        @($r.Json.projects).Count | Should -Be 1 -Because $because
+        $r.Json.projects[0].status | Should -Be 'missing' -Because $because
+        $r.Json.proposal | Should -Not -BeNullOrEmpty -Because $because
+        $r.Json.PSObject.Properties.Name | Should -Not -Contain 'built' -Because $because
+    }
+
+    It 'applies environments and reports built, pruned, and failedNow arrays' {
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $script:SeRepo, '-Apply') -ExtraEnv $script:SeChildEnv
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        @($r.Json.built).Count | Should -Be 1 -Because $because
+        $r.Json.projects[0].status | Should -Be 'ready' -Because $because
+        @($r.Json.pruned).Count | Should -Be 0 -Because $because
+        @($r.Json.failedNow).Count | Should -Be 0 -Because $because
+    }
+
+    It 'reports install-failed when fake uv sync fails' {
+        $failParent = Join-Path $TestDrive 'se-fail'
+        $failRepoDir = Join-Path $failParent 'repo'
+        New-DelegateSeRepo $failRepoDir
+        $envMap = @{} + $script:SeChildEnv
+        $envMap['FAKE_UV_FAIL'] = 'sync'
+        try {
+            $r = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', (Get-DelegateRepoTop $failRepoDir), '-Apply') -ExtraEnv $envMap
+            $because = Format-DelegateResult $r
+            $r.ExitCode | Should -Be 0 -Because $because
+            @($r.Json.failedNow).Count | Should -Be 1 -Because $because
+            $r.Json.projects[0].status | Should -Be 'install-failed' -Because $because
+        } finally {
+            Remove-LaunchTree -Root $failParent
+        }
+    }
+
+    It 'rebuilds one project and rejects a missing rebuild name' {
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $script:SeRepo, '-Apply', '-Rebuild', '.') -ExtraEnv $script:SeChildEnv
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 0 -Because $because
+        @($r.Json.built).Count | Should -Be 1 -Because $because
+        $bad = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $script:SeRepo, '-Apply', '-Rebuild', 'nosuch') -ExtraEnv $script:SeChildEnv
+        $bbecause = Format-DelegateResult $bad
+        $bad.ExitCode | Should -Be 1 -Because $bbecause
+        $bad.Json.ok | Should -BeFalse -Because $bbecause
+        $bad.Json.error | Should -BeLike '-Rebuild: no project nosuch*' -Because $bbecause
+    }
+
+    It 'returns environment-missing from -SandboxRun without probe worktrees' {
+        $wtRoot = Get-DelegateWtRoot $script:SeOtherRepo
+        if (-not (Test-Path -LiteralPath $wtRoot)) { New-Item -ItemType Directory -Force -Path $wtRoot | Out-Null }
+        $before = @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxRun', '-Repo', $script:SeOtherRepo, '-Command', 'exit 0') -ExtraEnv $script:SeChildEnv
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        $r.Json.status | Should -Be 'environment-missing' -Because $because
+        $r.Json.exitCode | Should -BeNullOrEmpty -Because $because
+        $r.Json.message | Should -BeLike 'sandbox: environment not ready:*' -Because $because
+        @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count | Should -Be $before -Because $because
+    }
+}
+
+Describe 'SandboxRun command' -Tag Sandbox {
+    BeforeDiscovery {
+        $script:SrSkipReason = Get-LaunchSkipReason -Kind Sandbox
+        $script:SrSkip = [bool]$script:SrSkipReason
+        if ($script:SrSkip) { Write-Host "SandboxRun command skipped: $script:SrSkipReason" }
+    }
+
+    BeforeAll {
+        $script:SrLetters = $null
+        $script:SrTestRoot = $null
+        $script:SrRepo = $null
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        $script:SrRoot = Join-Path $TestDrive 'sr-root'
+        $script:SrLog = Join-Path $TestDrive 'sr-log'
+        New-Item -ItemType Directory -Force -Path $script:SrRoot, $script:SrLog | Out-Null
+        $env:XAGENT_SANDBOX_ROOT = $script:SrRoot
+        $env:XAGENT_CURSOR_ROOT = $script:FakeCursor
+        Import-Module $script:ModulePath -Force
+        $free = @(Get-TestFreeLetters)
+        if ($free.Count -lt 3) { throw 'sandbox: fewer than three free letters D-Z at reservation time' }
+        $script:SrLetters = @([string]$free[0], [string]$free[1], [string]$free[2])
+        Set-SandboxLetters -Letters $script:SrLetters
+        $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:SrTestRoot = Join-Path (Split-Path $script:RepoRoot -Qualifier) ('xagent-tests-' + $suffix)
+        New-Item -ItemType Directory -Force -Path $script:SrTestRoot | Out-Null
+        $script:SrRepo = Join-Path $script:SrTestRoot 'repo'
+        New-LaunchRepo $script:SrRepo
+    }
+
+    AfterAll {
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        try {
+            Clear-ReservedLetters -Letters $script:SrLetters
+        } finally {
+            Remove-LaunchTree -Root $script:SrTestRoot
+        }
+    }
+
+    It 'runs a plain command in the sandbox and removes the probe worktree' -Skip:$script:SrSkip {
+        $wtRoot = Get-DelegateWtRoot $script:SrRepo
+        $before = @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count
+        $r = Invoke-DelegateChild -ArgumentList @('-SandboxRun', '-Repo', $script:SrRepo, '-Command', 'Write-Output hello; exit 3') -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SrRoot $script:SrLog) -WaitMs 180000
+        $because = Format-DelegateResult $r
+        @($r.JsonLines).Count | Should -Be 1 -Because $because
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.ok | Should -BeTrue -Because $because
+        $r.Json.status | Should -Be 'ran' -Because $because
+        $r.Json.exitCode | Should -Be 3 -Because $because
+        ($r.Json.output -join "`n") | Should -Match 'hello' -Because $because
+        @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count | Should -Be $before -Because $because
     }
 }
