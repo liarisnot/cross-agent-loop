@@ -1,6 +1,6 @@
 {
   "name": "sandbox-env",
-  "stage": "design-review",
+  "stage": "plan",
   "checkin": "on-problems",
   "designDoc": "docs/designs/sandbox-env.md",
   "gates": {
