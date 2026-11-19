@@ -3343,6 +3343,34 @@ exit 0
             if ($null -ne $side) { Remove-RunSideWorktree -Path $side.Path }
         }
     }
+    It 'Invoke-SandboxCommand returns both streams in order' -Skip:$script:RunSkip {
+        $r = Invoke-SandboxCommand -Repo $script:RunRepo -Worktree $script:RunWorktree -Runtime $script:RunRuntime -RunName 'isc-streams' -TimeoutSec 60 `
+            -Command "[Console]::Out.WriteLine('stdout-line'); [Console]::Error.WriteLine('stderr-line'); exit 0"
+        $stdoutPath = Join-Path $script:RunRepo '.xagent\runs\isc-streams\stdout.txt'
+        Test-Path -LiteralPath $stdoutPath | Should -BeTrue
+        $r.status | Should -Be 'ran'
+        $r.exitCode | Should -Be 0
+        $r.output | Should -Be @('stdout-line', 'stderr-line')
+    }
+
+    It 'Invoke-SandboxCommand passes a quote and a semicolon' -Skip:$script:RunSkip {
+        $r = Invoke-SandboxCommand -Repo $script:RunRepo -Worktree $script:RunWorktree -Runtime $script:RunRuntime -RunName 'isc-quote' -TimeoutSec 60 `
+            -Command "Write-Output 'a""b'; exit 3"
+        $stdoutPath = Join-Path $script:RunRepo '.xagent\runs\isc-quote\stdout.txt'
+        Test-Path -LiteralPath $stdoutPath | Should -BeTrue
+        $r.status | Should -Be 'ran'
+        $r.exitCode | Should -Be 3
+        $r.output[0] | Should -Be 'a"b'
+    }
+
+    It 'Invoke-SandboxCommand times out' -Skip:$script:RunSkip {
+        $r = Invoke-SandboxCommand -Repo $script:RunRepo -Worktree $script:RunWorktree -Runtime $script:RunRuntime -RunName 'isc-timeout' -TimeoutSec 2 `
+            -Command 'Start-Sleep 30'
+        $stdoutPath = Join-Path $script:RunRepo '.xagent\runs\isc-timeout\stdout.txt'
+        Test-Path -LiteralPath $stdoutPath | Should -BeTrue
+        $r.status | Should -Be 'timeout'
+        $r.exitCode | Should -Be $null
+    }
 }
 
 Describe 'Sandbox environment paths' {
@@ -3580,3 +3608,73 @@ Describe 'Sandbox extra environment' {
     }
 }
 
+Describe 'Sandbox lock helper' {
+    BeforeAll { Import-Module $script:ModulePath -Force }
+
+    It 'returns the script block output' {
+        $out = Invoke-SandboxLocked -Name ('Local\xagent-test-{0}' -f [guid]::NewGuid()) -TimeoutSec 5 -TimeoutMessage 'timed' -ScriptBlock { 'hello', 42 }
+        $out | Should -BeExactly @('hello', 42)
+    }
+
+    It 'throws the timeout message when the mutex is held' {
+        $name = 'Local\xagent-test-{0}' -f [guid]::NewGuid()
+        $job = Start-Job -ScriptBlock {
+            param($mutexName)
+            $m = [Threading.Mutex]::new($true, $mutexName)
+            Start-Sleep -Seconds 60
+            $m.ReleaseMutex()
+            $m.Dispose()
+        } -ArgumentList $name
+        try {
+            $held = $null
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (-not [Threading.Mutex]::TryOpenExisting($name, [ref]$held) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            if ($null -ne $held) { $held.Dispose() }
+            Start-Sleep -Milliseconds 300
+            $msg = 'lock test timeout {0}' -f [guid]::NewGuid()
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            { Invoke-SandboxLocked -Name $name -TimeoutSec 2 -TimeoutMessage $msg -ScriptBlock { 'x' } } | Should -Throw $msg
+            $clock.Elapsed.TotalSeconds | Should -BeGreaterThan 1
+        } finally {
+            Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
+            Remove-Job $job -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    It 'takes over an abandoned mutex' {
+        $name = 'Local\xagent-test-{0}' -f [guid]::NewGuid()
+        $job = Start-Job -ScriptBlock {
+            param($mutexName)
+            $null = [Threading.Mutex]::new($true, $mutexName)
+        } -ArgumentList $name
+        Wait-Job $job | Out-Null
+        Remove-Job $job -Force
+        Start-Sleep -Milliseconds 200
+        Invoke-SandboxLocked -Name $name -TimeoutSec 5 -TimeoutMessage 'timed' -ScriptBlock { 'ok' } | Should -Be 'ok'
+    }
+}
+
+Describe 'Sandbox worktree delete' {
+    BeforeAll { Import-Module $script:ModulePath -Force }
+
+    It 'skips reparse points during worktree cleanup' {
+        $target = Join-Path $TestDrive ('wt-del-target-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $root = Join-Path $TestDrive ('wt-del-root-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        $roFile = Join-Path $target 'ro.txt'
+        Set-Content -LiteralPath $roFile -Value 'keep' -Encoding utf8
+        (Get-Item -LiteralPath $roFile).IsReadOnly = $true
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        try {
+            $null = New-Item -ItemType Junction -Path (Join-Path $root 'link') -Target $target -ErrorAction Stop
+        } catch {
+            Set-ItResult -Skipped -Because 'cannot create a junction here'
+            return
+        }
+        InModuleScope Sandbox -Parameters @{ Path = $root } { Clear-SandboxWorktreeForDelete $Path }
+        Test-Path -LiteralPath $root | Should -BeFalse
+        Test-Path -LiteralPath $target | Should -BeTrue
+        Test-Path -LiteralPath $roFile | Should -BeTrue
+        (Get-Item -LiteralPath $roFile).IsReadOnly | Should -BeTrue
+    }
+}
