@@ -1,3 +1,10 @@
+const fs = require('fs');
+
+const argsFile = process.env.FAKE_CURSOR_ARGS_FILE;
+if (argsFile) {
+    fs.writeFileSync(argsFile, JSON.stringify(process.argv.slice(2)), 'utf8');
+}
+
 const result = JSON.stringify({
     status: 'done',
     summary: 'fake',
