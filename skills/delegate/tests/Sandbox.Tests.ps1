@@ -457,6 +457,43 @@ Describe 'Get-SandboxRuntime' {
         Test-Path -LiteralPath $partial | Should -BeFalse
     }
 
+    It 'patches the realpath and tmp code in the runtime copy and records it' {
+        $case = Invoke-Runtime -Name 'jspatch' -PatternCount 1
+        $src = Join-Path $case.Cursor "versions\$($case.Version)"
+        $realpath = 'try{e=(0,P.realpathSync)(t)}catch{throw new Xw(t,`Cannot verify canonical path before ${r}: ${t}`)}'
+        $tmp = 'const p="--cursor-persist-restore",h="cursor-agent",g="/tmp";function k(){return d().join(g,`cursor-agent-persist-${t}`)}'
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText((Join-Path $src 'index.js'), "/*! x */$realpath;$tmp", $utf8)
+        [IO.File]::WriteAllText((Join-Path $src 'worker.js'), "a;$realpath", $utf8)
+        [IO.File]::WriteAllText((Join-Path $src 'twice.js'), "$realpath;$realpath", $utf8)
+        $null = Get-SandboxRuntime -CursorRoot $case.Cursor -CacheRoot $case.Cache -UvProbe { '1.52.1' }
+        $dir = Join-Path $case.Cache $case.Version
+        $index = [IO.File]::ReadAllText((Join-Path $dir 'index.js'))
+        $index.Contains('e=(0,P.realpathSync.native)(t)}catch{throw new Xw(t,`Cannot verify canonical path') | Should -BeTrue
+        $index | Should -BeLike '*h="cursor-agent",g=require("node:os").tmpdir();*'
+        [IO.File]::ReadAllText((Join-Path $dir 'worker.js')) | Should -BeLike '*realpathSync.native*'
+        [IO.File]::ReadAllText((Join-Path $dir 'twice.js')) | Should -Not -BeLike '*realpathSync.native*'
+        [IO.File]::ReadAllText((Join-Path $src 'index.js')) | Should -Not -BeLike '*realpathSync.native*'
+        $patch = Get-Content -Raw -LiteralPath (Join-Path $dir 'patch.json') | ConvertFrom-Json
+        $patch.jsPatch | Should -Be 2
+        @($patch.jsPatched | Sort-Object) | Should -Be @('index.js:realpath', 'index.js:tmp', 'worker.js:realpath')
+    }
+
+    It 'copies again when patch.json records no JavaScript patch version' {
+        $case = Invoke-Runtime -Name 'jspatch-old' -PatternCount 1
+        $null = Get-SandboxRuntime -CursorRoot $case.Cursor -CacheRoot $case.Cache -UvProbe { '1.52.1' }
+        $dir = Join-Path $case.Cache $case.Version
+        $patchPath = Join-Path $dir 'patch.json'
+        $patch = Get-Content -Raw -LiteralPath $patchPath | ConvertFrom-Json
+        $patch.PSObject.Properties.Remove('jsPatch')
+        $patch | ConvertTo-Json | Set-Content -LiteralPath $patchPath -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $dir 'marker.txt') -Value 'stale' -Encoding utf8
+        $again = Get-SandboxRuntime -CursorRoot $case.Cursor -CacheRoot $case.Cache -UvProbe { '1.52.1' }
+        $again.patched | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $dir 'marker.txt') | Should -BeFalse
+        (Get-Content -Raw -LiteralPath $patchPath | ConvertFrom-Json).jsPatch | Should -Be 2
+    }
+
     It 'throws when no version folder matches and builds no cache' {
         $cursor = Join-Path $TestDrive 'empty-cursor'
         $cache = Join-Path $TestDrive 'empty-cache'
@@ -481,6 +518,43 @@ Describe 'Get-SandboxRuntime' {
         $message | Should -Be "sandbox: Cursor $($case.Version): cannot read libuv version from node.exe ($reason)"
         Get-Content -LiteralPath $marker | Should -Be 'keep'
         Test-Path -LiteralPath (Join-Path $case.Cache "$($case.Version).partial") | Should -BeFalse
+    }
+}
+
+Describe 'Move-SandboxChat' {
+    BeforeAll {
+        function Get-ChatHash([string]$Text) {
+            $bytes = [Security.Cryptography.MD5]::HashData([Text.Encoding]::UTF8.GetBytes($Text))
+            return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+        }
+    }
+
+    It 'moves a chat from another slot folder to the current slot folder' {
+        $wt = Join-Path $TestDrive 'chat-move'
+        $chats = Join-Path $wt '.xagent\sandbox\home\.cursor\chats'
+        $old = Join-Path (Join-Path $chats (Get-ChatHash 'Y:\')) 'abc-123'
+        New-Item -ItemType Directory -Force -Path $old | Out-Null
+        Set-Content -LiteralPath (Join-Path $old 'store.db') -Value 'chat' -Encoding utf8
+        $note = Move-SandboxChat -Worktree $wt -Slot 'x' -SessionId 'abc-123'
+        $note | Should -Be 'moved chat abc-123 to slot X'
+        $new = Join-Path (Join-Path $chats (Get-ChatHash 'X:\')) 'abc-123'
+        Get-Content -LiteralPath (Join-Path $new 'store.db') | Should -Be 'chat'
+        Test-Path -LiteralPath $old | Should -BeFalse
+    }
+
+    It 'leaves a chat already in the current slot folder' {
+        $wt = Join-Path $TestDrive 'chat-same'
+        $here = Join-Path (Join-Path $wt ('.xagent\sandbox\home\.cursor\chats\' + (Get-ChatHash 'X:\'))) 'abc-123'
+        New-Item -ItemType Directory -Force -Path $here | Out-Null
+        Move-SandboxChat -Worktree $wt -Slot 'X' -SessionId 'abc-123' | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $here | Should -BeTrue
+    }
+
+    It 'returns nothing when the chat or the chats folder is missing' {
+        $wt = Join-Path $TestDrive 'chat-none'
+        Move-SandboxChat -Worktree $wt -Slot 'X' -SessionId 'abc-123' | Should -BeNullOrEmpty
+        New-Item -ItemType Directory -Force -Path (Join-Path $wt '.xagent\sandbox\home\.cursor\chats\deadbeef') | Out-Null
+        Move-SandboxChat -Worktree $wt -Slot 'X' -SessionId 'abc-123' | Should -BeNullOrEmpty
     }
 }
 
