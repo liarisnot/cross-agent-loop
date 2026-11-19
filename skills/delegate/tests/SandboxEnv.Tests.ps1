@@ -1392,3 +1392,23 @@ Describe 'Remove-SandboxEnvLinks dangling junction' {
         $null -eq (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue) | Should -BeTrue
     }
 }
+
+Describe 'Get-SandboxEnvProjects test data' {
+    It 'skips projects under fixtures and testdata folders' {
+        $repo = Join-Path $TestDrive ('fixt-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path $repo | Out-Null
+        & git -C $repo init -q -b main 2>&1 | Out-Null
+        & git -C $repo config user.name t
+        & git -C $repo config user.email t@example.invalid
+        foreach ($rel in @('app/uv.lock', 'tests/fixtures/env/uv.lock', 'src/testdata/x/requirements.txt', 'a/Fixtures/pyproject.toml')) {
+            $full = Join-Path $repo $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
+            [IO.File]::WriteAllText($full, "version = 1`nrequires-python = `">=3.12`"`n", [Text.UTF8Encoding]::new($false))
+        }
+        & git -C $repo add -A 2>&1 | Out-Null
+        & git -C $repo commit -q -m init 2>&1 | Out-Null
+        $sha = (& git -C $repo rev-parse HEAD).Trim()
+        $projects = @(Get-SandboxEnvProjects -Repo $repo -Commit $sha)
+        @($projects | ForEach-Object { $_.project }) | Should -Be @('app')
+    }
+}

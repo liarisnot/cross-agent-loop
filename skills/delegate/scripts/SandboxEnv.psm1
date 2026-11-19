@@ -266,6 +266,13 @@ function Find-SandboxDotPythonVersionPath {
 }
 
 
+function Test-SandboxTestDataPath([string]$Path) {
+    foreach ($seg in ($Path -split '/')) {
+        if (@('fixtures', 'testdata', 'test_data', '__fixtures__') -contains $seg.ToLowerInvariant()) { return $true }
+    }
+    return $false
+}
+
 function Get-SandboxEnvProjects {
     [CmdletBinding()]
     param(
@@ -274,7 +281,8 @@ function Get-SandboxEnvProjects {
     )
 
     $tree = Get-SandboxGitTreeMap -Repo $Repo -Commit $Commit
-    $paths = @($tree.Keys)
+    # Test data is not a project: skip anything under a fixtures/testdata folder.
+    $paths = @($tree.Keys | Where-Object { -not (Test-SandboxTestDataPath $_) })
 
     $lockFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($p in $paths) {
