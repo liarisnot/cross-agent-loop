@@ -18,3 +18,16 @@ wheels = [
     { url = "https://pypi.org/pkg-b-2.0.0-py3-none-any.whl", hash = "sha256:cccc", size = 800 },
     { url = "https://pypi.org/pkg-b-2.0.0-cp311-win_amd64.whl", hash = "sha256:dddd", size = 1600 },
 ]
+
+[[package]]
+name = "pkg-linux-only"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://pypi.org/pkg-linux-only-3.0.0-cp312-manylinux_2_17_x86_64.whl", hash = "sha256:eeee", size = 900000 },
+]
+
+[[package]]
+name = "local-proj"
+version = "0.1.0"
+source = { editable = "." }
