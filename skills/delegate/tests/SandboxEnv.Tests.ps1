@@ -1412,3 +1412,22 @@ Describe 'Get-SandboxEnvProjects test data' {
         @($projects | ForEach-Object { $_.project }) | Should -Be @('app')
     }
 }
+
+Describe 'Get-SandboxEnvProjects under a lock' {
+    It 'keeps subfolder projects under a root lock and skips requirements under a nested lock' {
+        $repo = Join-Path $TestDrive ('under-{0}' -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path $repo | Out-Null
+        & git -C $repo init -q -b main 2>&1 | Out-Null
+        & git -C $repo config user.name t
+        & git -C $repo config user.email t@example.invalid
+        foreach ($rel in @('uv.lock', 'pkg/pyproject.toml', 'tools/requirements.txt', 'svc/uv.lock', 'svc/sub/requirements-dev.txt')) {
+            $full = Join-Path $repo $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
+            [IO.File]::WriteAllText($full, "version = 1`nrequires-python = `">=3.12`"`n", [Text.UTF8Encoding]::new($false))
+        }
+        & git -C $repo add -A 2>&1 | Out-Null
+        & git -C $repo commit -q -m init 2>&1 | Out-Null
+        $sha = (& git -C $repo rev-parse HEAD).Trim()
+        @(Get-SandboxEnvProjects -Repo $repo -Commit $sha | ForEach-Object { $_.project }) | Should -Be @('.', 'pkg', 'svc', 'tools')
+    }
+}

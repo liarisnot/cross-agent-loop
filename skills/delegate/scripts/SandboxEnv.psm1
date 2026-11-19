@@ -104,10 +104,11 @@ function Get-SandboxInterpreterRequest {
     }
 
     $spec = $null
+    # A requirements-only project has no pyproject.toml text; an empty text means no requires-python.
     if ($Kind -eq 'lock') {
-        $spec = Get-SandboxTomlValue -Text $UvLockText -Section '' -Key 'requires-python'
+        if (-not [string]::IsNullOrEmpty($UvLockText)) { $spec = Get-SandboxTomlValue -Text $UvLockText -Section '' -Key 'requires-python' }
     } else {
-        $spec = Get-SandboxTomlValue -Text $PyprojectText -Section 'project' -Key 'requires-python'
+        if (-not [string]::IsNullOrEmpty($PyprojectText)) { $spec = Get-SandboxTomlValue -Text $PyprojectText -Section 'project' -Key 'requires-python' }
     }
     if ([string]::IsNullOrWhiteSpace($spec)) { return $null }
 
@@ -196,7 +197,7 @@ function Test-SandboxAncestorLockProject {
 
     if ($Folder -eq '.') { return $false }
     foreach ($lf in $LockFolders) {
-        if ($lf -eq '.') { continue }
+        if ($lf -eq '.') { continue }   # a root lock does not cover separate projects in subfolders
         if ($Folder -eq $lf -or $Folder.StartsWith("$lf/", [StringComparison]::Ordinal)) {
             return $true
         }
@@ -301,7 +302,7 @@ function Get-SandboxEnvProjects {
         $isPyproject = ($leaf -ceq 'pyproject.toml')
         $isReq = ($leaf.ToLowerInvariant() -match '^requirements.*\.txt$')
         if (-not $isPyproject -and -not $isReq) { continue }
-        if ($isPyproject -and (Test-SandboxAncestorLockProject -Folder $folder -LockFolders $lockFolders)) { continue }
+        if (Test-SandboxAncestorLockProject -Folder $folder -LockFolders $lockFolders) { continue }
         [void]$projectFolders.Add($folder)
     }
     $sortedList = [System.Collections.Generic.List[string]]::new()
