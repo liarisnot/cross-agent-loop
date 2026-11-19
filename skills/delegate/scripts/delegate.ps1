@@ -558,6 +558,9 @@ $baseSha = (Get-Content -LiteralPath $baseFile | Select-Object -First 1).Trim()
 $contract = 'Work only inside this directory. Do NOT git commit or git push. ' +
             'When finished, write a JSON object to .xagent/result.json with keys: status (done|blocked|partial), summary (describe what you did in THIS run), files_changed (array), tests_run (command and pass/fail), open_questions (array). ' +
             'Also reply with that same JSON object as your final message.'
+# In the sandbox the workspace is a drive letter mapped onto the worktree; Cursor's file tools refuse an
+# absolute path on it ("resolves through a symlinked parent"), and relative paths work.
+if ($sandboxed) { $contract += ' Give file tools paths relative to this directory, not absolute paths.' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # Unique file name per run: a resumed worker must not assume it already read it.
 $taskName = "task-$stamp.md"
@@ -687,6 +690,15 @@ try {
             $runArgs.PathSuffix = $envLinks.pathSuffix
         }
         $run = New-SandboxRun @runArgs
+        # The workspace is the slot letter, not the real path. With D:\... Cursor's permission check refused
+        # every file write ("Blocked by permissions configuration") and its shell started in D:\..., where
+        # PowerShell file commands walk the denied drive root. The slot letter maps the same worktree.
+        $cursorArgs[[Array]::IndexOf($cursorArgs, '--workspace') + 1] = "$($run.slot):\"
+        if ($Resume) {
+            try {
+                $null = Move-SandboxChat -Worktree $wt -Slot $run.slot -SessionId $Resume
+            } catch { $sandboxNotes += "could not move chat ${Resume} to slot $($run.slot): $($_.Exception.Message)" }
+        }
         $sandboxExe = "$($run.runtimeLetter):\$($run.runtimeVersion)\node.exe"
         $sandboxArgs = [string[]](@("$($run.runtimeLetter):\$($run.runtimeVersion)\index.js") + $cursorArgs)
         $h = Start-SandboxProcess -Run $run -Exe $sandboxExe -Arguments $sandboxArgs -StdoutPath $stdoutF -StderrPath $stderrF
@@ -728,7 +740,7 @@ try {
     $sw.Stop()
     if ($null -ne $slot) {
         try {
-            $sandboxNotes = @(Stop-SandboxRun -Run $run -Slot $slot -Handle $h)
+            $sandboxNotes += @(Stop-SandboxRun -Run $run -Slot $slot -Handle $h)
         } catch {
             $sandboxNotes += @("stop failed: $($_.Exception.Message)")
         }

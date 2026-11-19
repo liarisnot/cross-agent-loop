@@ -186,6 +186,53 @@ function Write-PatchJson([string]$Directory, $Body) {
     [IO.File]::WriteAllText((Join-Path $Directory 'patch.json'), $json, [Text.UTF8Encoding]::new($false))
 }
 
+# Version of the JavaScript patch below. A cache whose patch.json records another value is rebuilt.
+$script:JsPatchVersion = 2
+
+# Two fixes to Cursor's JavaScript in the runtime copy. Each is applied to a file only where its pattern
+# appears exactly once; otherwise that file is left as it is and the run still works, with the old
+# limit (workers write through the shell; review rounds start fresh sessions).
+#  realpath: Cursor's write tools check a file's canonical path with Node's JavaScript realpathSync, which
+#    lstat's every folder from the drive root down. The container cannot read the attributes of a real
+#    drive root (D:\), so every edit of an existing file failed ("Cannot verify canonical path before
+#    write"; earlier versions said "Blocked by permissions configuration"). The native realpath
+#    (GetFinalPathNameByHandle) gives the same canonical path, symlinks resolved, without touching the root.
+#  tmp: persistent-session state lives under a hard-coded "/tmp", which Node resolves on the workspace's
+#    drive (D:\tmp, denied), so -Resume failed. os.tmpdir() is the run's own granted temp folder.
+# Returns "<file>:<fix>" for each change made.
+$script:JsPatches = @(
+    @{
+        name = 'realpath'
+        marker = 'Cannot verify canonical path'
+        pattern = '([A-Za-z_$][\w$]*=\(0,[A-Za-z_$][\w$]*\.realpathSync)(\)\([A-Za-z_$][\w$]*\)\}catch\{throw new [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*,`Cannot verify canonical path)'
+        replacement = '$1.native$2'
+    },
+    @{
+        name = 'tmp'
+        marker = 'cursor-agent-persist-'
+        pattern = '([A-Za-z_$][\w$]*="cursor-agent",[A-Za-z_$][\w$]*=)"/tmp"'
+        replacement = '$1require("node:os").tmpdir()'
+    }
+)
+
+function Set-SandboxJsPatch([string]$Directory) {
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $done = New-Object System.Collections.Generic.List[string]
+    foreach ($file in @(Get-ChildItem -LiteralPath $Directory -Filter '*.js' -File)) {
+        $text = [IO.File]::ReadAllText($file.FullName, $utf8)
+        $changed = $false
+        foreach ($patch in $script:JsPatches) {
+            if (-not $text.Contains($patch.marker)) { continue }
+            if ([regex]::Matches($text, $patch.pattern).Count -ne 1) { continue }
+            $text = [regex]::Replace($text, $patch.pattern, $patch.replacement)
+            $done.Add("$($file.Name):$($patch.name)")
+            $changed = $true
+        }
+        if ($changed) { [IO.File]::WriteAllText($file.FullName, $text, $utf8) }
+    }
+    Write-Output -NoEnumerate $done.ToArray()
+}
+
 function Remove-SandboxTree([string]$Path, [string]$Version) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     try {
@@ -204,6 +251,8 @@ function Test-CachedRuntime([string]$Dest, [string]$SourceNode) {
     } catch {
         return $null
     }
+    $jsVersion = Get-ObjectProperty $patch 'jsPatch'
+    if ($null -eq $jsVersion -or [string]$jsVersion -ne [string]$script:JsPatchVersion) { return $null }
     $cachedHash = Get-SandboxFileHash $cachedNode
     $patchedFlag = [bool](Get-ObjectProperty $patch 'patched')
     $uvText = [string](Get-ObjectProperty $patch 'uv')
@@ -984,8 +1033,14 @@ function Get-SandboxRuntime {
     }
 
     $patched = $false
+    try {
+        $jsPatched = Set-SandboxJsPatch -Directory $partial
+    } catch {
+        Remove-SandboxTree -Path $partial -Version $version
+        throw "sandbox: Cursor ${version}: patching the runtime copy failed: $($_.Exception.Message)"
+    }
     if (-not $needPatch) {
-        Write-PatchJson -Directory $partial -Body ([ordered]@{ patched = $false; uv = [string]$uv.raw })
+        Write-PatchJson -Directory $partial -Body ([ordered]@{ patched = $false; uv = [string]$uv.raw; jsPatch = $script:JsPatchVersion; jsPatched = $jsPatched })
     } else {
         $copyNode = Join-Path $partial 'node.exe'
         $copyOffsets = Get-PipePatternOffsets -Path $copyNode
@@ -1003,6 +1058,8 @@ function Get-SandboxRuntime {
             uv = [string]$uv.raw
             sourceSha256 = $sourceHash
             patchedSha256 = $patchedHash
+            jsPatch = $script:JsPatchVersion
+            jsPatched = $jsPatched
         })
         $patched = $true
     }
@@ -1972,6 +2029,30 @@ function New-SandboxRun {
     }
 }
 
+# Cursor keeps a chat under <run home>\.cursor\chats\<md5 of the --workspace text>\<chat id>. The workspace
+# is the slot letter, so a resumed run that gets the other slot would not find its chat and would start
+# with no memory. Moves the chat to the current slot's folder. Returns a note, or $null when nothing moved.
+function Move-SandboxChat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][string]$Slot,
+        [Parameter(Mandatory)][string]$SessionId
+    )
+    $chats = Join-Path $Worktree '.xagent\sandbox\home\.cursor\chats'
+    if (-not (Test-Path -LiteralPath $chats)) { return $null }
+    $bytes = [Security.Cryptography.MD5]::HashData([Text.Encoding]::UTF8.GetBytes("$($Slot.ToUpperInvariant()):\"))
+    $hash = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+    $target = Join-Path (Join-Path $chats $hash) $SessionId
+    if (Test-Path -LiteralPath $target) { return $null }
+    $found = @(Get-ChildItem -LiteralPath $chats -Directory | ForEach-Object { Join-Path $_.FullName $SessionId } |
+        Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+    if (-not $found) { return $null }
+    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+    Move-Item -LiteralPath $found -Destination $target -ErrorAction Stop
+    return "moved chat $SessionId to slot $($Slot.ToUpperInvariant())"
+}
+
 function Start-SandboxProcess {
     [CmdletBinding()]
     param(
@@ -2708,4 +2789,4 @@ function Invoke-SandboxCanary {
     }
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxLocked, Invoke-SandboxCommand, Invoke-SandboxCanary, Resolve-SandboxReadEntry
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxLocked, Invoke-SandboxCommand, Invoke-SandboxCanary, Move-SandboxChat, Resolve-SandboxReadEntry

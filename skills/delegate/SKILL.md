@@ -210,6 +210,9 @@ That reserves the letters, maps them, creates the slot containers and runs the c
 - SSH git remotes need `~\.ssh`, which is blocked; HTTPS remotes work.
 - Host `localhost` services are not reachable unless an admin loopback exemption was granted for a slot (not part of the default setup).
 - Workers must not `git add` or `git commit`; the lead commits.
+- The worker's workspace is the slot drive letter (`X:\`), mapped onto the worktree. Cursor's file tools refuse an absolute path on it, so the harness tells workers to use relative paths. Inside the sandbox, use the slot letter or relative paths, not the worktree's real `D:\...` path: anything that walks up to a real drive root is denied there.
+- Pester's test registry writes `HKCU\Software\Pester`, which the container cannot write. A Pester command in a task file sets `TestRegistry.Enabled = $false` in its `New-PesterConfiguration` (or runs a repo script that already does).
+- The sandbox's copy of Cursor is patched in two places, so that its file tools work and `-Resume` finds its session state (see `Set-SandboxJsPatch` in `Sandbox.psm1`). `patch.json` in the runtime cache lists the patches applied. If a Cursor update changes the patched code, that patch is skipped: workers then write through the shell, and review rounds start fresh sessions.
 
 **Node read-list limit.** A Node.js tool started from a read-list entry under the user profile fails on `require`, because Node resolves real paths through `C:\`, which the sandbox cannot read. Run such tools with `node --preserve-symlinks`. Granting read access on `C:\` is deliberately not done.
 
