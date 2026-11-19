@@ -1,7 +1,7 @@
 # `sandbox-env`: environments a sandboxed worker can reach
 
 *   **Author:** Eugene Chin
-*   **Status:** Draft
+*   **Status:** Approved
 *   **Date:** 2026-11-16
 
 --------------------------------------------------------------------------------
