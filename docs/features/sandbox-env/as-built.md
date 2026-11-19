@@ -14,3 +14,13 @@ What the build settled or changed relative to the locked design (`docs/designs/s
 10. **Rules, "uv workspaces".** Unchanged: unsupported in v1.
 11. **Data, `-SandboxRun` output.** Adds `notes` (linking notes) and, for `environment-missing`, `message`.
 12. **Not done in v1 (accepted limit).** Task acceptance tests (`feature.ps1 verify`) still run on the host in the worker's worktree; only phase tests move into the sandbox.
+
+## Live checks at sign-off (2026-11-19, on the private repo)
+
+1. `-SandboxEnv -Apply` built all six projects' environments in 27 s with packages in `uv`'s cache (the CUDA `torch` environment 5.12 GB, the others 0.01–0.23 GB); every project then reported `ready`.
+2. One `-SandboxRun` (9 s): `uv run python` started in each of the five other projects' linked environments and imported a dependency; `src/tts` ran `tests/test_align.py`, 11 passed.
+3. A sandboxed Cursor worker (21 s) ran the same test, 11 passed; `changes` was empty (the `.venv` link is not reported).
+4. `uv pip install tomli-w` inside the sandbox failed with `Access is denied` on the environment's `site-packages`. (`uv` environments have no `pip` module.)
+5. `-Cleanup -Discard` of that worker left `.envs` intact: 46,230 files before and after.
+6. `-SandboxCheck -Repo` canary: all 13 rows pass.
+Not run live: the older-lockfile case and the review-lens case (covered by unit tests).
