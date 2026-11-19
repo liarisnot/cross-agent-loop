@@ -2221,9 +2221,53 @@ Describe 'feature.ps1 status' {
         & git -C $repo commit -m 'design synthesis' 2>&1 | Out-Null
         $j3 = Invoke-StatusOk $repo -Extra @('-Name', 'rprog')
         ($j3.reviewRuns | Select-Object -First 1).id | Should -Match '-d2-'
+        @($j2.reviewRuns).Count | Should -BeGreaterThan 10
         $models | Out-Null
     }
 
+
+    It 'lists only reaudit rows for a partial design-review round after synthesis' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'part' -Stage 'design-review'
+        $syn = Join-Path $repo 'docs/features/part/reviews/design-1.md'
+        New-Item -ItemType Directory -Force (Split-Path $syn) | Out-Null
+        Set-Content -LiteralPath $syn -Value '# design review 1'
+        & git -C $repo add docs/features/part/reviews/design-1.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'design synthesis' 2>&1 | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('reaudit', '-Phase', '9', '-Repo', $repo, '-Name', 'part') -WorkingDirectory $repo)
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'part')
+        @($j.reviewRuns).Count | Should -Be 3
+        @($j.reviewRuns | Where-Object { $_.id -match '-d2-.*-p9-r1$' }).Count | Should -Be 3
+        @($j.reviewRuns | Where-Object { $_.id -notmatch '-r1$' }).Count | Should -Be 0
+    }
+
+    It 'lists all base design-review runs when a new round has no reaudit' {
+        $repo = New-TestRepo
+        New-FeatureAtStage -Repo $repo -Name 'base2' -Stage 'design-review'
+        $syn = Join-Path $repo 'docs/features/base2/reviews/design-1.md'
+        New-Item -ItemType Directory -Force (Split-Path $syn) | Out-Null
+        Set-Content -LiteralPath $syn -Value '# design review 1'
+        & git -C $repo add docs/features/base2/reviews/design-1.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'design synthesis' 2>&1 | Out-Null
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'base2')
+        @($j.reviewRuns).Count | Should -Be 10
+        @($j.reviewRuns | Where-Object { $_.id -match '-d2-' -and $_.id -notmatch '-r\d+$' }).Count | Should -Be 10
+    }
+
+    It 'lists only reaudit rows for a partial plan round after synthesis' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'pprt' -Plan (Get-StandardTwoPhasePlan) | Out-Null
+        $syn = Join-Path $repo 'docs/features/pprt/reviews/plan-1.md'
+        New-Item -ItemType Directory -Force (Split-Path $syn) | Out-Null
+        Set-Content -LiteralPath $syn -Value '# plan review 1'
+        & git -C $repo add docs/features/pprt/reviews/plan-1.md 2>&1 | Out-Null
+        & git -C $repo commit -m 'plan synthesis' 2>&1 | Out-Null
+        Assert-FeatureOk (Invoke-Feature @('reaudit', '-Phase', '1', '-Repo', $repo, '-Name', 'pprt') -WorkingDirectory $repo)
+        $j = Invoke-StatusOk $repo -Extra @('-Name', 'pprt')
+        @($j.reviewRuns).Count | Should -Be 2
+        @($j.reviewRuns | Where-Object { $_.id -match '-p2-.*-r1$' }).Count | Should -Be 2
+        @($j.reviewRuns | Where-Object { $_.id -notmatch '-r1$' }).Count | Should -Be 0
+    }
     It 'reports plan stage phase, tasks, plan review runs, and plan gate' {
         $repo = New-TestRepo
         Import-TestPlan -Repo $repo -Name 'plst' -Plan (Get-StandardTwoPhasePlan) | Out-Null

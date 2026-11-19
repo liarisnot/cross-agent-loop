@@ -61,7 +61,11 @@ A lens is done when `reviews/raw/<id>.md` is committed (`reviewRuns[].done` is t
 
 After "update the doc first", run `feature.ps1 reaudit -Repo <repo> -Name <name> -Phase <egm phase>`. `<egm phase>` is that phase's number from `reviewRuns`: 5 initial zoom out, 6 comprehension, 7 critic, 8 intermediate zoom out, 9 implementation readiness. This adds that phase's runs again with an `-r<k>` suffix. Each re-audit reruns that phase's lenses once. Run `feature.ps1 status -Repo <repo> -Name <name>` and continue from the first new run with `done: false`.
 
+To re-check one phase after a round's synthesis is committed, run `reaudit` for that phase: the new round then lists only that phase's runs.
+
 ### Synthesis
+
+Write the synthesis once per round, after the round's last phase and its re-audits are done. A stage checkpoint (5, 6 or 8) is reported in chat; it does not get a synthesis file, because committing one starts the next round.
 
 You do the synthesizer's job. Read and follow `<skill dir>/egm/agents/synthesizer.md` for how to deduplicate and rank findings. Do not spawn the subagents it describes. The lens runs already happened through `delegate.ps1`.
 

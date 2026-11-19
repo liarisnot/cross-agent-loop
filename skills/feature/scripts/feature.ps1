@@ -521,8 +521,10 @@ function Get-StatusReviewRuns {
     $letter = if ($stage -eq 'design-review') { 'd' } else { 'p' }
     $reviewN = Get-ReviewNumber $Repository $FeatureName $kind
     $baseDefs = Get-StatusReviewBaseDefinitions $kind
-    Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap | Out-Null
+    $baseRuns = [System.Collections.Generic.List[object]]::new()
+    Add-StatusReviewRunsForDefs $baseRuns $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap | Out-Null
 
+    $reauditRuns = [System.Collections.Generic.List[object]]::new()
     $reauditCounts = @{}
     foreach ($line in ($DecisionsText -split "`n")) {
         if ($line -notmatch '^- \S+ \[reaudit\] (.+)$') { continue }
@@ -534,18 +536,22 @@ function Get-StatusReviewRuns {
             $reauditCounts[$key] = 1 + $(if ($reauditCounts.ContainsKey($key)) { $reauditCounts[$key] } else { 0 })
             $k = $reauditCounts[$key]
             $phaseDefs = @($baseDefs | Where-Object { $_.phase -eq $phaseN })
-            Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $phaseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
+            Add-StatusReviewRunsForDefs $reauditRuns $Repository $FeatureName $prefix $letter $reviewN $phaseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
         }
         else {
             if ($body -notmatch "^p${reviewN}: phase \d+$") { continue }
             $key = "$reviewN"
             $reauditCounts[$key] = 1 + $(if ($reauditCounts.ContainsKey($key)) { $reauditCounts[$key] } else { 0 })
             $k = $reauditCounts[$key]
-            Add-StatusReviewRunsForDefs $runs $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
+            Add-StatusReviewRunsForDefs $reauditRuns $Repository $FeatureName $prefix $letter $reviewN $baseDefs $modelsRoot $standardsMap "-r$k" | Out-Null
         }
     }
 
-    return ,@($runs)
+    if ($reauditRuns.Count -gt 0 -and -not (@($baseRuns | Where-Object { $_.done }).Count)) {
+        return ,@($reauditRuns)
+    }
+    foreach ($r in $reauditRuns) { $baseRuns.Add($r) | Out-Null }
+    return ,@($baseRuns)
 }
 
 function Get-TaskDecisionCounts {
