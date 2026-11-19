@@ -30,13 +30,34 @@ BeforeAll {
     $script:ModulePath = (Resolve-Path (Join-Path $PSScriptRoot '../scripts/SandboxEnv.psm1')).Path
     $script:FakeUvCmd = Join-Path $script:FixtureRoot 'fake-uv.cmd'
     $script:SavedEnv = @{}
-    foreach ($name in @('XAGENT_SANDBOX_ROOT','XAGENT_CURSOR_ROOT','XAGENT_UV_PATH','FAKE_UV_FAIL','FAKE_UV_LOG','UV_PYTHON_INSTALL_DIR','UV_PROJECT_ENVIRONMENT','PATH')) {
+    foreach ($name in @('XAGENT_SANDBOX_ROOT','XAGENT_CURSOR_ROOT','XAGENT_UV_PATH','FAKE_UV_FAIL','FAKE_UV_LOG','FAKE_UV_VERSION','UV_PYTHON_INSTALL_DIR','UV_PROJECT_ENVIRONMENT','PATH')) {
         $script:SavedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
     $env:XAGENT_SANDBOX_ROOT = Join-Path $TestDrive 'sbx-root'
     $env:XAGENT_CURSOR_ROOT = Join-Path $TestDrive 'cursor-root'
     New-Item -ItemType Directory -Force -Path $env:XAGENT_SANDBOX_ROOT, $env:XAGENT_CURSOR_ROOT | Out-Null
     Import-Module $script:ModulePath -Force
+
+    function Enter-SandboxEnvApplyUv {
+        param([Parameter(Mandatory)][string]$LogFile)
+        $env:XAGENT_UV_PATH = $script:FakeUvCmd
+        $env:FAKE_UV_LOG = $LogFile
+        Remove-Item Env:FAKE_UV_FAIL -ErrorAction SilentlyContinue
+        Remove-Item Env:FAKE_UV_VERSION -ErrorAction SilentlyContinue
+    }
+
+    function Exit-SandboxEnvApplyUv {
+        $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH']
+        $env:FAKE_UV_LOG = $script:SavedEnv['FAKE_UV_LOG']
+        $env:FAKE_UV_FAIL = $script:SavedEnv['FAKE_UV_FAIL']
+        $env:FAKE_UV_VERSION = $script:SavedEnv['FAKE_UV_VERSION']
+        $env:PATH = $script:SavedEnv['PATH']
+    }
+
+    function Get-SandboxEnvTestRoot {
+        param([Parameter(Mandatory)][string]$Repo)
+        Join-Path (Split-Path -Parent $Repo) "$((Split-Path -Leaf $Repo)).xagent\.envs"
+    }
 }
 
 AfterAll {
@@ -699,5 +720,320 @@ Describe 'Get-SandboxEnvReport' {
 Describe 'Test-SandboxWheelMatches' {
     It 'accepts abi3 win_amd64 wheels' {
         InModuleScope SandboxEnv { Test-SandboxWheelMatches -FileName 'pkg-1.0-cp39-abi3-win_amd64.whl' -Request '3.12' | Should -Be $true }
+    }
+}
+
+Describe 'Invoke-SandboxEnvApply' {
+    It 'builds a lock project and copies uv, inputs, and envs.json' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            $uvLock = "version = 1`nrequires-python = `">=3.12`"`n"
+            $uvToml = "[[index]]`nurl = `"https://example.invalid/simple`"`nname = `"copied-index`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $uvLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.toml' -Content $uvToml
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            $discovered = @(Get-SandboxEnvProjects -Repo $repo -Commit $sha)
+            $hash = [string]$discovered[0].hash
+            $name = "py3.12-$($hash.Substring(0, 12))"
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+
+            $r.built -is [System.Array] | Should -BeTrue
+            @($r.built).Count | Should -Be 1
+            $r.built[0].env | Should -Be $name
+            @($r.built[0].projects) | Should -Be @('.')
+            $r.built[0].bytes | Should -BeGreaterThan 0
+            $r.built[0].seconds | Should -BeOfType [int]
+            @($r.failedNow).Count | Should -Be 0
+            @($r.pruned).Count | Should -Be 0
+            $r.warning | Should -BeNullOrEmpty
+
+            $raw = [IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json'))
+            $raw | Should -Match '"projects"\s*:\s*\['
+            $idx = $raw | ConvertFrom-Json -AsHashtable
+            $idx.version | Should -Be 1
+            $idx.approved | Should -Not -BeNullOrEmpty
+            $idx.uvVersion | Should -Be 'uv 0.0.0-fake'
+            $idx.uv | Should -Be (Join-Path $envsRoot 'bin\uv.exe')
+            $entry = $idx.envs[$hash]
+            $entry.name | Should -Be $name
+            $entry.projects -is [string] | Should -BeFalse
+            @($entry.projects) | Should -Be @('.')
+            $entry.python | Should -Be '3.12.99'
+            $entry.kind | Should -Be 'lock'
+            $entry.bytes | Should -BeGreaterThan 0
+            $idx.pythons.ContainsKey('3.12.99') | Should -BeTrue
+            [string]$idx.pythons['3.12.99'] | Should -Match 'cpython-3\.12-fake'
+
+            $fakeBytes = [IO.File]::ReadAllBytes($script:FakeUvCmd)
+            $copiedBytes = [IO.File]::ReadAllBytes((Join-Path $envsRoot 'bin\uv.exe'))
+            [Convert]::ToBase64String($copiedBytes) | Should -Be ([Convert]::ToBase64String($fakeBytes))
+            [IO.File]::ReadAllText((Join-Path $envsRoot "$name\Scripts\python.exe")) | Should -Be 'fake'
+
+            $work = Join-Path $envsRoot "work\$name"
+            [IO.File]::ReadAllText((Join-Path $work 'uv.lock')) | Should -Be $uvLock
+            [IO.File]::ReadAllText((Join-Path $work 'uv.toml')) | Should -Be $uvToml
+
+            $logText = [IO.File]::ReadAllText($log)
+            $logText | Should -Match '(?m)^python install 3.12\r?$'
+            $logText | Should -Match '(?m)^python find 3.12\r?$'
+            $logText | Should -Match '(?m)^sync --frozen --no-install-project --python 3.12.99\r?$'
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'builds nothing on a second apply and keeps the first approved time' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            $first = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($first.built).Count | Should -Be 1
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $approved = ([IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable).approved
+            $second = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($second.built).Count | Should -Be 0
+            @($second.failedNow).Count | Should -Be 0
+            @($second.pruned).Count | Should -Be 0
+            $second.built -is [System.Array] | Should -BeTrue
+            $second.failedNow -is [System.Array] | Should -BeTrue
+            $second.pruned -is [System.Array] | Should -BeTrue
+            $second.pruned.Count | Should -Be 0
+            $again = ([IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable).approved
+            $again | Should -Be $approved
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'locks then syncs a resolve project that has pyproject.toml' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            $py = "[project]`nname = `"app`"`nversion = `"0.1.0`"`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'app/pyproject.toml' -Content $py
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'app/.python-version' -Content "3.12`n"
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r.built).Count | Should -Be 1
+            $logText = [IO.File]::ReadAllText($log)
+            $lockAt = $logText.IndexOf('lock --python 3.12.99')
+            $syncAt = $logText.IndexOf('sync --frozen --no-install-project --python 3.12.99')
+            $lockAt | Should -BeGreaterThan -1
+            $syncAt | Should -BeGreaterThan $lockAt
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'creates a venv and pip-installs requirements files in name order' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'reqproj/requirements.txt' -Content "pkg-z`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'reqproj/requirements-b.txt' -Content "pkg-b`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'reqproj/requirements-a.txt' -Content "pkg-a`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'reqproj/.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r.built).Count | Should -Be 1
+            $hash = [string](@(Get-SandboxEnvProjects -Repo $repo -Commit $sha) | Where-Object { $_.project -eq 'reqproj' }).hash
+            $name = "py3.12-$($hash.Substring(0, 12))"
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            [IO.File]::ReadAllText((Join-Path $envsRoot "$name\Scripts\python.exe")) | Should -Be 'fake'
+            $logText = [IO.File]::ReadAllText($log)
+            $venvAt = $logText.IndexOf('venv --python ')
+            $pipA = $logText.IndexOf('requirements-a.txt')
+            $pipB = $logText.IndexOf('requirements-b.txt')
+            $pipT = $logText.IndexOf('requirements.txt')
+            $venvAt | Should -BeGreaterThan -1
+            $pipA | Should -BeGreaterThan $venvAt
+            $pipB | Should -BeGreaterThan $pipA
+            $pipT | Should -BeGreaterThan $pipB
+            @($logText -split "`n" | Where-Object { $_ -like 'pip install*' }).Count | Should -Be 3
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'writes a pth for build-system projects and skips projects without one' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            $withBuild = "[project]`nname = `"app`"`nversion = `"0.1.0`"`nrequires-python = `">=3.12`"`n`n[build-system]`nrequires = [`"hatchling`"]`nbuild-backend = `"hatchling.build`"`n"
+            $noBuild = "[project]`nname = `"plain`"`nversion = `"0.1.0`"`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'pyproject.toml' -Content $withBuild
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'src/app.py' -Content "x = 1`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'pkg/pyproject.toml' -Content ($withBuild.Replace('name = "app"', 'name = "pkgapp"'))
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'pkg/src/app.py' -Content "y = 1`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'pkg/.python-version' -Content "3.12`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'plain/pyproject.toml' -Content $noBuild
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'plain/.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r.built).Count | Should -Be 3
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $rootLine = "import os, sys; w = os.environ.get('XAGENT_WORKTREE'); w and sys.path.append(os.path.join(w, r'src'))"
+            $pkgLine = "import os, sys; w = os.environ.get('XAGENT_WORKTREE'); w and sys.path.append(os.path.join(w, r'pkg\src'))"
+            foreach ($p in @(Get-SandboxEnvProjects -Repo $repo -Commit $sha)) {
+                $name = "py3.12-$($p.hash.Substring(0, 12))"
+                $pth = Join-Path $envsRoot "$name\Lib\site-packages\_xagent_1.pth"
+                if ($p.project -eq '.') {
+                    [IO.File]::ReadAllText($pth).Trim() | Should -Be $rootLine
+                    [IO.File]::ReadAllText($pth) | Should -Be ($rootLine + "`n")
+                } elseif ($p.project -eq 'pkg') {
+                    [IO.File]::ReadAllText($pth).Trim() | Should -Be $pkgLine
+                } elseif ($p.project -eq 'plain') {
+                    Test-Path -LiteralPath $pth | Should -BeFalse
+                    @(Get-ChildItem -LiteralPath (Join-Path $envsRoot "$name\Lib\site-packages") -Filter '_xagent_*.pth' -ErrorAction SilentlyContinue).Count | Should -Be 0
+                }
+            }
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'records a failed build and a later apply clears it' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $env:FAKE_UV_FAIL = 'sync'
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            $hash = [string](@(Get-SandboxEnvProjects -Repo $repo -Commit $sha))[0].hash
+            $name = "py3.12-$($hash.Substring(0, 12))"
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            @($r.failedNow).Count | Should -Be 1
+            $r.failedNow -is [System.Array] | Should -BeTrue
+            $r.failedNow[0].env | Should -Be $name
+            $r.failedNow[0].error | Should -Match 'fake failure'
+            @($r.built).Count | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $envsRoot $name) | Should -BeFalse
+            $idx = [IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable
+            $idx.approved | Should -BeNullOrEmpty
+            $idx.failed[$hash].error | Should -Be $r.failedNow[0].error
+            $idx.failed[$hash].error | Should -Match 'fake failure'
+
+            Remove-Item Env:FAKE_UV_FAIL
+            $r2 = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r2.built).Count | Should -Be 1
+            @($r2.failedNow).Count | Should -Be 0
+            $idx2 = [IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable
+            $idx2.failed.ContainsKey($hash) | Should -BeFalse
+            $idx2.envs.ContainsKey($hash) | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $envsRoot "$name\Scripts\python.exe") | Should -BeTrue
+            $idx2.approved | Should -Not -BeNullOrEmpty
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'reports name-clash and leaves the other environment folder untouched' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $hash = [string](@(Get-SandboxEnvProjects -Repo $repo -Commit $sha))[0].hash
+            $name = "py3.12-$($hash.Substring(0, 12))"
+            $other = 'b' * 64
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $envDir = Join-Path $envsRoot $name
+            New-Item -ItemType Directory -Force -Path $envDir | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envDir 'marker.txt'), 'keep-me', [Text.UTF8Encoding]::new($false))
+            $payload = [ordered]@{
+                version   = 1
+                approved  = $null
+                uv        = $null
+                uvVersion = $null
+                pythons   = @{}
+                envs      = @{ $other = [ordered]@{ name = $name; projects = @('other'); kind = 'lock'; python = '3.12'; bytes = 1; built = 't' } }
+                failed    = @{}
+            }
+            New-Item -ItemType Directory -Force -Path $envsRoot | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot 'envs.json'), (ConvertTo-Json -InputObject $payload -Depth 8), [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r.failedNow).Count | Should -Be 1
+            $r.failedNow[0].error | Should -Be 'name-clash'
+            @($r.built).Count | Should -Be 0
+            [IO.File]::ReadAllText((Join-Path $envDir 'marker.txt')) | Should -Be 'keep-me'
+            $idx = [IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable
+            $idx.failed[$hash].error | Should -Be 'name-clash'
+            $r.failedNow[0].error | Should -Be $idx.failed[$hash].error
+            $idx.envs.ContainsKey($other) | Should -BeTrue
+            $idx.approved | Should -BeNullOrEmpty
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'rebuilds one project and keeps the first approved time' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r1 = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            @($r1.built).Count | Should -Be 1
+            $hash = [string](@(Get-SandboxEnvProjects -Repo $repo -Commit $sha))[0].hash
+            $name = "py3.12-$($hash.Substring(0, 12))"
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $approved = ([IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable).approved
+            [IO.File]::WriteAllText((Join-Path $envsRoot "$name\marker.txt"), 'old', [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText((Join-Path $envsRoot "work\$name\marker.txt"), 'old-work', [Text.UTF8Encoding]::new($false))
+            New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot 'linked') | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot "linked\$name"), 'stamp', [Text.UTF8Encoding]::new($false))
+            $r2 = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD' -Rebuild '.'
+            @($r2.built).Count | Should -Be 1
+            $r2.built[0].env | Should -Be $name
+            Test-Path -LiteralPath (Join-Path $envsRoot "$name\marker.txt") | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $envsRoot "work\$name\marker.txt") | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $envsRoot "linked\$name") | Should -BeFalse
+            [IO.File]::ReadAllText((Join-Path $envsRoot "$name\Scripts\python.exe")) | Should -Be 'fake'
+            $approved2 = ([IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json -AsHashtable).approved
+            $approved2 | Should -Be $approved
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'throws for an unknown or unsupported rebuild project' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $missing = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $missing -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+            Set-SandboxEnvRepoFile -Repo $missing -RelativePath '.python-version' -Content "3.12`n"
+            Add-SandboxEnvRepoCommit -Repo $missing | Out-Null
+            { Invoke-SandboxEnvApply -Repo $missing -Ref 'HEAD' -Rebuild 'no-such' } | Should -Throw '*no project no-such at HEAD*'
+
+            $wsRepo = New-SandboxEnvTestRepo
+            $ws = "[tool.uv.workspace]`nmembers = [`"x`"]`n[project]`nrequires-python = `">=3.11`"`n"
+            Set-SandboxEnvRepoFile -Repo $wsRepo -RelativePath 'ws/pyproject.toml' -Content $ws
+            Add-SandboxEnvRepoCommit -Repo $wsRepo | Out-Null
+            { Invoke-SandboxEnvApply -Repo $wsRepo -Ref 'HEAD' -Rebuild 'ws' } | Should -Throw '*ws is unsupported (workspace)*'
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+
+    It 'warns and writes nothing when uv is missing' {
+        $repo = New-SandboxEnvTestRepo
+        Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content "version = 1`nrequires-python = `">=3.12`"`n"
+        Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content "3.12`n"
+        Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+        $empty = Join-Path $TestDrive 'empty-uv-path'
+        New-Item -ItemType Directory -Force -Path $empty | Out-Null
+        try {
+            Remove-Item Env:XAGENT_UV_PATH -ErrorAction SilentlyContinue
+            $env:PATH = $empty
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD'
+            $r.warning | Should -Be 'uv not found; nothing built'
+            @($r.built).Count | Should -Be 0
+            @($r.failedNow).Count | Should -Be 0
+            @($r.pruned).Count | Should -Be 0
+            $r.built -is [System.Array] | Should -BeTrue
+            Test-Path -LiteralPath (Get-SandboxEnvTestRoot -Repo $repo) | Should -BeFalse
+        } finally { Exit-SandboxEnvApplyUv }
     }
 }
