@@ -80,3 +80,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-19T07:39:42Z [decision] design (as built): discovery ignores test data folders (fixtures, testdata, test_data, __fixtures__); fold into the design at sign-off
 - 2026-11-19T07:58:38Z [stage] build -> signoff
 - 2026-11-19T08:17:08Z [fix-up] signoff: 2 files, 30 lines — requirements files under a nested lock folder are not separate projects; a requirements-only project with no .python-version is unsupported/python-version-unknown instead of throwing (found by the drift check)
+- 2026-11-19T15:49:43Z [gate] signed-off: "Sign off and merge (Recommended)"

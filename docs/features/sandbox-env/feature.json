@@ -14,6 +14,11 @@
       "at": "2026-11-19T03:44:11Z",
       "quote": "Approve the plan (Recommended)",
       "sha": "8753fac6b520174636d9bfb5cb6c8fce594b2be8"
+    },
+    "signed-off": {
+      "at": "2026-11-19T15:49:43Z",
+      "quote": "Sign off and merge (Recommended)",
+      "sha": "4ec1d7abc8b01bba1fb4f712abd72e333b92b410"
     }
   },
   "summary": "Build sandbox-env as designed in docs/designs/sandbox-env.md, in the design's five phases: the Sandbox.psm1 seam, SandboxEnv.psm1's read side and write side, the delegate.ps1 surface, then doctor and the skill text. Each brief names the functions and shapes other tasks rely on; the design's Rules and Data sections give the behaviour. Tasks that edit the same file run one after another. Profile is the delegate worker profile (models.json). Not tasks: the design's live checks (Verification 1-8, which need uv on the host and the private repo) and the docs/test-plan.md and docs/HANDOFF.md updates are done by the lead at sign-off.",
