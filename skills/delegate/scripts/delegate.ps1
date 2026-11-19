@@ -24,6 +24,8 @@
     - -SandboxCheck [-Repo <repo>] [-Reserve a,b,c | -Release] checks the sandbox, reserves three
       drive letters (the first is the runtime letter), or releases them. It prints one JSON object
       and does not start a worker.
+    - -SandboxEnv [-Apply] [-Rebuild <project>] reports or builds the repo's sandbox Python environments at -Base.
+    - -SandboxRun -Command <cmd> runs one plain command in the sandbox with the repo's environments (no Cursor worker).
 
   Layout:
     <repo>\.xagent\runs\<TaskId>\<stamp>-<Seat|Agent>.{prompt.txt,stdout.json,stderr.txt,pid}
@@ -43,6 +45,8 @@
   pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Repo D:\proj
   pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Reserve Z,Y,X -Repo D:\proj
   pwsh -NoProfile -File delegate.ps1 -SandboxCheck -Release
+  pwsh -NoProfile -File delegate.ps1 -SandboxEnv -Repo D:\proj
+  pwsh -NoProfile -File delegate.ps1 -SandboxRun -Repo D:\proj -Command "pytest -q"
 #>
 [CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
@@ -51,6 +55,8 @@ param(
 
     [Parameter(Mandatory, ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Check')]
+    [Parameter(Mandatory, ParameterSetName = 'Env')]
+    [Parameter(Mandatory, ParameterSetName = 'SandboxRun')]
     [string]$Repo,
 
     [Parameter(Mandatory, ParameterSetName = 'Run')]
@@ -60,6 +66,8 @@ param(
     [string]$TaskFile,
 
     [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'Env')]
+    [Parameter(ParameterSetName = 'SandboxRun')]
     [string]$Base = 'HEAD',
 
     [Parameter(ParameterSetName = 'Run')]
@@ -90,6 +98,7 @@ param(
     [string]$Model,
 
     [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'SandboxRun')]
     [ValidateRange(30, 3600)] [int]$TimeoutSec = 900,
 
     [Parameter(ParameterSetName = 'Run')]
@@ -100,7 +109,24 @@ param(
 
     [Parameter(ParameterSetName = 'Run')]
     [Parameter(ParameterSetName = 'Check')]
+    [Parameter(ParameterSetName = 'Env')]
+    [Parameter(ParameterSetName = 'SandboxRun')]
     [switch]$NoSandbox,
+
+    [Parameter(Mandatory, ParameterSetName = 'Env')]
+    [switch]$SandboxEnv,
+
+    [Parameter(ParameterSetName = 'Env')]
+    [switch]$Apply,
+
+    [Parameter(ParameterSetName = 'Env')]
+    [string]$Rebuild,
+
+    [Parameter(Mandatory, ParameterSetName = 'SandboxRun')]
+    [switch]$SandboxRun,
+
+    [Parameter(Mandatory, ParameterSetName = 'SandboxRun')]
+    [string]$Command,
 
     [Parameter(Mandatory, ParameterSetName = 'Check')]
     [switch]$SandboxCheck,
@@ -152,6 +178,15 @@ function Import-DelegateSandbox {
         Import-Module -Name (Join-Path $PSScriptRoot 'Sandbox.psm1') -Force -ErrorAction Stop
     } catch {
         Fail "sandbox: cannot load Sandbox.psm1: $($_.Exception.Message)"
+    }
+}
+
+function Import-DelegateSandboxEnv {
+    Import-DelegateSandbox
+    try {
+        Import-Module (Join-Path $PSScriptRoot 'SandboxEnv.psm1') -Force -ErrorAction Stop
+    } catch {
+        Fail "sandbox: cannot load SandboxEnv.psm1: $($_.Exception.Message)"
     }
 }
 
@@ -226,6 +261,110 @@ if ($top.TrimEnd('\') -ne $Repo) { Fail "Repo must be the top level of a git rep
 
 $repoName = Split-Path $Repo -Leaf
 $wtRoot = Join-Path (Split-Path $Repo -Parent) "$repoName.xagent"
+# keep .xagent/ out of git status in every worktree (info/exclude is shared)
+$commonDir = (Invoke-Git -C $Repo rev-parse --git-common-dir | Select-Object -First 1)
+if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $Repo $commonDir }
+$exclude = Join-Path $commonDir 'info\exclude'
+New-Item -ItemType Directory -Force (Split-Path $exclude) | Out-Null
+if (-not (Test-Path $exclude) -or -not (Select-String -LiteralPath $exclude -SimpleMatch '.xagent/' -Quiet)) {
+    Add-Content -LiteralPath $exclude -Value '.xagent/'
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Env') {
+    if ($NoSandbox) { Fail '-NoSandbox cannot be used with -SandboxEnv' }
+    if ($Rebuild -and -not $Apply) { Fail '-Rebuild requires -Apply' }
+    Import-DelegateSandboxEnv
+    try {
+        if (-not $Apply) {
+            $r = Get-SandboxEnvReport -Repo $Repo -Ref $Base
+            $r | ConvertTo-Json -Depth 8 -Compress
+            exit 0
+        }
+        if ($Rebuild) {
+            $a = Invoke-SandboxEnvApply -Repo $Repo -Ref $Base -Rebuild $Rebuild
+        } else {
+            $a = Invoke-SandboxEnvApply -Repo $Repo -Ref $Base
+        }
+        $r = Get-SandboxEnvReport -Repo $Repo -Ref $Base
+        $r['built'] = @($a.built)
+        $r['failedNow'] = @($a.failedNow)
+        $r['pruned'] = @($a.pruned)
+        if ($a.warning -is [string] -and -not [string]::IsNullOrEmpty($a.warning)) {
+            if ($r.Contains('warning') -and $r.warning) { $r['warning'] = "$($r.warning); $($a.warning)" }
+            else { $r['warning'] = $a.warning }
+        }
+        $r | ConvertTo-Json -Depth 8 -Compress
+        exit 0
+    } catch {
+        Fail $_.Exception.Message
+    }
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'SandboxRun') {
+    if ($NoSandbox) { Fail '-NoSandbox cannot be used with -SandboxRun' }
+    Import-DelegateSandboxEnv
+    $shaOut = @(& git.exe -C $Repo rev-parse --verify "$Base^{commit}" 2>&1)
+    if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read $Base in $Repo" }
+    $sha = ("$($shaOut | Select-Object -First 1)").Trim()
+    try {
+        $g = Test-SandboxEnvReady -Repo $Repo -Commit $sha
+        if (-not $g.ready) {
+            [ordered]@{
+                ok       = $true
+                status   = 'environment-missing'
+                exitCode = $null
+                output   = @()
+                seconds  = 0
+                message  = $g.message
+                projects = @($g.projects)
+                proposal = $g.proposal
+            } | ConvertTo-Json -Depth 8 -Compress
+            exit 0
+        }
+        $hex = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $probe = Join-Path $wtRoot ".probe-$hex"
+        $out = $null
+        try {
+            New-Item -ItemType Directory -Force $wtRoot | Out-Null
+            Invoke-Git -C $Repo worktree add --detach $probe $sha | Out-Null
+            $envPaths = @()
+            $extraEnv = @{}
+            $pathSuffix = @()
+            $notes = @()
+            $hasReadyProject = $false
+            foreach ($p in @($g.projects)) {
+                if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
+            }
+            if (@($g.projects).Count -gt 0 -and $hasReadyProject) {
+                $links = Add-SandboxEnvLinks -Repo $Repo -Worktree $probe -Projects $g.projects
+                $envPaths = @($links.envPaths)
+                $extraEnv = $links.extraEnv
+                $pathSuffix = @($links.pathSuffix)
+                $notes = @($links.notes)
+            }
+            $res = Invoke-SandboxCommand -Repo $Repo -Worktree $probe -RunName "probe-$hex" -Command $Command -TimeoutSec $TimeoutSec `
+                -EnvPaths $envPaths -ExtraEnv $extraEnv -PathSuffix $pathSuffix
+            $out = [ordered]@{
+                ok       = $true
+                status   = $res.status
+                exitCode = $res.exitCode
+                output   = @($res.output)
+                seconds  = $res.seconds
+                notes    = @($notes)
+            }
+        } finally {
+            if ($probe -and (Test-Path -LiteralPath $probe)) {
+                Remove-SandboxEnvLinks -Worktree $probe | Out-Null
+                try { Remove-Worktree $probe } catch { }
+            }
+        }
+        $out | ConvertTo-Json -Depth 8 -Compress
+        exit 0
+    } catch {
+        Fail $_.Exception.Message
+    }
+}
+
 $wt = Join-Path $wtRoot $TaskId
 $branch = "xagent/$TaskId"
 $runDir = Join-Path $Repo ".xagent\runs\$TaskId"
@@ -243,17 +382,13 @@ if ($readOnly) {
     $branch = $null
 }
 
-# keep .xagent/ out of git status in every worktree (info/exclude is shared)
-$commonDir = (Invoke-Git -C $Repo rev-parse --git-common-dir | Select-Object -First 1)
-if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $Repo $commonDir }
-$exclude = Join-Path $commonDir 'info\exclude'
-New-Item -ItemType Directory -Force (Split-Path $exclude) | Out-Null
-if (-not (Test-Path $exclude) -or -not (Select-String -LiteralPath $exclude -SimpleMatch '.xagent/' -Quiet)) {
-    Add-Content -LiteralPath $exclude -Value '.xagent/'
-}
-
 # ---------- cleanup mode ----------
 if ($Cleanup) {
+    function Remove-DelegateEnvLinks([string]$Path) {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        try { Import-Module (Join-Path $PSScriptRoot 'SandboxEnv.psm1') -Force -ErrorAction Stop } catch { return }
+        Remove-SandboxEnvLinks -Worktree $Path | Out-Null
+    }
     $notes = @()
     # read-only worktrees of this task: <TaskId>-<label>, detached. The label has no '-', so the
     # read-only worktrees of a longer task id (<TaskId>-pc-cursor) are never matched.
@@ -267,6 +402,7 @@ if ($Cleanup) {
     foreach ($d in @(Get-ChildItem -LiteralPath $wtRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^$prefix-[a-z0-9]+$" })) {
         $cwt = $d.FullName.TrimEnd('\')
         if (-not $detached.ContainsKey($cwt.ToLowerInvariant())) { continue }   # a worker worktree of another task
+        Remove-DelegateEnvLinks $cwt
         Restore-RuleFiles $cwt
         $dirty = @(& git -C $cwt status --porcelain --untracked-files=no 2>$null)
         if ($dirty.Count -gt 0) { Fail "Read-only worktree $cwt has tracked changes (read-only violation?); inspect before removing" }
@@ -279,6 +415,7 @@ if ($Cleanup) {
         if (Test-Path $wt) {
             New-Item -ItemType Directory -Force $runDir | Out-Null
             $patch = Join-Path $runDir ("discarded-{0}.patch" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            Remove-DelegateEnvLinks $wt
             & git -C $wt add -A -- . ':!.xagent' 2>$null | Out-Null
             & git -C $wt diff --cached HEAD | Set-Content -LiteralPath $patch
             Remove-Worktree $wt | Out-Null; $notes += "discarded worktree $wt (diff saved to $patch)"
@@ -288,6 +425,7 @@ if ($Cleanup) {
         Out-Summary @{ ok = $true; cleanup = $notes }
     }
     if (Test-Path $wt) {
+        Remove-DelegateEnvLinks $wt
         $dirtyTracked = @(& git -C $wt status --porcelain --untracked-files=no 2>$null)
         & git -C $Repo merge-base --is-ancestor $branch HEAD 2>$null
         $merged = ($LASTEXITCODE -eq 0)
@@ -344,6 +482,7 @@ if ($isReview) {
     }
 }
 
+$envGate = $null; $envLinks = $null; $gateSha = $null
 # ---------- sandbox setup (before any worktree, so a failure leaves none) ----------
 $cursorRoot = if ($env:XAGENT_CURSOR_ROOT) { $env:XAGENT_CURSOR_ROOT } else { Join-Path $env:LOCALAPPDATA 'cursor-agent' }
 $sandboxed = ($Agent -eq 'cursor' -and -not $NoSandbox)
@@ -362,6 +501,21 @@ if ($sandboxed) {
     } catch {
         Fail $_.Exception.Message
     }
+    if (-not $readOnly) {
+        if (Test-Path $wt) { try { $gateSha = (Invoke-Git -C $wt rev-parse HEAD | Select-Object -First 1).Trim() } catch { Fail "sandbox: cannot read the worktree HEAD in $wt" } }
+        else {
+            $branchSha = @(& git.exe -C $Repo rev-parse --verify --quiet "refs/heads/$branch" 2>$null)
+            if ($LASTEXITCODE -eq 0) { $gateSha = ("$($branchSha | Select-Object -First 1)").Trim() }
+            else {
+                $baseShaOut = @(& git.exe -C $Repo rev-parse --verify "$Base^{commit}" 2>&1)
+                if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read $Base in $Repo" }
+                $gateSha = ("$($baseShaOut | Select-Object -First 1)").Trim()
+            }
+        }
+        Import-DelegateSandboxEnv
+        try { $envGate = Test-SandboxEnvReady -Repo $Repo -Commit $gateSha } catch { Fail $_.Exception.Message }
+        if (-not $envGate.ready) { Fail $envGate.message }
+    }
 }
 
 # ---------- create or reuse worktree ----------
@@ -378,6 +532,16 @@ if (-not (Test-Path $wt)) {
 }
 $wtTop = (Invoke-Git -C $wt rev-parse --show-toplevel | Select-Object -First 1) -replace '/', '\'
 if ($wtTop.TrimEnd('\') -ne $wt -or $wt -eq $Repo) { Fail "Safety check failed: worktree toplevel is $wtTop, expected $wt" }
+
+if ($null -ne $envGate) {
+    $hasReadyProject = $false
+    foreach ($p in @($envGate.projects)) {
+        if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
+    }
+    if ($hasReadyProject) {
+        try { $envLinks = Add-SandboxEnvLinks -Repo $Repo -Worktree $wt -Projects $envGate.projects } catch { Fail $_.Exception.Message }
+    }
+}
 
 # ---------- hand-off files ----------
 $xDir = Join-Path $wt '.xagent'
@@ -509,7 +673,20 @@ try {
     if ($sandboxed) {
         $slot = Get-SandboxSlot -TimeoutSec 60
         $wtName = [IO.Path]::GetFileName(((Get-Content -Raw -LiteralPath (Join-Path $wt '.git')) -replace '^gitdir:\s*', '').Trim())
-        $run = New-SandboxRun -Slot $slot -Runtime $runtime -Repo $Repo -Worktree $wt -WtName $wtName -ReadOnly:$readOnly
+        $runArgs = @{
+            Slot     = $slot
+            Runtime  = $runtime
+            Repo     = $Repo
+            Worktree = $wt
+            WtName   = $wtName
+            ReadOnly = $readOnly
+        }
+        if ($null -ne $envLinks) {
+            $runArgs.EnvPaths = $envLinks.envPaths
+            $runArgs.ExtraEnv = $envLinks.extraEnv
+            $runArgs.PathSuffix = $envLinks.pathSuffix
+        }
+        $run = New-SandboxRun @runArgs
         $sandboxExe = "$($run.runtimeLetter):\$($run.runtimeVersion)\node.exe"
         $sandboxArgs = [string[]](@("$($run.runtimeLetter):\$($run.runtimeVersion)\index.js") + $cursorArgs)
         $h = Start-SandboxProcess -Run $run -Exe $sandboxExe -Arguments $sandboxArgs -StdoutPath $stdoutF -StderrPath $stderrF
@@ -571,6 +748,12 @@ if ($sandboxed -and $null -ne $run) {
         patched        = [bool]$run.patched
     }
 }
+if ($null -ne $envLinks) {
+    foreach ($envNote in @($envLinks.notes)) {
+        if ($null -ne $envNote) { $sandboxNotes += [string]$envNote }
+    }
+}
+
 $flatNotes = New-Object System.Collections.Generic.List[string]
 foreach ($note in @($sandboxNotes)) {
     if ($null -eq $note) { continue }
@@ -608,7 +791,9 @@ if (-not $result -and $finalText) {
     }
 }
 
-$changes = @(& git -C $wt status --porcelain --untracked-files=all 2>$null | Where-Object { $_ -notmatch '\.xagent/' })
+$changes = @(& git -C $wt status --porcelain --untracked-files=all 2>$null | Where-Object {
+    $_ -notmatch '\.xagent/' -and ($_ -replace '^.. ', '') -notmatch '(^|/)\.venv/?$'
+})
 $diffStat = (& git -C $wt diff --shortstat 2>$null) -join ' '
 $stderrTail = if (Test-Path $stderrF) {
     ((Get-Content -LiteralPath $stderrF | Where-Object { $_ -notmatch 'logging before google.Init' }) | Select-Object -Last 5) -join "`n"

@@ -1,0 +1,83 @@
+# Decisions: sandbox-env
+
+Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by feature.ps1.
+
+- 2026-11-18T03:57:09Z [decision] design D1: environments live per repo in <repo>.xagent\.envs\, named py<ver>-<lockhash>; chosen over a shared root (sharing across repos is rare and D: copies anyway)
+- 2026-11-18T03:59:16Z [decision] design D2: interpreters always copied with uv into <repo>.xagent\.envs\python\<version>\; never grant the user's installed Pythons
+- 2026-11-18T04:16:08Z [decision] design D3: projects with uv.lock install with uv sync --frozen; without a lock, copy the .venv site-packages onto the copied Python and fix up launchers and editable installs; if that fix-up grows past one normal task, fall back to installing from requirements/pyproject (B); never reinstall from a read of the .venv
+- 2026-11-18T04:20:41Z [decision] design D4: before each sandboxed run the host links every project's environment into the worktree as a .venv junction; a copy of uv.exe goes on the sandbox PATH; principle: decide automatically and correctly, ask the user only for cost approval
+- 2026-11-18T05:19:28Z [stage] design -> design-review
+- 2026-11-18T19:06:35Z [decision] design D3 revised: without uv.lock, resolve afresh with uv from pyproject.toml or requirements outside the repo (B); the .venv copy path is dropped (both phase-5 lenses: a second installer)
+- 2026-11-18T19:06:36Z [decision] design: uv must be on the host; a missing uv is reported (uv-missing) and the README lists it; no pinned download (user: installing uv is a setup change the user decides)
+- 2026-11-18T19:06:37Z [decision] design: disk is managed by the 14-day prune only, no size cap; each proposal shows the total size of .envs
+- 2026-11-18T19:06:38Z [decision] design D6: environments are granted per run through the existing grant list; the lasting .envs grant and envGrants are dropped (probe P2: 2.7 s grant, 2.8 s removal on a 4.8 GB env)
+- 2026-11-18T19:06:38Z [decision] design D7: editable installs redirect to the run's worktree via a .pth that reads XAGENT_WORKTREE (probe P3); runs never write envs.json, last use is a per-env stamp file
+- 2026-11-18T19:07:08Z [dismiss] ic-p5 Major 2 (disk ceiling with LRU eviction) — user chose the 14-day prune only; proposals show the .envs total and rebuilds are cheap
+- 2026-11-18T19:07:09Z [dismiss] ic-p5 Nit 5 (shared read-only uv cache for runs) — runs use uv run on a frozen env with UV_NO_SYNC, which reads no cache (P1)
+- 2026-11-18T19:07:21Z [reaudit] d2: phase 5
+- 2026-11-18T19:15:53Z [decision] design D8: an environment belongs to the tree being run; runs link the env matching their worktree's lockfile hash; -SandboxEnv builds for a ref (zo-p5 d2 Major 1)
+- 2026-11-18T19:15:54Z [decision] design: only worker runs and -SandboxRun probes link and grant environments; review lenses and council seats get none (zo-p5 d2 Major 2)
+- 2026-11-18T19:15:54Z [decision] design: -SandboxRun returns environment-missing without running when a project in the worktree has no ready environment (ic-p5 d2 Major 3, first half)
+- 2026-11-18T19:15:55Z [decision] design: a rebuild whose estimate adds more than 5 GB to .envs is proposed again; smaller rebuilds run without asking (ic-p5 d2 Major 1)
+- 2026-11-18T19:15:56Z [decision] design: builds read uv.lock, pyproject.toml, uv.toml, .python-version and workspace members at the ref into .envs\work and sync with --no-install-workspace; uv.exe recopied on every -Apply with its version recorded (ic-p5 d2 Nits 4, 5)
+- 2026-11-18T19:15:57Z [dismiss] ic-p5 d2 Major 2 (shared content store across repos) — reopens D1, which the user chose; D6 grants go through the same refusal-free per-run list wherever the bytes are, so it saves nothing on isolation
+- 2026-11-18T19:15:57Z [dismiss] ic-p5 d2 Major 3, second half (a lighter probe path outside New-SandboxRun) — one run path for workers and probes keeps the probe faithful; setup cost is seconds
+- 2026-11-18T19:15:58Z [dismiss] zo-p5 d2 Nit 3, second half (requirements-only projects unsupported) — the user chose an automatic fresh resolve; uv pip install -r is a few lines
+- 2026-11-18T19:24:23Z [dismiss] sandbox-env-d2-zo-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-zo-p5 on the same doc (tracker bug: a mid-round synthesis started round d2, then reaudit added r1 rows)
+- 2026-11-18T19:24:24Z [dismiss] sandbox-env-d2-ic-p5-r1: not run — waived by the user; duplicate of sandbox-env-d2-ic-p5 on the same doc (same tracker bug)
+- 2026-11-18T19:26:18Z [dismiss] cm-p6 d2 Nit 10 (separate delegate-only recipe) — the Components bullet now says a delegate-only lead probes the test command for its first worker; the SKILL.md change carries the steps
+- 2026-11-18T19:34:19Z [dismiss] dc-p7 d2 Major 3 (disk soft cap) and Major 4 (share interpreters across repos) — user chose no cap and per-repo .envs (D1); now listed under Risks and Mitigations
+- 2026-11-18T19:34:20Z [dismiss] dc-p7 d2 Major 5 second half (check uv version before each run) — a lockfile change always triggers -Apply, which recopies uv; inside a run uv reads only the environment (Risks table)
+- 2026-11-18T19:34:21Z [dismiss] dc-p7 d2 Major 6 (third slot for probes) — probes run before any worker starts and wait for a slot like any run (Risks table)
+- 2026-11-18T19:34:21Z [dismiss] dc-p7 d2 Major 10 (probe with the private CUDA index inside the sandbox) — with UV_FROZEN and UV_NO_SYNC uv run contacts no index; the live sign-off checks run the private repo's tests in the sandbox
+- 2026-11-18T19:34:22Z [dismiss] dc-p7 d2 Major 11 (block pip --user, uv tool install) — pip refuses --user in a venv; other writes land in the run home, removed with the worktree (Risks table)
+- 2026-11-18T19:34:23Z [dismiss] dc-p7 d2 Major 13 (full-hash folder names) — envs.json stores and compares the full hash, so a 12-hex clash shows as not ready (Risks table)
+- 2026-11-18T19:34:24Z [dismiss] st-p7 d2 Nits 4 and 7 (standard heading names, uniform alternative H3s) and sy-p7 d2 Nits 3, 12, 14, 25, 31 and the actor-voice note — repo design docs use these headings; left as small wording preferences
+- 2026-11-18T20:40:29Z [decision] design G5 revised (user choice): a worker launch with a project lacking a ready environment fails with sandbox: environment not ready plus the proposal; no pre-build run of every phase test; phase-end tests run in the sandbox via -SandboxRun -Base feature/<name> instead of the user's checkout (zo-p8 d2 Blocker 1)
+- 2026-11-18T20:40:30Z [decision] design: -SandboxRun returns a structural status (ran, environment-missing, timeout) with exit code and output; the lead reads output, no diagnosis classifier (zo-p8 d2 Major 3)
+- 2026-11-18T20:40:31Z [decision] design: New-SandboxRun takes the env paths and extra variables; env grant rows pass Resolve-SandboxReadEntry; the .envs lock reuses the ACL lock's wait helper; .pth import root is the declared root (zo-p8 d2 Nits 4-7)
+- 2026-11-18T20:40:32Z [dismiss] zo-p8 d2 Major 2 (resolve projects unsupported) — the user chose the fresh resolve (D3); its two reads of checkout state (pyvenv.cfg version, site-packages size) are removed, so it depends only on the ref
+- 2026-11-18T21:43:26Z [decision] design (stage 9): identity hash = SHA-256 over sorted path TAB git-blob-id lines of uv.lock, pyproject.toml, uv.toml, .python-version, requirements*.txt and workspace members; envs.json keyed by full hash with a projects list and a failed map; atomic temp+rename writes
+- 2026-11-18T21:43:26Z [decision] design (stage 9): readiness gate runs from the base ref before git worktree add; -NoSandbox skips it; sandbox: environment not ready is the one sandbox: error the lead fixes with -Apply and retries once (SKILL.md and build.md amended)
+- 2026-11-18T21:43:27Z [decision] design (stage 9): interpreter versions are resolved by uv (python install/find on the request), never parsed; estimate = matching wheel sizes x2.5 + 100 MB per interpreter, 30 s + 1 s per 20 MB; null estimate needs approval only before the first; -Apply never refuses, the lead enforces
+- 2026-11-18T21:43:28Z [decision] design (stage 9): SandboxEnv.psm1 imports Sandbox.psm1 (one direction); new exports Resolve-SandboxReadEntry, Invoke-SandboxCommand, lock helper; uv calls through Invoke-SandboxUv with XAGENT_UV_PATH for tests; -Rebuild <project>; doctor calls the report in-process
+- 2026-11-18T21:43:28Z [decision] design (stage 9): task acceptance tests stay on the host in v1 (listed as a risk); only phase tests move into the sandbox
+- 2026-11-18T21:43:29Z [dismiss] ir-p9 d2 Blocker 1 and cd-p9 d2 Major (no phases in the design) — phases and checkpoints are made in the plan stage from the Files table; the doc now says so
+- 2026-11-18T21:43:30Z [dismiss] ir-p9 d2 Nit 27 (Critical User Journeys and NFR sections) — this repo's design docs don't all use them; the failure paths are covered by the Rules, Risks and Verification
+- 2026-11-18T21:43:31Z [dismiss] sy-p9 d2 Nit 4 (GPU risk row) applied by dropping the row; sy-p9 d2 Nit 5 ('in plain words') applied; no other dismissals from sy-p9
+- 2026-11-19T01:48:23Z [reaudit] d3: phase 9
+- 2026-11-19T01:59:48Z [decision] design (stage 9 re-check): interpreter = .python-version, else the lowest minor from requires-python's first lower-bound clause; uv workspaces unsupported in v1 (the private repo has none); a line-based pyproject reader, no TOML parser
+- 2026-11-19T01:59:49Z [decision] design (stage 9 re-check): delegate.ps1 orchestrates -SandboxRun (gate, .probe-<hex> worktree, link, Invoke-SandboxCommand, unlink); Invoke-SandboxCommand uses the full pwsh path; phase test passes only on status ran and exitCode 0; gate commit = base, existing branch tip, or existing worktree HEAD; prune by 14-day stamp only; phase table added
+- 2026-11-19T01:59:50Z [dismiss] ir-p9-r1 d3 Major 10 second half (build-inputs-incomplete status) — inputs now include files pyproject names (readme, license); any other missing file surfaces as install-failed with uv's error
+- 2026-11-19T02:06:44Z [decision] review design-3: declined by the user (only the stage-9 re-check runs ir-p9-r1 and cd-p9-r1 were wanted; the other d3 runs came from the tracker starting a round on the design-2 commit)
+- 2026-11-19T02:06:45Z [dismiss] sandbox-env-d3-sy-p9-r1: not run — waived by the user; style was reviewed at d2 and the re-check covered readiness and codebase details only
+- 2026-11-19T02:06:47Z [gate] design-locked: "Lock the design (Recommended)"
+- 2026-11-19T02:06:48Z [stage] design-review -> plan
+- 2026-11-19T02:58:09Z [decision] merged main into feature/sandbox-env (Cursor self-update and review-round fixes, name cleanup)
+- 2026-11-19T03:21:24Z [decision] merged main into feature/sandbox-env (fix: plan counts only the feature's own task merges)
+- 2026-11-19T03:30:50Z [decision] merged main into feature/sandbox-env (fix: plan.md keeps task rows together)
+- 2026-11-19T03:31:15Z [dismiss] p1-cm Major 1 (canary unlink) — the canary creates no .venv links; only the reparse-point skip in its fallback walk applies
+- 2026-11-19T03:31:16Z [dismiss] p1-cm Majors 5, 6 and Nits 10, 12 (profile and check-in mode undefined in plan.md; full suite in phase 5; vague test pointers) — defined by the skills and the plan rule; task files carry test details
+- 2026-11-19T03:44:11Z [gate] plan-approved: "Approve the plan (Recommended)"
+- 2026-11-19T03:44:11Z [decision] checkin: on-problems
+- 2026-11-19T03:44:12Z [stage] plan -> build
+- 2026-11-19T04:04:14Z [fix-up] sbx-command: 1 file, 0 lines — removed a stray probe file Sandbox.psm1.testwrite the worker left
+- 2026-11-19T04:08:23Z [fix-up] sbx-command: 2 files, about 15 lines — Invoke-SandboxCommand takes an optional -Runtime (tests pass the lifecycle runtime); output is always a string array (a one-line result came back as a string); the lock-timeout test waits until the job holds the mutex
+- 2026-11-19T04:10:07Z [decision] env-discover: identity-hash lines use paths relative to the project folder ('../' for a .python-version above), not repo-relative, so two projects with identical inputs share an environment as the design's Data section intends
+- 2026-11-19T04:23:03Z [decision] env-discover: kept whole despite split verdict — the uv plumbing half is small and shares the test file and exports; previous Composer tasks of this size finished in under 5 minutes
+- 2026-11-19T04:35:30Z [round] env-discover: 7 stray generator scripts in skills/delegate/tests; many required test cases missing (autocrlf clones, shared hash, license forms, .python-version rules, Get-SandboxUvPath null, -Environment restore)
+- 2026-11-19T04:42:10Z [fix-up] env-discover: 8 files deleted, 0 lines — removed the worker's generator scripts and a write probe; the sandboxed worker could not delete them (Access to path D:\ denied)
+- 2026-11-19T05:07:52Z [fix-up] env-report: 2 files, about 70 lines — estimate keeps known sizes and lists packages whose Windows wheel has no recorded size (the PyTorch index records none) as unknownSize, named in the proposal text; a source-only package counts its sdist size. Found by running the report on the private repo, where the old rule made every estimate unknown
+- 2026-11-19T05:07:52Z [decision] design (as built): the -SandboxEnv proposal adds unknownSize (packages whose size uv.lock does not record); estimateBytes is null only for resolve projects or an unreadable lock; fold into the design at sign-off
+- 2026-11-19T06:01:52Z [fix-up] env-build: 3 files, 4 lines — uv python find without --managed-python: real uv refuses it together with UV_PYTHON_PREFERENCE (found by a real-uv build of a tiny repo, which then built, wrote the .pth and imported from the worktree)
+- 2026-11-19T06:01:53Z [decision] design (as built): the interpreter is found with 'uv python find <request>' under UV_PYTHON_PREFERENCE=only-managed, not --managed-python; fold into the design at sign-off
+- 2026-11-19T06:07:15Z [decision] env-link: kept whole despite split verdict — prune, gate and links share the module, tests and fixtures; similar Composer tasks finished in under 15 minutes
+- 2026-11-19T06:37:41Z [fix-up] env-link: 1 file, 9 lines — record the interpreter's real folder (uv python find returns the minor-version junction cpython-3.12-..., while pyvenv.cfg home names cpython-3.12.12-...), so the per-run grant covers what python loads; found with a real-uv link check
+- 2026-11-19T06:59:56Z [fix-up] dlg-commands: 2 files, 9 lines — removed a stray root uv.lock the worker left, and the duplicated .xagent exclude block (the worker copied it up instead of moving it)
+- 2026-11-19T07:09:48Z [fix-up] phase 4: 2 files, 22 lines — Remove-SandboxEnvLinks finds junctions with Get-Item -Force, and a test for a junction whose target is gone (the old code already passed it; Test-Path is true for a dangling junction in PowerShell 7)
+- 2026-11-19T07:26:28Z [decision] design (as built, phase 5): the phase test runs through -SandboxRun only when the repo's -SandboxEnv report lists Python projects; other repos run it in the checkout as before (this repo's own Pester suite cannot run inside the sandbox: no HKCU test registry, real-path writes denied); fold into the design at sign-off
+- 2026-11-19T07:39:42Z [fix-up] phase 5: 2 files, 30 lines — project discovery skips folders under a fixtures, testdata, test_data or __fixtures__ path segment; the gate had refused both phase 5 workers because the test fixture's uv.lock counted as a project (found by dogfooding)
+- 2026-11-19T07:39:42Z [decision] design (as built): discovery ignores test data folders (fixtures, testdata, test_data, __fixtures__); fold into the design at sign-off
+- 2026-11-19T07:58:38Z [stage] build -> signoff
+- 2026-11-19T08:17:08Z [fix-up] signoff: 2 files, 30 lines — requirements files under a nested lock folder are not separate projects; a requirements-only project with no .python-version is unsupported/python-version-unknown instead of throwing (found by the drift check)
+- 2026-11-19T15:49:43Z [gate] signed-off: "Sign off and merge (Recommended)"

@@ -767,18 +767,42 @@ function Assert-SandboxOutsideProfile {
     }
 }
 
+function Get-SandboxRunExtraEnv([hashtable]$ExtraEnv, [string]$Letter, [bool]$WithWorktree) {
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            if ([string]::Equals([string]$key, 'XAGENT_WORKTREE', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'sandbox: extra environment variable XAGENT_WORKTREE is set by New-SandboxRun'
+            }
+        }
+    }
+    $result = @{}
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            $result[$key] = $ExtraEnv[$key]
+        }
+    }
+    if ($WithWorktree) {
+        $result['XAGENT_WORKTREE'] = "$($Letter):\"
+    }
+    return $result
+}
+
 function Get-SandboxEnvironment {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Slot,
-        [AllowNull()][AllowEmptyCollection()][object[]]$ReadList
+        [AllowNull()][AllowEmptyCollection()][object[]]$ReadList,
+        [AllowNull()][hashtable]$ExtraEnv,
+        [AllowNull()][AllowEmptyCollection()][string[]]$PathSuffix
     )
     # SandboxNative.cs sorts the block. The names are the whole environment the child receives.
     $list = New-Object System.Collections.Generic.List[string]
+    $reserved = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($name in @('SystemRoot', 'windir', 'SystemDrive', 'ProgramData', 'ComSpec', 'PATHEXT', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS')) {
         $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
         if ($null -eq $value) { $value = '' }
         $list.Add("${name}=${value}")
+        $null = $reserved.Add($name)
     }
 
     $pathValue = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\PowerShell\7;C:\Program Files\Git\cmd'
@@ -792,21 +816,49 @@ function Get-SandboxEnvironment {
             $pathValue = $pathValue + ';' + [string]$entryPath
         }
     }
+    if ($null -ne $PathSuffix) {
+        foreach ($suffix in @($PathSuffix)) {
+            if ([string]::IsNullOrWhiteSpace($suffix)) { continue }
+            $pathValue = $pathValue + ';' + [string]$suffix
+        }
+    }
     $list.Add("PATH=$pathValue")
+    $null = $reserved.Add('PATH')
     $list.Add('PSModulePath=C:\Program Files\PowerShell\Modules;C:\Program Files\PowerShell\7\Modules')
+    $null = $reserved.Add('PSModulePath')
 
     $homeDir = $Slot + ':\.xagent\sandbox\home'
     $tmp = $Slot + ':\.xagent\sandbox\tmp'
     $list.Add("USERPROFILE=$homeDir")
+    $null = $reserved.Add('USERPROFILE')
     $list.Add("HOME=$homeDir")
+    $null = $reserved.Add('HOME')
     $list.Add("APPDATA=$homeDir\AppData\Roaming")
+    $null = $reserved.Add('APPDATA')
     $list.Add("LOCALAPPDATA=$homeDir\AppData\Local")
+    $null = $reserved.Add('LOCALAPPDATA')
     $list.Add("TEMP=$tmp")
+    $null = $reserved.Add('TEMP')
     $list.Add("TMP=$tmp")
+    $null = $reserved.Add('TMP')
     $list.Add('CURSOR_INVOKED_AS=agent.cmd')
+    $null = $reserved.Add('CURSOR_INVOKED_AS')
     $list.Add("NODE_COMPILE_CACHE=$tmp\node-compile-cache")
+    $null = $reserved.Add('NODE_COMPILE_CACHE')
+
+    if ($null -ne $ExtraEnv) {
+        foreach ($key in @($ExtraEnv.Keys)) {
+            $name = [string]$key
+            if ($reserved.Contains($name)) {
+                throw "sandbox: extra environment variable $name is already set"
+            }
+            $null = $reserved.Add($name)
+            $list.Add("${name}=$([string]$ExtraEnv[$key])")
+        }
+    }
     Write-Output -NoEnumerate $list.ToArray()
 }
+
 
 function Get-WindowsBuild {
     return [int][Environment]::OSVersion.Version.Build
@@ -1162,6 +1214,7 @@ function Get-SandboxGrantList {
         [Parameter(Mandatory)][string]$RuntimeRoot,
         [Parameter(Mandatory)][string]$RuntimeVersion,
         [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$ReadList,
+        [AllowNull()][AllowEmptyCollection()][object[]]$EnvPaths,
         [switch]$ReadOnly
     )
     if ([string]::IsNullOrEmpty($WtName) -or $WtName -eq '.' -or $WtName -eq '..' -or $WtName.Contains('\') -or $WtName.Contains('/')) {
@@ -1214,6 +1267,28 @@ function Get-SandboxGrantList {
                 foreach ($ancestor in $chain) {
                     Add-SandboxGrantRow $rows $seen $ancestor 'RA'
                 }
+            }
+        }
+    }
+    if ($null -ne $EnvPaths) {
+        foreach ($item in @($EnvPaths)) {
+            if ($null -eq $item) { continue }
+            $pathRaw = Get-ObjectProperty $item 'path'
+            if ($null -eq $pathRaw) { $pathRaw = '' }
+            $project = Get-ObjectProperty $item 'project'
+            $resolved = Resolve-SandboxReadEntry @{ path = [string]$pathRaw }
+            if ($null -ne $resolved.reason) {
+                $tail = "run -SandboxEnv -Repo $Repo -Apply"
+                if (-not [string]::IsNullOrEmpty([string]$project)) {
+                    $tail = $tail + " -Rebuild $project"
+                }
+                throw "sandbox: environment path '$pathRaw' $($resolved.reason); $tail"
+            }
+            $entryPath = [string]$resolved.path
+            Add-SandboxGrantRow $rows $seen $entryPath '(OI)(CI)RX'
+            $envAncestors = Get-SandboxGrantAncestors $entryPath
+            foreach ($ancestor in $envAncestors) {
+                Add-SandboxGrantRow $rows $seen $ancestor 'RA'
             }
         }
     }
@@ -1348,22 +1423,36 @@ function Format-SandboxIcaclsError($Output) {
 # Grants and removals rewrite whole access lists (icacls and NtSetSecurityObject read, change, write).
 # Two runs editing a shared path at once (the runtime cache, the repo's .git, read-list entries)
 # can drop each other's entry, so every ACL edit holds this machine-wide lock.
-function Invoke-SandboxAclLocked([scriptblock]$Body) {
-    $mutex = [Threading.Mutex]::new($false, 'Local\xagent-acl')
+function Invoke-SandboxLocked {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [Parameter(Mandatory)][string]$TimeoutMessage,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+    )
+    $mutex = [Threading.Mutex]::new($false, $Name)
     $owned = $false
     try {
         try {
-            $owned = $mutex.WaitOne([TimeSpan]::FromSeconds(120))
+            $owned = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))
         } catch [Threading.AbandonedMutexException] {
             $owned = $true
         }
-        if (-not $owned) { throw 'sandbox: timed out after 120 s waiting for another run to finish changing permissions' }
-        & $Body
+        if (-not $owned) { throw $TimeoutMessage }
+        & $ScriptBlock
     } finally {
         if ($owned) { try { $mutex.ReleaseMutex() } catch { } }
         $mutex.Dispose()
     }
 }
+
+function Invoke-SandboxAclLocked([scriptblock]$Body) {
+    Invoke-SandboxLocked -Name 'Local\xagent-acl' -TimeoutSec 120 `
+        -TimeoutMessage 'sandbox: timed out after 120 s waiting for another run to finish changing permissions' `
+        -ScriptBlock $Body
+}
+
 
 function Remove-SandboxGrants {
     [CmdletBinding()]
@@ -1740,6 +1829,9 @@ function New-SandboxRun {
         [Parameter(Mandatory)][string]$Repo,
         [Parameter(Mandatory)][string]$Worktree,
         [Parameter(Mandatory)][string]$WtName,
+        [AllowNull()][AllowEmptyCollection()][object[]]$EnvPaths,
+        [AllowNull()][hashtable]$ExtraEnv,
+        [AllowNull()][AllowEmptyCollection()][string[]]$PathSuffix,
         [switch]$ReadOnly
     )
 
@@ -1775,6 +1867,7 @@ function New-SandboxRun {
         RuntimeVersion = $runtimeVersion
         ReadList = $read
     }
+    if ($null -ne $EnvPaths) { $grantArgs['EnvPaths'] = $EnvPaths }
     if ($ReadOnly) { $grantArgs['ReadOnly'] = $true }
     $fresh = Get-SandboxGrantList @grantArgs
 
@@ -1857,7 +1950,15 @@ function New-SandboxRun {
     }
     Invoke-SubstMap -Letter $letterKey -Target $worktreeFull
 
-    $envVars = Get-SandboxEnvironment -Slot $letter -ReadList $read
+    $withWorktree = (@($EnvPaths | Where-Object { $null -ne $_ }).Count -gt 0)
+    $mergedExtra = Get-SandboxRunExtraEnv -ExtraEnv $ExtraEnv -Letter $letter -WithWorktree $withWorktree
+    $envParams = @{
+        Slot = $letter
+        ReadList = $read
+    }
+    if ($mergedExtra.Count -gt 0) { $envParams['ExtraEnv'] = $mergedExtra }
+    if ($null -ne $PathSuffix) { $envParams['PathSuffix'] = $PathSuffix }
+    $envVars = Get-SandboxEnvironment @envParams
     return [pscustomobject]@{
         slot = $letter
         container = $Slot.container
@@ -1998,19 +2099,164 @@ function ConvertTo-SandboxPsLiteral([string]$Text) {
     return $Text.Replace("'", "''")
 }
 
-function Get-SandboxCanaryWorktreeName([string]$Worktree) {
+function Get-SandboxWorktreeName([string]$Worktree) {
     $gitFile = Join-Path $Worktree '.git'
+    if (Test-Path -LiteralPath $gitFile -PathType Container) {
+        throw "sandbox: $Worktree is not a linked worktree"
+    }
+    if (-not (Test-Path -LiteralPath $gitFile -PathType Leaf)) {
+        throw "sandbox: worktree $Worktree has no gitdir"
+    }
     $gitText = [IO.File]::ReadAllText($gitFile)
     if ($gitText -notmatch '(?m)^gitdir:\s*(.+?)\s*$') {
-        throw 'sandbox: canary worktree failed: worktree .git has no gitdir'
+        throw "sandbox: worktree $Worktree has no gitdir"
     }
     $name = [IO.Path]::GetFileName($Matches[1].Trim())
     if ([string]::IsNullOrWhiteSpace($name) -or $name -eq '.' -or $name -eq '..' -or $name.Contains('\') -or $name.Contains('/')) {
-        throw "sandbox: canary worktree failed: unexpected worktree name '$name'"
+        throw "sandbox: unexpected worktree name '$name'"
     }
     return $name
 }
 
+function Get-SandboxCommandOutputLines([string]$StdoutText, [string]$StderrText) {
+    $combined = New-Object System.Collections.Generic.List[string]
+    foreach ($text in @($StdoutText, $StderrText)) {
+        if ([string]::IsNullOrEmpty($text)) { continue }
+        $parts = @($text -split '\r?\n')
+        if ($parts.Count -gt 0 -and [string]::IsNullOrEmpty($parts[$parts.Count - 1])) {
+            if ($parts.Count -eq 1) {
+                $parts = @()
+            } else {
+                $parts = $parts[0..($parts.Count - 2)]
+            }
+        }
+        foreach ($line in $parts) { $combined.Add([string]$line) }
+    }
+    $max = [Math]::Min(40, $combined.Count)
+    if ($max -eq 0) { return ,[string[]]::new(0) }
+    $out = New-Object string[] $max
+    for ($i = 0; $i -lt $max; $i++) {
+        $line = $combined[$i]
+        if ($null -eq $line) { $line = '' }
+        if ($line.Length -gt 400) { $line = $line.Substring(0, 400) }
+        $out[$i] = $line
+    }
+    return ,$out
+}
+
+function Clear-SandboxWorktreeForDelete([string]$Path) {
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($Path)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        $dirInfo = [IO.DirectoryInfo]::new($dir)
+        foreach ($entry in $dirInfo.EnumerateFileSystemInfos()) {
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if ($entry -is [IO.DirectoryInfo]) {
+                    [IO.Directory]::Delete($entry.FullName, $false)
+                } else {
+                    [IO.File]::Delete($entry.FullName)
+                }
+                continue
+            }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                $entry.Attributes = $entry.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+            }
+            if ($entry -is [IO.DirectoryInfo]) {
+                $stack.Push($entry.FullName)
+            }
+        }
+    }
+    $rootItem = Get-Item -LiteralPath $Path -Force
+    if ($rootItem.Attributes -band [IO.FileAttributes]::ReadOnly) {
+        $rootItem.Attributes = $rootItem.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
+function Invoke-SandboxCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][string]$RunName,
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [AllowNull()][AllowEmptyCollection()][object[]]$EnvPaths,
+        [AllowNull()][hashtable]$ExtraEnv,
+        [AllowNull()][AllowEmptyCollection()][string[]]$PathSuffix,
+        [AllowNull()]$Runtime
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RunName) -or $RunName.Contains('\') -or $RunName.Contains('/') -or $RunName.Contains('..')) {
+        throw "sandbox: invalid run name '$RunName'"
+    }
+
+    $runtime = $Runtime
+    if ($null -eq $runtime) { $runtime = Get-SandboxRuntime }
+    $wtName = Get-SandboxWorktreeName $Worktree
+    $slot = Get-SandboxSlot -TimeoutSec 60
+    $run = $null
+    $h = $null
+    $status = 'ran'
+    $exitCode = 0
+    $output = [string[]]::new(0)
+    $seconds = 0
+    try {
+        $newRunParams = @{
+            Slot = $slot
+            Runtime = $runtime
+            Repo = $Repo
+            Worktree = $Worktree
+            WtName = $wtName
+        }
+        if ($null -ne $EnvPaths) { $newRunParams['EnvPaths'] = $EnvPaths }
+        if ($null -ne $ExtraEnv) { $newRunParams['ExtraEnv'] = $ExtraEnv }
+        if ($null -ne $PathSuffix) { $newRunParams['PathSuffix'] = $PathSuffix }
+        $run = New-SandboxRun @newRunParams
+
+        $runDir = Join-Path (Join-Path $Repo '.xagent\runs') $RunName
+        if (Test-Path -LiteralPath $runDir) {
+            Remove-Item -LiteralPath $runDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+        $stdoutPath = Join-Path $runDir 'stdout.txt'
+        $stderrPath = Join-Path $runDir 'stderr.txt'
+
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $h = Start-SandboxProcess -Run $run -Exe 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments @(
+            '-NoProfile', '-Command', $Command
+        ) -StdoutPath $stdoutPath -StderrPath $stderrPath
+
+        $done = [XagentSandbox]::Wait($h, $TimeoutSec * 1000)
+        if ($done) {
+            $exitCode = [int][XagentSandbox]::Finish($h)
+        } else {
+            [XagentSandbox]::Kill($h)
+            [void][XagentSandbox]::Finish($h)
+            $status = 'timeout'
+            $exitCode = $null
+        }
+        $sw.Stop()
+        $seconds = [int][math]::Round($sw.Elapsed.TotalSeconds)
+
+        $stdoutText = ''
+        $stderrText = ''
+        try { $stdoutText = Read-SandboxSharedText $stdoutPath } catch { $stdoutText = '' }
+        try { $stderrText = Read-SandboxSharedText $stderrPath } catch { $stderrText = '' }
+        $output = [string[]](Get-SandboxCommandOutputLines $stdoutText $stderrText)
+    } finally {
+        if ($null -ne $slot) {
+            Stop-SandboxRun -Run $run -Slot $slot -Handle $h | Out-Null
+        }
+    }
+    return @{
+        status = $status
+        exitCode = $exitCode
+        output = $output
+        seconds = $seconds
+    }
+}
 function Read-SandboxSharedText([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return '' }
     $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
@@ -2272,7 +2518,7 @@ function Invoke-SandboxCanary {
             throw "sandbox: canary worktree failed: $message"
         }
         $worktreeAdded = $true
-        $wtName = Get-SandboxCanaryWorktreeName $worktree
+        $wtName = Get-SandboxWorktreeName $worktree
 
         $secret = 'xagent-canary-' + [guid]::NewGuid().ToString('N')
         $profileCanary = Join-Path $script:LoginProfile ('xagent-canary-' + $rand + '.txt')
@@ -2370,16 +2616,8 @@ function Invoke-SandboxCanary {
 
         if (-not [string]::IsNullOrWhiteSpace([string]$worktree) -and (Test-Path -LiteralPath $worktree)) {
             try {
-                Get-ChildItem -LiteralPath $worktree -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {
-                        $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
-                    }
-                }
-                $rootItem = Get-Item -LiteralPath $worktree -Force
-                if ($rootItem.Attributes -band [IO.FileAttributes]::ReadOnly) {
-                    $rootItem.Attributes = $rootItem.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)
-                }
-                Remove-Item -LiteralPath $worktree -Recurse -Force
+                Clear-SandboxWorktreeForDelete $worktree
+
                 if (Test-Path -LiteralPath $worktree) {
                     throw "folder still present: $worktree"
                 }
@@ -2470,4 +2708,4 @@ function Invoke-SandboxCanary {
     }
 }
 
-Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxCanary
+Export-ModuleMember -Function Test-SandboxSupport, Get-SandboxRuntime, Get-SandboxConfig, Set-SandboxLetters, Initialize-SandboxLetters, Remove-SandboxGrants, Get-SandboxSlot, Remove-SandboxLetters, New-SandboxRun, Start-SandboxProcess, Stop-SandboxRun, Invoke-SandboxLocked, Invoke-SandboxCommand, Invoke-SandboxCanary, Resolve-SandboxReadEntry

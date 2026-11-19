@@ -21,6 +21,7 @@ Today the alternatives are Haiku sub-agents or manually copy-pasting instruction
 - Pester 5.5+ for all users.
 - A Cursor CLI install under `%LOCALAPPDATA%\cursor-agent`.
 - Three free drive letters (`D`–`Z`) reserved on first use.
+- `uv` on the host for repos with Python projects run in the sandbox (the skill builds their environments with it and does not install it).
 
 ### Setup
 

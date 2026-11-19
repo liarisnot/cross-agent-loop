@@ -29,7 +29,7 @@ and `delegate.ps1` means:
 pwsh -NoProfile -File <delegate dir>/scripts/delegate.ps1
 ```
 
-After a feature has been selected, every `feature.ps1` call passes `-Repo <repo> -Name <name>`. `new` passes `-Repo <repo> -Name <proposed name>` and no selected name. `doctor` passes neither `-Repo` nor `-Name`.
+After a feature has been selected, every `feature.ps1` call passes `-Repo <repo> -Name <name>`. `new` passes `-Repo <repo> -Name <proposed name>` and no selected name. `doctor` may pass `-Repo <repo>` to add the `sandbox-env` check, and never passes `-Name`.
 
 Every `feature.ps1` command prints one JSON object. Success, including `verify` with a failing test and `reconcile` with contradictions, is exit 0 and `ok: true`. A refused or failed command is exit 1 and `{ok: false, error}`. Show `error` and stop. Never guess the stage. `delegate.ps1` is different: a failed worker is still one JSON object, and `ok: false` or `timedOut: true` means the run failed. Read `ok`, `timedOut`, `sessionId`, `worktree`, `baseSha`, `reviewFile`, `stderrTail`, `taskId` and `model`.
 

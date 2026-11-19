@@ -3183,6 +3183,57 @@ function Invoke-DoctorFeature {
             $checks.Add(@{ name = 'sandbox'; ok = $false; required = $false; detail = $sandboxDetail }) | Out-Null
         }
 
+        
+        if (-not [string]::IsNullOrEmpty($Repo)) {
+            try {
+                $sandboxEnvModule = Join-Path ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate'))) 'scripts/SandboxEnv.psm1'
+                $null = Import-Module $sandboxEnvModule -Force -ErrorAction Stop -WarningAction SilentlyContinue
+                $repoFull = [IO.Path]::GetFullPath($Repo)
+                $headOut = & git -C $repoFull 'rev-parse' '--verify' 'HEAD' 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    $headMsg = if ($null -eq $headOut) { 'HEAD not found' } elseif ($headOut -is [System.Array]) { ($headOut | ForEach-Object { [string]$_ }) -join ' ' } else { [string]$headOut }
+                    throw $headMsg.Trim()
+                }
+                $headCommit = ([string]$headOut).Trim()
+                $result = Test-SandboxEnvReady -Repo $repoFull -Commit $headCommit
+                $sandboxEnvOk = [bool]$result.ready
+                $projects = @($result.projects)
+                if ($projects.Count -eq 0) {
+                    $sandboxEnvDetail = 'no Python projects'
+                } elseif ($sandboxEnvOk) {
+                    $readyCount = @($projects | Where-Object { [string]$_.status -ceq 'ready' }).Count
+                    $sandboxEnvDetail = "$readyCount environment(s) ready"
+                } else {
+                    $detailParts = [System.Collections.Generic.List[string]]::new()
+                    foreach ($p in $projects) {
+                        $status = [string]$p.status
+                        $reason = $p.reason
+                        if ($status -ceq 'ready') { continue }
+                        $blocks = $false
+                        if ($status -ceq 'missing' -or $status -ceq 'stale' -or $status -ceq 'install-failed' -or $status -ceq 'uv-copy-missing') {
+                            $blocks = $true
+                        } elseif ($status -ceq 'unsupported' -and $reason -ceq 'uv-missing') {
+                            $blocks = $true
+                        }
+                        if ($blocks) { $detailParts.Add("$($p.project) $status") }
+                    }
+                    $sandboxEnvDetail = ($detailParts -join ', ')
+                    if ($null -ne $result.proposal) {
+                        $propText = $result.proposal.text
+                        if ($propText -is [string] -and -not [string]::IsNullOrEmpty($propText)) {
+                            if ($sandboxEnvDetail.Length -gt 0) { $sandboxEnvDetail += '; ' }
+                            $sandboxEnvDetail += $propText
+                        }
+                    }
+                }
+                if ($sandboxEnvDetail.Length -gt 300) { $sandboxEnvDetail = $sandboxEnvDetail.Substring(0, 300) }
+                $checks.Add(@{ name = 'sandbox-env'; ok = $sandboxEnvOk; required = $false; detail = $sandboxEnvDetail }) | Out-Null
+            } catch {
+                $sandboxEnvDetail = 'sandbox-env: ' + $_.Exception.Message
+                if ($sandboxEnvDetail.Length -gt 300) { $sandboxEnvDetail = $sandboxEnvDetail.Substring(0, 300) }
+                $checks.Add(@{ name = 'sandbox-env'; ok = $false; required = $false; detail = $sandboxEnvDetail }) | Out-Null
+            }
+        }
         $ready = $true
         foreach ($c in $checks) {
             if ($c.required -and -not $c.ok) { $ready = $false; break }
