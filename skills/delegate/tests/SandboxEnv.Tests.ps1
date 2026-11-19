@@ -58,6 +58,20 @@ BeforeAll {
         param([Parameter(Mandatory)][string]$Repo)
         Join-Path (Split-Path -Parent $Repo) "$((Split-Path -Leaf $Repo)).xagent\.envs"
     }
+
+    function Set-EnvStampAge {
+        param([string]$StampPath, [int]$Days)
+        if (-not (Test-Path -LiteralPath $StampPath)) { New-Item -ItemType File -Force -Path $StampPath | Out-Null }
+        (Get-Item -LiteralPath $StampPath -Force).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-$Days)
+    }
+
+    function Copy-RepoToWorktree {
+        param([string]$Repo, [string]$Dest)
+        New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+        Get-ChildItem -LiteralPath $Repo -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Dest $_.Name) -Recurse -Force
+        }
+    }
 }
 
 AfterAll {
@@ -451,7 +465,7 @@ Describe 'sandbox env status' {
             $name = "py3.12-$($h.Substring(0,12))"
             $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
             $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
-            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = 't' }
+            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = (Get-Date).ToUniversalTime().ToString('o') }
             New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot $name 'Scripts') | Out-Null
             [IO.File]::WriteAllText((Join-Path $envsRoot $name 'Scripts\python.exe'), '', [Text.UTF8Encoding]::new($false))
             $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
@@ -470,7 +484,7 @@ Describe 'sandbox env status' {
             $name = "py3.12-$($h.Substring(0,12))"
             $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
             $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
-            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = 't' }
+            $index.envs[$h] = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 10; built = (Get-Date).ToUniversalTime().ToString('o') }
             $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
             $st[0]['status'] | Should -Be 'missing'
         } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
@@ -502,7 +516,7 @@ Describe 'sandbox env status' {
             $projs = Get-SandboxEnvProjects -Repo $repo -Commit $sha
             $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
             $index = @{ approved = 't'; uv = 'x'; uvVersion = '1'; pythons = @{}; envs = @{}; failed = @{} }
-            $index.envs['otherhash00000000000000000000000000000000000000000000000'] = @{ name = 'py3.12-deadbeef0000'; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 1; built = 't' }
+            $index.envs['otherhash00000000000000000000000000000000000000000000000'] = @{ name = 'py3.12-deadbeef0000'; projects = @('.'); kind = 'lock'; python = '3.12'; bytes = 1; built = (Get-Date).ToUniversalTime().ToString('o') }
             $st = @(InModuleScope SandboxEnv -ArgumentList (,$projs), $index, $envsRoot, $env:XAGENT_UV_PATH { param($p,$i,$r,$u) Get-SandboxEnvStatuses -Projects $p -Index $i -EnvsRoot $r -UvPath $u })
             $st[0]['status'] | Should -Be 'stale'
         } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
@@ -659,7 +673,7 @@ Describe 'Get-SandboxEnvReport' {
             $envsRoot = Join-Path (Split-Path $repo -Parent) "$(Split-Path $repo -Leaf).xagent\.envs"
             New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot $name 'Scripts') | Out-Null
             [IO.File]::WriteAllText((Join-Path $envsRoot $name 'Scripts\python.exe'), '', [Text.UTF8Encoding]::new($false))
-            $json = (@{ version = 1; approved = '2020-01-01'; uv = 'x'; uvVersion = '1'; pythons = @{ '3.12.7' = 'p' }; envs = @{ $h = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12.7'; bytes = 250; built = 't' } }; failed = @{} } | ConvertTo-Json -Compress -Depth 6)
+            $json = (@{ version = 1; approved = '2020-01-01'; uv = 'x'; uvVersion = '1'; pythons = @{ '3.12.7' = 'p' }; envs = @{ $h = @{ name = $name; projects = @('.'); kind = 'lock'; python = '3.12.7'; bytes = 250; built = (Get-Date).ToUniversalTime().ToString('o') } }; failed = @{} } | ConvertTo-Json -Compress -Depth 6)
             New-Item -ItemType Directory -Force -Path $envsRoot | Out-Null
             [IO.File]::WriteAllText((Join-Path $envsRoot 'envs.json'), $json, [Text.UTF8Encoding]::new($false))
             $r = Get-SandboxEnvReport -Repo $repo -Ref $sha
@@ -951,7 +965,7 @@ Describe 'Invoke-SandboxEnvApply' {
                 uv        = $null
                 uvVersion = $null
                 pythons   = @{}
-                envs      = @{ $other = [ordered]@{ name = $name; projects = @('other'); kind = 'lock'; python = '3.12'; bytes = 1; built = 't' } }
+                envs      = @{ $other = [ordered]@{ name = $name; projects = @('other'); kind = 'lock'; python = '3.12'; bytes = 1; built = (Get-Date).ToUniversalTime().ToString('o') } }
                 failed    = @{}
             }
             New-Item -ItemType Directory -Force -Path $envsRoot | Out-Null
@@ -1034,6 +1048,329 @@ Describe 'Invoke-SandboxEnvApply' {
             @($r.pruned).Count | Should -Be 0
             $r.built -is [System.Array] | Should -BeTrue
             Test-Path -LiteralPath (Get-SandboxEnvTestRoot -Repo $repo) | Should -BeFalse
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+}
+
+Describe 'Invoke-SandboxEnvApply prune' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'prunes a stale environment with old stamp and built, removes stamp and orphan python' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $proj = Get-SandboxEnvProjects -Repo $repo -Commit $sha
+            $oldHash = [string]$proj[0].hash
+            $oldName = "py3.12-$($oldHash.Substring(0,12))"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ($script:FixtureLock + "`n")
+            Add-SandboxEnvRepoCommit -Repo $repo -Message 'bump lock' | Out-Null
+            $idxPath = Join-Path $envsRoot 'envs.json'
+            $idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable
+            $idx.envs[$oldHash].built = ([DateTime]::UtcNow.AddDays(-15)).ToString('o')
+            [IO.File]::WriteAllText($idxPath, (ConvertTo-Json -InputObject $idx -Depth 8), [Text.UTF8Encoding]::new($false))
+            New-Item -ItemType Directory -Force -Path (Join-Path $envsRoot 'linked') | Out-Null
+            Set-EnvStampAge -StampPath (Join-Path $envsRoot "linked\$oldName") -Days 15
+            $orphanPy = Join-Path $envsRoot 'python\orphan-cpython'
+            New-Item -ItemType Directory -Force -Path $orphanPy | Out-Null
+            $idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable
+            $idx.pythons['9.99.99'] = $orphanPy
+            [IO.File]::WriteAllText($idxPath, (ConvertTo-Json -InputObject $idx -Depth 8), [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref HEAD
+            @($r.pruned | Where-Object { $_.env -ceq $oldName }).Count | Should -Be 1
+            $r.pruned | Where-Object { $_.env -ceq $oldName } | ForEach-Object { $_.bytes | Should -BeGreaterThan 0 }
+            Test-Path -LiteralPath (Join-Path $envsRoot $oldName) | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $envsRoot "linked\$oldName") | Should -BeFalse
+            Test-Path -LiteralPath $orphanPy | Should -BeFalse
+            ($idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable).pythons.ContainsKey('9.99.99') | Should -BeFalse
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'keeps stale environment with a fresh linked stamp' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $oldHash = [string](Get-SandboxEnvProjects -Repo $repo -Commit $sha)[0].hash
+            $oldName = "py3.12-$($oldHash.Substring(0,12))"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ($script:FixtureLock + ' ')
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            $idxPath = Join-Path $envsRoot 'envs.json'
+            $idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable
+            $idx.envs[$oldHash].built = ([DateTime]::UtcNow.AddDays(-15)).ToString('o')
+            [IO.File]::WriteAllText($idxPath, (ConvertTo-Json -InputObject $idx -Depth 8), [Text.UTF8Encoding]::new($false))
+            New-Item -ItemType File -Force -Path (Join-Path $envsRoot "linked\$oldName") | Out-Null
+            [IO.File]::WriteAllText((Join-Path $envsRoot "$oldName\keep.txt"), 'stay', [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref HEAD
+            @($r.pruned | Where-Object { $_.env -ceq $oldName }).Count | Should -Be 0
+            [IO.File]::ReadAllText((Join-Path $envsRoot "$oldName\keep.txt")) | Should -Be 'stay'
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'keeps never-linked environment built today and removes stale failed records' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $oldHash = [string](Get-SandboxEnvProjects -Repo $repo -Commit $sha)[0].hash
+            $oldName = "py3.12-$($oldHash.Substring(0,12))"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ($script:FixtureLock + 'x')
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            $idxPath = Join-Path $envsRoot 'envs.json'
+            $idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable
+            $idx.failed[$oldHash] = @{ at = 't'; error = 'old' }
+            [IO.File]::WriteAllText($idxPath, (ConvertTo-Json -InputObject $idx -Depth 8), [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref HEAD
+            @($r.pruned | Where-Object { $_.env -ceq $oldName }).Count | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $envsRoot $oldName) | Should -BeTrue
+            ([IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable).failed.ContainsKey($oldHash) | Should -BeFalse
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'treats unparseable built with no stamp as old enough to prune' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $oldHash = [string](Get-SandboxEnvProjects -Repo $repo -Commit $sha)[0].hash
+            $oldName = "py3.12-$($oldHash.Substring(0,12))"
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content ($script:FixtureLock + 'z')
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            $idxPath = Join-Path $envsRoot 'envs.json'
+            $idx = [IO.File]::ReadAllText($idxPath) | ConvertFrom-Json -AsHashtable
+            $idx.envs[$oldHash].built = 'not-a-date'
+            [IO.File]::WriteAllText($idxPath, (ConvertTo-Json -InputObject $idx -Depth 8), [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref HEAD
+            @($r.pruned | Where-Object { $_.env -ceq $oldName }).Count | Should -Be 1
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'keeps current environment even when linked stamp is old' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $sha = (git -C $repo rev-parse HEAD).Trim()
+            $hash = [string](Get-SandboxEnvProjects -Repo $repo -Commit $sha)[0].hash
+            $name = "py3.12-$($hash.Substring(0,12))"
+            New-Item -ItemType File -Force -Path (Join-Path $envsRoot "linked\$name") | Out-Null
+            Set-EnvStampAge -StampPath (Join-Path $envsRoot "linked\$name") -Days 15
+            [IO.File]::WriteAllText((Join-Path $envsRoot "$name\stay.txt"), 'ok', [Text.UTF8Encoding]::new($false))
+            $r = Invoke-SandboxEnvApply -Repo $repo -Ref HEAD
+            @($r.pruned | Where-Object { $_.env -ceq $name }).Count | Should -Be 0
+            [IO.File]::ReadAllText((Join-Path $envsRoot "$name\stay.txt")) | Should -Be 'ok'
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+}
+
+Describe 'Test-SandboxEnvReady' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'is ready for a repo without Python projects' {
+        $repo = New-SandboxEnvTestRepo
+        Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'README.md' -Content 'n'
+        $sha = Add-SandboxEnvRepoCommit -Repo $repo
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $r = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $r.ready | Should -Be $true
+            $r.message | Should -BeNullOrEmpty
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'blocks missing before apply and is ready after' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $before = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $before.ready | Should -Be $false
+            $before.message | Should -Match '^sandbox: environment not ready: \. \(missing\); run -SandboxEnv -Repo'
+            $before.message | Should -Match 'Build 1 environment'
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $after = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $after.ready | Should -Be $true
+            $after.message | Should -BeNullOrEmpty
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'blocks ready projects when envs uv copy is missing' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $uvExe = Join-Path (Get-SandboxEnvTestRoot -Repo $repo) 'bin\uv.exe'
+            Remove-Item -LiteralPath $uvExe -Force
+            $r = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $r.ready | Should -Be $false
+            ($r.projects | Where-Object { $_.status -ceq 'uv-copy-missing' }).Count | Should -BeGreaterThan 0
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'does not block workspace projects' {
+        try {
+            $env:XAGENT_UV_PATH = $script:FakeUvCmd
+            $repo = New-SandboxEnvTestRepo
+            $ws = '[tool.uv.workspace]' + [char]10 + 'members=["x"]' + [char]10 + '[project]' + [char]10 + 'requires-python=">=3.11"'
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'ws/pyproject.toml' -Content $ws
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            $r = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $r.ready | Should -Be $true
+        } finally { $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH'] }
+    }
+    It 'reports uv-missing when uv is absent' {
+        $repo = New-SandboxEnvTestRepo
+        Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+        Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+        $sha = Add-SandboxEnvRepoCommit -Repo $repo
+        $empty = Join-Path $TestDrive 'empty-uv-ready'
+        New-Item -ItemType Directory -Force -Path $empty | Out-Null
+        try {
+            Remove-Item Env:XAGENT_UV_PATH -ErrorAction SilentlyContinue
+            $gitDir = Split-Path (Get-Command git -ErrorAction Stop).Source -Parent
+            $env:PATH = "$gitDir;$empty"
+            $r = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $r.ready | Should -Be $false
+            ($r.projects | Where-Object { $_.reason -ceq 'uv-missing' }).Count | Should -BeGreaterThan 0
+            $r.message | Should -Match '\-Apply\.$'
+        } finally {
+            $env:XAGENT_UV_PATH = $script:SavedEnv['XAGENT_UV_PATH']
+            $env:PATH = $script:SavedEnv['PATH']
+        }
+    }
+}
+
+Describe 'Add-SandboxEnvLinks' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'creates junctions and returns paths, suffix, and env vars' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $ready = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $wt = Join-Path $TestDrive ("wt-{0}" -f [guid]::NewGuid())
+            Copy-RepoToWorktree -Repo $repo -Dest $wt
+            try {
+                $links = Add-SandboxEnvLinks -Repo $repo -Worktree $wt -Projects $ready.projects
+            } catch {
+                Set-ItResult -Skipped -Because 'cannot create a junction here'
+                return
+            }
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $venv = Join-Path $wt '.venv'
+            (Get-Item -LiteralPath $venv -Force).LinkType -ceq 'Junction' | Should -Be $true
+            Test-Path -LiteralPath (Join-Path $envsRoot 'linked') | Should -BeTrue
+            @($links.envPaths).Count | Should -BeGreaterOrEqual 2
+            $links.pathSuffix | Should -Be @("$envsRoot\bin")
+            $links.extraEnv.UV_FROZEN | Should -Be '1'
+            $links.extraEnv.UV_NO_SYNC | Should -Be '1'
+            $links.extraEnv.UV_PYTHON_DOWNLOADS | Should -Be 'never'
+            $links2 = Add-SandboxEnvLinks -Repo $repo -Worktree $wt -Projects $ready.projects
+            (Get-Item -LiteralPath $venv -Force).LinkType -ceq 'Junction' | Should -Be $true
+            $links2.envPaths.Count | Should -BeGreaterOrEqual 2
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'returns empty outputs when no ready projects' {
+        $repo = New-SandboxEnvTestRepo
+        $wt = Join-Path $TestDrive 'plain-wt'
+        New-Item -ItemType Directory -Force -Path $wt | Out-Null
+        $r = Add-SandboxEnvLinks -Repo $repo -Worktree $wt -Projects @([ordered]@{ project='.'; status='missing' })
+        @($r.envPaths).Count | Should -Be 0
+        @($r.pathSuffix).Count | Should -Be 0
+        $r.extraEnv.Count | Should -Be 0
+        @($r.notes).Count | Should -Be 0
+    }
+    It 'leaves a real .venv folder and adds a note' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $ready = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $wt = Join-Path $TestDrive ("wt-real-{0}" -f [guid]::NewGuid())
+            Copy-RepoToWorktree -Repo $repo -Dest $wt
+            New-Item -ItemType Directory -Force -Path (Join-Path $wt '.venv') | Out-Null
+            try { $links = Add-SandboxEnvLinks -Repo $repo -Worktree $wt -Projects $ready.projects } catch { Set-ItResult -Skipped -Because 'cannot create a junction here'; return }
+            @($links.notes | Where-Object { $_ -like '*.venv in .*real folder*' }).Count | Should -BeGreaterThan 0
+            (Get-Item -LiteralPath (Join-Path $wt '.venv')).LinkType | Should -BeNullOrEmpty
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+}
+
+Describe 'Remove-SandboxEnvLinks' {
+    BeforeAll { $script:FixtureLock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'uv.lock') -Raw }
+    It 'removes junctions and preserves environment data' {
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            $repo = New-SandboxEnvTestRepo
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -RelativePath '.python-version' -Content '3.12' -Repo $repo
+            $sha = Add-SandboxEnvRepoCommit -Repo $repo
+            Invoke-SandboxEnvApply -Repo $repo -Ref HEAD | Out-Null
+            $ready = Test-SandboxEnvReady -Repo $repo -Commit $sha
+            $wt = Join-Path $TestDrive ("wt-rm-{0}" -f [guid]::NewGuid())
+            Copy-RepoToWorktree -Repo $repo -Dest $wt
+            try { Add-SandboxEnvLinks -Repo $repo -Worktree $wt -Projects $ready.projects | Out-Null } catch { Set-ItResult -Skipped -Because 'cannot create a junction here'; return }
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $discovered = @(Get-SandboxEnvProjects -Repo $repo -Commit $sha)[0]
+            $envName = "py3.12-$(([string]$discovered.hash).Substring(0,12))"
+            $marker = Join-Path $envsRoot "$envName\Scripts\python.exe"
+            Test-Path -LiteralPath $marker | Should -BeTrue
+            $n = Remove-SandboxEnvLinks -Worktree $wt
+            $n | Should -BeGreaterOrEqual 1
+            Test-Path -LiteralPath (Join-Path $wt '.venv') | Should -BeFalse
+            Test-Path -LiteralPath $marker | Should -BeTrue
+        } finally { Exit-SandboxEnvApplyUv }
+    }
+    It 'leaves real .venv folders and returns count on plain folder' {
+        $folder = Join-Path $TestDrive ("plain-{0}" -f [guid]::NewGuid())
+        $repo = New-SandboxEnvTestRepo
+        $log = Join-Path $TestDrive ("uvlog-{0}.txt" -f [guid]::NewGuid())
+        try {
+            Enter-SandboxEnvApplyUv -LogFile $log
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath 'uv.lock' -Content $script:FixtureLock
+            Set-SandboxEnvRepoFile -Repo $repo -RelativePath '.python-version' -Content '3.12'
+            Add-SandboxEnvRepoCommit -Repo $repo | Out-Null
+            Invoke-SandboxEnvApply -Repo $repo -Ref 'HEAD' | Out-Null
+            $envsRoot = Get-SandboxEnvTestRoot -Repo $repo
+            $name = ([IO.File]::ReadAllText((Join-Path $envsRoot 'envs.json')) | ConvertFrom-Json).envs.PSObject.Properties | Select-Object -First 1 | ForEach-Object { $_.Value.name }
+            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            try { $null = New-Item -ItemType Junction -Path (Join-Path $folder '.venv') -Target (Join-Path $envsRoot $name) } catch { Set-ItResult -Skipped -Because 'cannot create a junction here'; return }
+            New-Item -ItemType Directory -Force -Path (Join-Path $folder 'real\.venv') | Out-Null
+            $count = Remove-SandboxEnvLinks -Worktree $folder
+            $count | Should -Be 1
+            Test-Path -LiteralPath (Join-Path $folder 'real\.venv') | Should -BeTrue
         } finally { Exit-SandboxEnvApplyUv }
     }
 }
