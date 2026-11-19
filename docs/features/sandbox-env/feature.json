@@ -10,5 +10,196 @@
       "sha": "836f2d01e9cd3f8d823de7ae01b9bd6298a0e6fd",
       "designBlob": "44015f6463f29495eedb55eb795c8a2ff0acea8c"
     }
-  }
+  },
+  "summary": "Build sandbox-env as designed in docs/designs/sandbox-env.md, in the design's five phases: the Sandbox.psm1 seam (environment grants and variables, the lock helper, Invoke-SandboxCommand), SandboxEnv.psm1's read side (discovery, identity hash, status, estimate, report) and write side (build, prune, rebuild, readiness gate, link and unlink), the delegate.ps1 surface (-SandboxEnv, -SandboxRun, the worker launch gate and cleanup unlinking), then doctor and the skill text. Every task follows the design's Rules and Files sections; task files point workers at the exact rules. Tasks that edit the same file run one after another. No step needs the user, other than having uv on the host and the private repo for the live checks at sign-off.",
+  "phases": [
+    {
+      "n": 1,
+      "rationale": "Sandbox.psm1 first: the environment rows, the extra variables and the probe runner are the interface every later phase calls. Existing runs must behave exactly as before when no environment is passed.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "sbx-envpaths",
+          "title": "New-SandboxRun environment grants and variables",
+          "dependsOn": [],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/tests/Sandbox.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/Sandbox.Tests.ps1\"; $c.Filter.FullName = \"*environment paths*\",\"*extra environment*\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "New-SandboxRun gains -EnvPaths <string[]>, -ExtraEnv <hashtable> and -PathSuffix <string[]>. Get-SandboxGrantList adds an (OI)(CI)RX row per EnvPaths entry after checking each with Resolve-SandboxReadEntry; a refusal throws 'sandbox: environment path '<path>' <reason>; run -SandboxEnv -Apply -Rebuild <project>' (the caller passes the project name per path; without one, omit the clause), never the read-list message about editing sandbox.json. Get-SandboxEnvironment gains -ExtraEnv and -PathSuffix: PathSuffix is appended after its own PATH entries, ExtraEnv names are added, and a name it already sets is refused with a throw. Resolve-SandboxReadEntry is added to Export-ModuleMember. Pester: Describe 'Sandbox environment paths' (rows added, refusal message, no rows when -EnvPaths is absent) and Describe 'Sandbox extra environment' (suffix order, added names, refused override). Design: Rules 'Grant (D6)' and 'Environment variables'.",
+          "delegateTaskId": "sandbox-env-sbx-envpaths"
+        },
+        {
+          "id": "sbx-command",
+          "title": "Lock helper, Invoke-SandboxCommand, canary reparse skip",
+          "dependsOn": [
+            "sbx-envpaths"
+          ],
+          "files": [
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/tests/Sandbox.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/Sandbox.Tests.ps1\"; $c.Filter.FullName = \"*lock helper*\",\"*Invoke-SandboxCommand*\",\"*canary*\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Factor the wait, abandoned-mutex takeover and timeout of Invoke-SandboxAclLocked into an exported helper taking a mutex name, a timeout and a timeout message; Invoke-SandboxAclLocked uses it with its current name and message. Add exported Invoke-SandboxCommand (repo, worktree, env paths, extra env, path suffix, command, timeout) per the design's Rules 'Invoke-SandboxCommand': Get-SandboxSlot, New-SandboxRun with the environment parameters, Start-SandboxProcess with 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' and '-NoProfile -Command <cmd>' (command as one argument via ConvertTo-SandboxArgument), logs to <repo>\\.xagent\\runs\\<run name>\\, Wait up to the timeout then Kill and Finish, Stop-SandboxRun in finally only when a slot was taken; it returns status ran or timeout, exitCode, the first 40 output lines (stdout then stderr, each cut at 400 characters) and seconds. Invoke-SandboxCanary's fallback recursive walk skips reparse points. Pester: Describe 'Sandbox lock helper', Describe 'Invoke-SandboxCommand' (argument quoting with a quote and a semicolon in the command, via the existing command-line helpers; result shape with a stubbed process where the existing tests stub one), and a canary case for the reparse-point skip.",
+          "delegateTaskId": "sandbox-env-sbx-command"
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "rationale": "SandboxEnv.psm1 read side: everything -SandboxEnv reports without building. It reads commits through git and calls uv only through Invoke-SandboxUv, so it is fully testable with a fake uv.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "env-discover",
+          "title": "Project discovery, pyproject reader, identity hash, interpreter request",
+          "dependsOn": [
+            "sbx-command"
+          ],
+          "files": [
+            "skills/delegate/scripts/SandboxEnv.psm1",
+            "skills/delegate/tests/SandboxEnv.Tests.ps1",
+            "skills/delegate/tests/fixtures/sandbox-env/"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/SandboxEnv.Tests.ps1\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Create SandboxEnv.psm1 (imports Sandbox.psm1, never the reverse) with: Invoke-SandboxUv and $script:UvPath (XAGENT_UV_PATH, else Get-Command uv -CommandType Application); the line-based pyproject.toml reader (a key = \"string\" line inside a named [section], or a section header's presence); project discovery at a commit from git ls-tree (lock, resolve, workspace unsupported, nested pyproject under a lock ignored); the identity hash (repo-relative path TAB git blob id LF lines, ordinal sort, SHA-256) over the design's input set; the interpreter request (.python-version first line; else the lowest minor from the first lower-bound clause of requires-python; else unsupported python-version-unknown). Fixtures under skills/delegate/tests/fixtures/sandbox-env/: uv.lock, pyproject.toml, uv.toml, requirements.txt, fake-uv.ps1 and fake-uv.cmd. Tests build temporary git repos with commits; include an autocrlf checkout giving the same hash and two projects with identical inputs sharing a hash. Design: Data 'Identity hash', Rules 'Modules', 'uv calls', 'Projects', 'Interpreter'.",
+          "delegateTaskId": "sandbox-env-env-discover"
+        },
+        {
+          "id": "env-report",
+          "title": "envs.json reader, status, estimate, report object",
+          "dependsOn": [
+            "env-discover"
+          ],
+          "files": [
+            "skills/delegate/scripts/SandboxEnv.psm1",
+            "skills/delegate/tests/SandboxEnv.Tests.ps1",
+            "skills/delegate/tests/fixtures/sandbox-env/"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/SandboxEnv.Tests.ps1\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Add to SandboxEnv.psm1: the envs.json reader (missing file: all absent, no warning; unreadable: all absent plus the warning; never throws); per-project status in the design's order (uv-missing, ready, install-failed, stale, missing); the estimate (matching wheel sizes from uv.lock times 2.5, plus 100 MB per new interpreter, seconds 30 + 1 per 20 MB, null for resolve projects or a missing size; 1 GB = 1,000,000,000 bytes); needsApproval (approved null, or estimate over 5 GB; a null estimate only when approved is null); and Get-SandboxEnvReport returning the design's '-SandboxEnv output' object without the -Apply fields. Tests with a fixture uv.lock and hand-written envs.json files. Design: Data 'envs.json', '-SandboxEnv output'; Rules 'Status', 'Estimate', 'Approval'.",
+          "delegateTaskId": "sandbox-env-env-report"
+        }
+      ]
+    },
+    {
+      "n": 3,
+      "rationale": "SandboxEnv.psm1 write side: builds, records, prune and the run-time link logic. Still tested with a fake uv and temporary folders, no sandbox.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "env-build",
+          "title": "-Apply builds, failed records, rebuild, atomic envs.json, lock",
+          "dependsOn": [
+            "env-report"
+          ],
+          "files": [
+            "skills/delegate/scripts/SandboxEnv.psm1",
+            "skills/delegate/tests/SandboxEnv.Tests.ps1",
+            "skills/delegate/tests/fixtures/sandbox-env/"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/SandboxEnv.Tests.ps1\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code-hard",
+          "brief": "Add Invoke-SandboxEnvApply (with -Rebuild <project>) under the per-repo .envs lock (the Sandbox.psm1 lock helper): copy uv.exe when its version differs (keep the old copy with a warning when the copy fails); write each build's inputs from git show into .envs\\work\\<name>; lock build (uv sync --frozen --no-install-project with UV_PROJECT_ENVIRONMENT, UV_PYTHON_INSTALL_DIR, UV_PYTHON_PREFERENCE=only-managed) and resolve builds (uv lock then sync; requirements-only: uv venv then uv pip install --python per file in ordinal order); the interpreter install and exact version via uv python install / uv python find --managed-python and platform.python_version(); the _xagent_<n>.pth line for projects with a [build-system]; build failure (delete partial folder, record failed); name clash; approved written after the first -Apply with a successful build; atomic envs.json write (tmp then rename). Returns built and failedNow. The fake uv creates the folders and files a real build would (Scripts\\python.exe stand-in, Lib\\site-packages) and can be told to fail. Design: Rules 'uv itself', 'Approval', 'Inputs', 'Build (lock)', 'Build (resolve)', 'Project path (D7)', 'Build failure', 'Name clash', 'Rebuild'; Data '.envs lock'.",
+          "delegateTaskId": "sandbox-env-env-build"
+        },
+        {
+          "id": "env-link",
+          "title": "Prune, readiness gate, link and unlink",
+          "dependsOn": [
+            "env-build"
+          ],
+          "files": [
+            "skills/delegate/scripts/SandboxEnv.psm1",
+            "skills/delegate/tests/SandboxEnv.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/SandboxEnv.Tests.ps1\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Add prune to -Apply (after builds, under the lock: stamp older than 14 days or missing and no project hash at the ref names it; delete folder, work folder, stamp and envs entry; drop unused interpreters). Add the readiness gate (Test-SandboxEnvReady: commit to check, projects and hashes, ready or the not-ready list with the exact error text and proposal), linking (touch stamp, create or replace the .venv junction, leave a real folder with the sandboxNotes line; returns the env paths, interpreter folders, .envs\\bin and the variables for New-SandboxRun) and unlinking (project folders at HEAD plus the worktree root; only junctions; [IO.Directory]::Delete(path, $false)). Tests on temporary folders: unlink leaves the target intact, the gate fails for a missing environment and for a missing .envs\\bin\\uv.exe, prune keeps a fresh stamp. Design: Rules 'Prune', 'Readiness gate', 'Linking', 'Unlinking', 'Environment variables'.",
+          "delegateTaskId": "sandbox-env-env-link"
+        }
+      ]
+    },
+    {
+      "n": 4,
+      "rationale": "delegate.ps1 wires the modules in: the two new commands, then the worker launch gate and cleanup. Existing runs without Python projects behave exactly as before.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "dlg-commands",
+          "title": "delegate.ps1 -SandboxEnv and -SandboxRun",
+          "dependsOn": [
+            "env-link"
+          ],
+          "files": [
+            "skills/delegate/scripts/delegate.ps1",
+            "skills/delegate/tests/DelegateLaunch.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/DelegateLaunch.Tests.ps1\"; $c.Filter.FullName = \"*delegate parameter sets*\",\"*SandboxEnv command*\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Add parameter sets Env (-SandboxEnv -Repo [-Base] [-Apply] [-Rebuild <project>], -Rebuild only with -Apply) and SandboxRun (-SandboxRun -Repo -Command [-Base] [-TimeoutSec], refused with -NoSandbox), each printing one JSON line with ConvertTo-Json -Compress -Depth 8, and {ok:false,error} with exit 1 on setup failure. -SandboxRun orchestrates per the design: gate at the ref (environment-missing result without running), git worktree add --detach <repo>.xagent\\.probe-<8 hex> <ref>, link, Invoke-SandboxCommand, then unlink and remove the worktree in finally. Usage text updated. Tests: parameter-set cases in 'delegate parameter sets', and Describe 'SandboxEnv command' running -SandboxEnv against a temporary repo with XAGENT_UV_PATH set to the fake uv (report, then -Apply). Design: Components, Data '-SandboxRun output', Rules '-SandboxRun'.",
+          "delegateTaskId": "sandbox-env-dlg-commands"
+        },
+        {
+          "id": "dlg-launch-gate",
+          "title": "Worker launch gate, linking and cleanup unlinking",
+          "dependsOn": [
+            "dlg-commands"
+          ],
+          "files": [
+            "skills/delegate/scripts/delegate.ps1",
+            "skills/delegate/tests/DelegateLaunch.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/delegate/tests/DelegateLaunch.Tests.ps1\"; $c.Filter.FullName = \"*environment gate*\",\"*unsandboxed delegate*\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code-hard",
+          "brief": "On a sandboxed, non-read-only worker launch: run the readiness gate for the commit the run will check out (base for a new worktree, the xagent/<TaskId> tip when the branch exists, the worktree HEAD when it exists) before any git worktree add, failing with the gate's sandbox: environment not ready error and creating nothing; after the worktree exists, link and pass -EnvPaths, -ExtraEnv and -PathSuffix to New-SandboxRun. -NoSandbox, review and council runs skip the gate and get no links. Cleanup unlinks first: at the start of -Cleanup and -Cleanup -Discard (before -Discard's git add -A) and before read-only worktree removal. Tests: Describe 'environment gate' with a temporary repo holding a uv.lock and no .envs (sandboxed launch fails with the gate error and leaves no worktree; skip when sandbox support is missing, like the existing sandboxed Describes) and a -NoSandbox launch in the same repo that runs; a cleanup case with a .venv junction in the worktree whose target survives. Design: Rules 'Readiness gate', 'Linking', 'Unlinking'; Files row delegate.ps1.",
+          "delegateTaskId": "sandbox-env-dlg-launch-gate"
+        }
+      ]
+    },
+    {
+      "n": 5,
+      "rationale": "Doctor and the skill instructions, so leads use the feature: the approval question, the retry exception for environment not ready, phase tests in the sandbox, and the README requirement.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1",
+      "tasks": [
+        {
+          "id": "doctor-env",
+          "title": "feature doctor -Repo sandbox-env check",
+          "dependsOn": [
+            "dlg-launch-gate"
+          ],
+          "files": [
+            "skills/feature/scripts/feature.ps1",
+            "skills/feature/tests/feature.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests/feature.Tests.ps1\"; $c.Filter.FullName = \"*doctor*\"; $c.Output.Verbosity = \"Detailed\"; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "feature.ps1 doctor takes an optional -Repo; without it nothing changes (ten checks). With it, doctor imports SandboxEnv.psm1 and calls Get-SandboxEnvReport in-process, adding a non-required check named sandbox-env last: ok when every project is ready; otherwise the detail lists projects and statuses and the estimate, cut at 300 characters; a report error is a not-ok check with the error as detail. It 'reports prerequisites' expects eleven checks with sandbox-env last when -Repo is passed. Keep the UTF-8 BOM on feature.ps1. Design: Files rows feature.ps1 and feature.Tests.ps1.",
+          "delegateTaskId": "sandbox-env-doctor-env"
+        },
+        {
+          "id": "skill-docs",
+          "title": "delegate and feature skill text, build.md, README",
+          "dependsOn": [
+            "dlg-launch-gate"
+          ],
+          "files": [
+            "skills/delegate/SKILL.md",
+            "skills/feature/SKILL.md",
+            "skills/feature/stages/build.md",
+            "README.md"
+          ],
+          "test": "pwsh -NoProfile -c 'foreach ($p in @(@(\"skills/delegate/SKILL.md\",\"-SandboxRun\"), @(\"skills/delegate/SKILL.md\",\"environment not ready\"), @(\"skills/feature/stages/build.md\",\"-SandboxRun\"), @(\"skills/feature/SKILL.md\",\"doctor\"), @(\"README.md\",\"uv\"))) { if (-not (Select-String -LiteralPath $p[0] -SimpleMatch $p[1] -Quiet)) { Write-Error \"missing $($p[1]) in $($p[0])\"; exit 1 } }'",
+          "profile": "code",
+          "brief": "Write the instruction changes in the design's Files table: delegate SKILL.md invocation rows for -SandboxEnv and -SandboxRun, a section 'Environments' under 'Sandbox' (what is built and where, the one approval, rebuilds without asking unless over 5 GB, -Rebuild for a wrong environment, read-only environments), and the exception to 'an error that starts with sandbox: is not retried' for 'sandbox: environment not ready' (run -SandboxEnv -Apply, asking first when proposal.needsApproval is true, then retry the launch once); feature SKILL.md: doctor may pass -Repo <repo>; build.md: before the first worker -SandboxEnv -Base feature/<name>, the approval question, -Apply, the same retry exception (failing again is a problem stop), and the phase test (also after merging main) run with -SandboxRun -Repo <repo> -Base feature/<name>, passing only when status is ran and exitCode is 0; README Requirements: uv on the host for Python repos run in the sandbox. Plain, short sentences in the files' existing style.",
+          "delegateTaskId": "sandbox-env-skill-docs"
+        }
+      ]
+    }
+  ]
 }
