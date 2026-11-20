@@ -1,6 +1,6 @@
 {
   "name": "sandbox-verify",
-  "stage": "design-review",
+  "stage": "plan",
   "checkin": "on-problems",
   "designDoc": "docs/designs/sandbox-verify.md",
   "gates": {
