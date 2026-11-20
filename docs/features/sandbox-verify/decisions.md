@@ -10,3 +10,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T19:13:56Z [dismiss] structural p7: rename headings to the standard's area names (ST-4) — the headings follow the EGM design template used by the repo's other designs; every area is present
 - 2026-11-20T19:13:57Z [dismiss] structural p7: cross-references are not Markdown links (ST-6) — the repo's designs cite paths in backticks; no link format is required by the standard
 - 2026-11-20T19:18:41Z [dismiss] zoom_out p8: keep phase tests on the host outside Python repos (ZO8-1) — author decision D1, reconfirmed on 2026-11-20 with this cost shown
+- 2026-11-20T19:18:42Z [dismiss] zoom_out p8: implementation constants (command-line budget, probe leaf check, timeout + 300) are below design altitude (ZO8-3) — kept so the plan leaves no decision to a worker
