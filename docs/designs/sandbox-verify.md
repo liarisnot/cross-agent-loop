@@ -1,7 +1,7 @@
 # `sandbox-verify`: run a worker's tests inside the sandbox
 
 *   **Author:** Eugene Chin
-*   **Status:** Draft
+*   **Status:** Approved
 *   **Date:** 2026-11-19
 
 --------------------------------------------------------------------------------
