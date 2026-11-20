@@ -22,3 +22,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T20:06:27Z [stage] design-review -> plan
 - 2026-11-20T21:26:08Z [dismiss] comprehension plan-1: sbrun-worktree brief does not enumerate the test cases (CM6) — the design's Files row is locked and the task file carries the cases
 - 2026-11-20T21:26:09Z [dismiss] comprehension plan-1: check-in mode not defined in plan.md (CM8) — defined by the feature skill
+- 2026-11-20T21:30:57Z [decision] review plan-2: declined by the user
