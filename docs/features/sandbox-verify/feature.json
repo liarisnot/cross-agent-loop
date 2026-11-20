@@ -10,5 +10,87 @@
       "sha": "f133c360a411b2341458bd421d763d6f7b511234",
       "designBlob": "1874b1d9be54d8e1b76baf3905f173de0c4aef92"
     }
-  }
+  },
+  "summary": "Run each task's acceptance test (feature.ps1 verify) and every phase test inside the sandbox, as designed in docs/designs/sandbox-verify.md (locked 2026-11-20). Phase 1 adds -SandboxRun -Worktree/-Feature, the tail field and the .venv exclude to the delegate skill. Phase 2 makes verify call it: first the host-side refactors and the -OnHost path (verify-host), then the sandboxed path (verify-sandbox), with the stage and skill docs (build-docs) in parallel. The design's single verify-sandbox task is split in two here because it touches feature.ps1 and feature.Tests.ps1 heavily; verify-host lands the parts that do not need delegate.ps1. Phase 1 and phase 2's task checks run under today's rules (on the host); the first sandboxed run is phase 2's phase test, which is the full suite and therefore includes the delegate tests that need the host: under D1 the lead expects to ask the user for one host run there. Lead steps at sign-off: the three lead-run checks in the design's Verification section, docs/test-plan.md and docs/HANDOFF.md. No steps for the user.",
+  "phases": [
+    {
+      "n": 1,
+      "rationale": "The delegate side first: verify depends on -SandboxRun -Worktree, -Feature and tail, whose contracts are fixed in the design's Data and Rules sections.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1 -Fast",
+      "tasks": [
+        {
+          "id": "sbrun-worktree",
+          "title": "-SandboxRun -Worktree and -Feature, tail, .venv exclude",
+          "dependsOn": [],
+          "files": [
+            "skills/delegate/scripts/delegate.ps1",
+            "skills/delegate/scripts/Sandbox.psm1",
+            "skills/delegate/tests/DelegateLaunch.Tests.ps1",
+            "skills/delegate/tests/Sandbox.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = @(\"skills/delegate/tests/DelegateLaunch.Tests.ps1\", \"skills/delegate/tests/Sandbox.Tests.ps1\"); $c.Filter.FullName = @(\"*SandboxRun*\", \"*command tail*\", \"*delegate parameter sets*\", \"*environment gate*\"); $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Implement the delegate side of docs/designs/sandbox-verify.md exactly as its Data and Rules sections state: in delegate.ps1, -Worktree and -Feature in the SandboxRun parameter set (refuse -Worktree with an explicitly bound -Base), the path normalization and the three -Worktree checks with their exact errors, one shared helper for the probe and -Worktree forms (only the probe form removes a worktree, and only a .probe- leaf), run name probe-<hex> for both forms, the pid file runs\\probe-<hex>.pid holding {pid, startTime, feature} written before the helper and removed in an outer finally, tail in the JSON output for ran and timeout, and Add-DelegateVenvExclude (append .venv/ to the shared .git/info/exclude once, with a leading newline when the file does not end with one) called right before each Add-SandboxEnvLinks call (the helper and the worker launch). In Sandbox.psm1, Invoke-SandboxCommand also returns tail: a string array of the last 40 lines of stdout.txt then stderr.txt, each cut at 400 characters, from a new function Get-SandboxCommandTailLines beside Get-SandboxCommandOutputLines. Tests: a new Describe 'SandboxRun worktree' in DelegateLaunch.Tests.ps1 (refusals untagged; container cases tagged Sandbox and skipped like 'SandboxRun command') covering the cases in the design's Files row, and a new Describe 'Sandbox command tail' in Sandbox.Tests.ps1 with the three unit cases. Existing 'SandboxRun command', 'delegate parameter sets' and 'environment gate' tests must still pass; update the parameter-set test if it counts SandboxRun's parameters.",
+          "delegateTaskId": "sandbox-veri-sbrun-worktree"
+        }
+      ]
+    },
+    {
+      "n": 2,
+      "rationale": "verify uses the new -SandboxRun. The host-side refactors come first so the sandboxed path and its tests build on them; the docs depend only on the interfaces fixed in the design.",
+      "test": "pwsh -NoProfile -File scripts/test.ps1",
+      "tasks": [
+        {
+          "id": "verify-host",
+          "title": "verify refactors, -OnHost, where and setup in the schema",
+          "dependsOn": [
+            "sbrun-worktree"
+          ],
+          "files": [
+            "skills/feature/scripts/feature.ps1",
+            "skills/feature/schemas/verify.schema.json",
+            "skills/feature/tests/fixtures/samples/verify.json",
+            "skills/feature/tests/fixtures/samples/verify-setup.json",
+            "skills/feature/tests/feature.Tests.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests/feature.Tests.ps1\"; $c.Filter.FullName = @(\"*feature.ps1 verify*\", \"*feature.ps1 decision*\", \"*schemas*\"); $c.Filter.ExcludeTag = \"Live\"; $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "In feature.ps1, per the design's Rules: move the wrapper text of Invoke-TaskTestCommand into New-TaskTestWrapper -TestCommand (returns the UTF-16LE base64) and have Invoke-TaskTestCommand call it, with unchanged behaviour; move the body of Invoke-DecisionFeature into Add-FeatureDecision -Repository -FeatureName -Kind -Text (returns the line, throws on failure; Invoke-DecisionFeature calls it and prints as today); add -OnHost to verify (the existing -Quote parameter is reused): -OnHost requires -Quote, -Quote requires -OnHost, and -OnHost logs 'host run: <task>, approved: <quote>' through Add-FeatureDecision before the test, refusing with {ok:false,error} and running nothing if that throws. In this task verify still runs every test on the host as today (the sandboxed default comes in verify-sandbox), so a run without -OnHost gives where: host and setup: null, and a run with -OnHost gives where: host. Add where (enum sandbox|host, required) and setup (required; null or {status enum environment-missing|slot-busy|sandbox-error, message, proposal}) to verify.schema.json and to the stored test object; update samples/verify.json, add samples/verify-setup.json and add it to $validSamples in the schemas Describe. Tests: -OnHost with and without -Quote, -Quote alone, the decision line, -OnHost refused with no test run when not on feature/<name>, and where/setup in output and state.json; existing verify tests keep passing unchanged except for asserting the new fields.",
+          "delegateTaskId": "sandbox-veri-verify-host"
+        },
+        {
+          "id": "verify-sandbox",
+          "title": "verify runs the test through -SandboxRun -Worktree",
+          "dependsOn": [
+            "verify-host"
+          ],
+          "files": [
+            "skills/feature/scripts/feature.ps1",
+            "skills/feature/tests/feature.Tests.ps1",
+            "skills/feature/tests/fixtures/fake-delegate.ps1"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests/feature.Tests.ps1\"; $c.Filter.FullName = @(\"*feature.ps1 verify*\", \"*schemas*\"); $c.Filter.ExcludeTag = \"Live\"; $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Make the sandboxed run verify's default, exactly as the design's Data and Rules sections state: refusal order (-TimeoutSec with the 30-3600 range for sandboxed runs, -OnHost/-Quote, worktree, delegate.ps1 path from <skill dir>/../delegate or XAGENT_DELEGATE_SCRIPT, the 30,000-character command-line limit, then the host-run decision); the -Command text with the [Console]::OutputEncoding statement, the inner pwsh -EncodedCommand from New-TaskTestWrapper and a literal exit $LASTEXITCODE, built from single-quoted strings; ProcessStartInfo with ArgumentList and asynchronous ReadToEndAsync reads; the <timeout> + <grace> wait (XAGENT_VERIFY_GRACE_SEC) with process-tree kill; JSON from the last non-empty stdout line; and the mapping to test {passed, exitCode, tail, where: sandbox, setup}, including slot-busy, the timeout line, and tail joined from -SandboxRun's tail array. Write fake-delegate.ps1 with the modes and exact JSON in the design's Files row, recording its arguments to fake-delegate-args.txt beside -Worktree. In feature.Tests.ps1, set XAGENT_DELEGATE_SCRIPT to the fake in the 'feature.ps1 verify' Describe and handle every existing and new test as the design's feature.Tests.ps1 row lists, all tagged Slow; add Describe 'live sandbox verify' tagged Live as the design's Verification section describes (own Describe, real delegate.ps1, self-contained skip, local $TestDrive on the repo's drive, a file at an absolute path in the real TestDrive). Do not run the Live test: the sandbox the worker runs in cannot create sandboxes.",
+          "delegateTaskId": "sandbox-veri-verify-sandbox"
+        },
+        {
+          "id": "build-docs",
+          "title": "build stage and skill docs for sandboxed verify and phase tests",
+          "dependsOn": [
+            "sbrun-worktree"
+          ],
+          "files": [
+            "skills/feature/stages/build.md",
+            "skills/feature/SKILL.md",
+            "skills/delegate/SKILL.md"
+          ],
+          "test": "pwsh -NoProfile -c '$c = New-PesterConfiguration; $c.Run.Path = \"skills/feature/tests/feature.Tests.ps1\"; $c.Filter.FullName = @(\"*templates*\", \"*fixtures*\"); $c.TestRegistry.Enabled = $false; $c.Run.Exit = $true; Invoke-Pester -Configuration $c'",
+          "profile": "code",
+          "brief": "Update the three docs as the design's Files rows for them state, in the existing plain-language style of each file. stages/build.md: the verify step (cap rule first; the environment-input rule; read test.setup.status before test.passed with the environment-missing, slot-busy and sandbox-error handling; the host fallback: read tail, ask the user quoting the failing lines when it looks like a sandbox limit, and on a yes run verify -OnHost -Quote with the user's words); phase end and 'merge main' always run the phase test through delegate.ps1 -SandboxRun -Repo <repo> -Base feature/<name> -Feature <name> -Command <test> -TimeoutSec 3600, with the environment-missing flow, the one slot retry, and the host fallback logged by the lead as 'host run: phase <n>, approved: <words>' before running in <repo>. Remove the old 'only when the report lists Python projects' condition. feature/SKILL.md: the cap rule counts sandboxed verify and phase-test runs. delegate/SKILL.md: the -SandboxRun row names -Worktree, -Feature and the tail field; XAGENT_DELEGATE_SCRIPT is a test-only override read by feature.ps1; the Environments paragraph says the feature skill runs task and phase tests through -SandboxRun in every repo. Keep the feature tests' template and fixture checks passing.",
+          "delegateTaskId": "sandbox-veri-build-docs"
+        }
+      ]
+    }
+  ]
 }
