@@ -13,3 +13,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T19:18:42Z [dismiss] zoom_out p8: implementation constants (command-line budget, probe leaf check, timeout + 300) are below design altitude (ZO8-3) — kept so the plan leaves no decision to a worker
 - 2026-11-20T19:47:37Z [dismiss] codebase_details p9: three blockers (-Base default, existing tests, verify sample) — written against the design before the readiness fixes; all three were already resolved in a31e18a
 - 2026-11-20T19:47:38Z [dismiss] codebase_details p9: mark each Files row Create/Modify/Delete — rows say what changes; new files are marked New
+- 2026-11-20T19:47:38Z [dismiss] style p9: N5 dense overview sentence, N12 repeated logging pattern, N15 Components tense — no change needed; the reviewer flagged them for awareness only
