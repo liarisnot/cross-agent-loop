@@ -26,3 +26,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T21:30:58Z [gate] plan-approved: "Approve the plan"
 - 2026-11-20T21:30:58Z [decision] checkin: on-problems
 - 2026-11-20T21:30:59Z [stage] plan -> build
+- 2026-11-20T21:38:03Z [decision] sbrun-worktree: kept whole despite split verdict — the tail reader is about 40 lines and delegate.ps1's -SandboxRun output consumes it directly; one unit with one acceptance command
