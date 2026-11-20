@@ -38,5 +38,57 @@ This feature moves that run into the sandbox, so code a worker wrote runs only i
 
 ## Open Questions
 
-*   **Q1. Phase tests.** Should the phase test also move into the sandbox for every repo, not only repos with Python projects?
-*   **Q2. The host fallback.** When a test cannot run in the sandbox, who approves running it on the host, and for how long does the approval last: once per task, once per feature, or once per repo?
+None. Q1 and Q2 were decided by the author on 2026-11-19 (D1, D2 below).
+
+## Technical Plan
+
+### Decisions
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | The phase test runs in the sandbox in **every** repo, through `-SandboxRun`, not only in repos with Python projects. | Author's choice: one rule for both test steps, and no repo is left on the host by default. |
+| D2 | A test runs on the host only after the user approves that one run. The approval is never remembered: not for the task, the feature or the repo. | Author's choice: the protection never lapses. A sandbox failure is rare (this repo's task tests pass in the sandbox), so the prompts are few. |
+| D3 | `verify` runs the test in the worker's **existing** worktree, not in a fresh one. | The test must see the worker's uncommitted changes, which is what `verify` checks today. A fresh worktree at a commit (what `-SandboxRun` does now) would test nothing the worker wrote. |
+| D4 | `feature.ps1` reaches the sandbox only through `delegate.ps1 -SandboxRun`, with a new `-Worktree` parameter. | All sandbox code stays in the delegate skill; `feature.ps1` already calls `delegate.ps1` that way for `doctor`. |
+| D5 | A sandboxed `verify` counts toward the feature's cap of 2 runs. | It takes a sandbox slot, and there are only two. If it did not count, `schedule` could start a second worker while `verify` waits, and one of them would time out waiting for a slot. |
+| D6 | The skills do not guess whether a failure was caused by the sandbox. The lead reads the output and asks the user. | An exit code cannot tell "access denied by the sandbox" from a real bug, and a wrong guess either hides a bug or runs code on the host without approval. |
+
+### Components
+
+*   **`delegate.ps1 -SandboxRun -Worktree <path>`** (new parameter). Runs the command in an existing worktree of `-Repo` instead of creating a `.probe-<hex>` worktree. The readiness gate uses the worktree's `HEAD`, as a worker launch does. Python environments are linked as for a worker and are left in place afterwards (the worktree's own `-Cleanup` removes them). The worktree is not removed. With `-Feature <name>`, the run writes the same pid file as a worker run, so `feature.ps1 schedule` counts it (D5). The output keeps its shape: `{ok, status, exitCode, output, seconds, notes}`, plus `message` and `proposal` for `environment-missing`.
+*   **`feature.ps1 verify`** runs the test command through `-SandboxRun -Worktree <task worktree> -Feature <name>` by default. The test command goes into the same wrapper script it uses today, written to `<worktree>\.xagent\verify-<hex>.ps1` and deleted afterwards. `.xagent\` is excluded from git, so the scope check never sees it. The scope check (`changed`, `outOfScope`) is computed before the test, as today.
+*   **`feature.ps1 verify -OnHost -Quote "<user's words>"`** runs the test on the host exactly as today, and logs a decision with the user's words. `-OnHost` without `-Quote` is refused.
+*   **The `test` object** in `verify`'s output and in `state.json` keeps `command`, `passed`, `exitCode` and `tail`. It gains `where` (`sandbox` or `host`) and, when the sandbox could not run the test at all, `setup` (`{status, message, proposal}`).
+*   **`stages/build.md`.** Reads `test.setup` before `test.passed`. Runs every phase test through `-SandboxRun` (D1). Describes the host fallback (D2, D6).
+
+### Flow of a task check
+
+```text
+worker finishes
+  -> feature.ps1 verify -Task <id>
+       scope check on the worktree (unchanged)
+       write .xagent\verify-<hex>.ps1 (the test wrapper)
+       delegate.ps1 -SandboxRun -Repo <repo> -Worktree <wt> -Feature <name>
+                    -Command "& '.\.xagent\verify-<hex>.ps1'" -TimeoutSec <t>
+         status ran       -> test {passed: exitCode = 0, where: sandbox}
+         status timeout   -> test {passed: false, exitCode: -1, where: sandbox}
+         environment-missing -> test {passed: false, setup: {...}}
+         sandbox: error   -> test {passed: false, setup: {status: sandbox-error, message}}
+  -> lead:
+       setup environment-missing -> -SandboxEnv -Apply (ask only if the proposal says so), verify again
+       setup sandbox-error       -> problem stop (as for any sandbox: error)
+       passed false              -> read tail; a code failure is a failed review round (unchanged);
+                                    a sandbox limit -> ask the user -> verify -OnHost -Quote "<yes>"
+```
+
+The phase test follows the same flow at `feature/<name>`, through `-SandboxRun -Base feature/<name>` (a fresh worktree is right there: the phase test runs merged code). A host run of a phase test is approved and logged the same way, by the lead, with `feature.ps1 decision`.
+
+### Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Slower checks: about 14% measured, plus a few seconds to set up the slot. | Accepted; task tests are kept narrow by the size gate. |
+| `verify` waits for a slot while two workers run. | D5: it counts toward the cap, so the lead runs it only when a run slot is free. `Get-SandboxSlot` still times out after 60 s, which `verify` reports as `sandbox-error`. |
+| A repo whose tests always need the host asks the user at every task. | Accepted (D2). The prompt shows the output, so the user can instead fix the repo's tests or the sandbox read list. |
+| The test can read Cursor's login copy. `New-SandboxRun` copies `auth.json` and `cli-config.json` into every run's home, including plain `-SandboxRun` commands. | No new exposure: the worker that wrote the code already ran with the same copy in the same home. Not copying them for plain commands is a small follow-up and is included here (see the implementation plan). |
+| A test writes files into the worktree. | Unchanged from today: the scope check runs first, and the lead's review reads the diff. |
