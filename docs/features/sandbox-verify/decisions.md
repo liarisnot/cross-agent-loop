@@ -18,3 +18,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T20:05:05Z [dismiss] codebase_details p9 r1: mark each Files row Create/Modify/Delete — rows say what changes; new files are marked New (raised again)
 - 2026-11-20T20:05:05Z [dismiss] codebase_details p9 r1: verify of sbrun-worktree fails in the sandbox (CD11) — phase 1 runs under today's rules, on the host, because the new verify lands in phase 2
 - 2026-11-20T20:06:14Z [decision] review design-3: declined by the user
+- 2026-11-20T20:06:23Z [gate] design-locked: "Lock the design"
