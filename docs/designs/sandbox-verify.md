@@ -122,3 +122,95 @@ The lead would commit the worker's changes first (or `verify` would stash them i
 *   **Pros:** no change to the phase step for most repos, and no 14% slowdown there.
 *   **Cons:** two rules for two test steps; a repo stays unprotected because it has no Python projects, not because it needs the host.
 *   **Reason for rejection:** Rejected by author (D1).
+
+## Detailed Implementation Plan
+
+### Probes
+
+None needed. The one open fact, whether this repo's own task tests run inside the sandbox, was measured before the design (see the Problem section). The `-SandboxRun` machinery, slot handling and environment links are from `sandbox-env` and unchanged.
+
+### Data
+
+**`delegate.ps1 -SandboxRun` parameters.** Today's set (`-Repo`, `-Base`, `-Command`, `-TimeoutSec`) gains:
+
+*   `-Worktree <path>`: an existing worktree of `-Repo`. Cannot be combined with `-Base` (refused: `-Worktree cannot be used with -Base`).
+*   `-Feature <name>`: the same pattern as on worker runs. Written to the pid file.
+
+**Output** is unchanged: `{ok, status, exitCode, output, seconds, notes}`, plus `message`, `projects` and `proposal` when `status` is `environment-missing`. A refused call or a `sandbox:` error is `{ok: false, error}` with exit 1, as today.
+
+**Pid file.** Every `-SandboxRun` with `-Feature` writes `<repo>\.xagent\runs\probe-<hex>\run.pid` holding `{pid, startTime, feature}` (`pid` and `startTime` of the `delegate.ps1` process, `startTime` in UTC ISO 8601 as on worker runs). It is written before the slot is taken and deleted in a `finally`. `feature.ps1`'s `Get-LiveDelegateRunCount` already counts any `*.pid` under `.xagent\runs` with those three fields, so `schedule` needs no change. Without `-Feature`, no pid file is written.
+
+**`feature.ps1 verify` parameters.** Today's (`-Repo`, `-Name`, `-Task`, optional `-TimeoutSec`) plus:
+
+*   `-OnHost`: run the test on the host as today. Requires `-Quote`; without it, refused: `-OnHost requires -Quote with the user's approval`.
+*   `-Quote "<user's words>"`: one line. Only with `-OnHost` (refused otherwise: `-Quote requires -OnHost`).
+*   `-TimeoutSec` must be 30–3600 when the test runs in the sandbox (refused otherwise: `invalid -TimeoutSec`); any positive number with `-OnHost`, as today.
+
+**`verify` output.** Unchanged fields plus, in `test`:
+
+*   `where`: `sandbox` or `host`. Always present.
+*   `setup`: `null` when the test ran (or timed out). Otherwise `{status, message, proposal}`:
+    *   `status: environment-missing`, with `message` and `proposal` copied from `-SandboxRun`;
+    *   `status: sandbox-error`, with `message` the `error` text of `delegate.ps1` (or `delegate.ps1 did not finish` / `delegate.ps1 printed no JSON`), and `proposal: null`.
+
+When `setup` is not `null`, `passed` is `false`, `exitCode` is `-1` and `tail` is `setup.message`. `exitCode` stays an integer in every case, so existing readers keep working. The same `test` object is stored in `state.json` under the task's `verify`.
+
+`schemas/verify.schema.json` adds `where` (required, enum) and `setup` (required, `null` or the object above).
+
+### Rules
+
+*   **The sandboxed run.** `verify` writes the wrapper it uses today (`$ErrorActionPreference = 'Stop'`, the test command in a script block, output merged, `exit $LASTEXITCODE`) to `<worktree>\.xagent\verify-<hex>.ps1` as UTF-8 without BOM, then runs:
+
+    ```text
+    pwsh -NoProfile -File <delegate.ps1> -SandboxRun -Repo <repo> -Worktree <worktree> -Feature <name>
+         -Command "& '.\.xagent\verify-<hex>.ps1'; exit $LASTEXITCODE" -TimeoutSec <timeout>
+    ```
+
+    The sandbox's working folder is the worktree (the slot letter's root), so the relative path resolves. The wrapper file is deleted in a `finally`. `<hex>` is 8 hex characters from a new GUID.
+*   **Which `delegate.ps1`.** `<skill dir>/../delegate/scripts/delegate.ps1`, as `doctor` finds it. When the environment variable `XAGENT_DELEGATE_SCRIPT` is set, that path is used instead. It exists so tests can use a fake, and is documented only in the tests.
+*   **Waiting for `delegate.ps1`.** `verify` waits up to `<timeout> + 300` seconds (slot wait, grants and clean-up). Past that, it kills the process tree and reports `sandbox-error` with `delegate.ps1 did not finish`. It reads stdout as JSON (the last non-empty line). If none parses, it reports `sandbox-error` with `delegate.ps1 printed no JSON`.
+*   **Mapping.** `ok: false` -> `sandbox-error`. `status: environment-missing` -> that setup. `status: ran` -> `passed = (exitCode = 0)`. `status: timeout` -> `passed: false`, `exitCode: -1`, and the tail ends with `timed out after <timeout> s`. `tail` is the last 40 lines of `output` either way.
+*   **`-SandboxRun -Worktree` checks**, in order, each failing with `{ok: false, error}`:
+    *   the path exists: `sandbox: worktree not found: <path>`;
+    *   `git -C <path> rev-parse --show-toplevel` equals the path, and `--git-common-dir` resolves to `-Repo`'s: `sandbox: <path> is not a worktree of <repo>`;
+    *   the path is not `-Repo` itself: `sandbox: -Worktree must not be the repo's own checkout`.
+
+    Then the readiness gate runs at the worktree's `HEAD`, environments are linked with `Add-SandboxEnvLinks` (an existing link is replaced, as for a worker relaunch), and the command runs with `Invoke-SandboxCommand`. The links and the worktree stay afterwards.
+*   **Login files.** `New-SandboxRun` gains a `-NoLogin` switch that skips copying Cursor's `cli-config.json` and `auth.json` into the run home (`.gitconfig` is still copied, because tests may need a git identity). `Invoke-SandboxCommand` always passes it. Worker runs and the canary are unchanged.
+*   **Host runs.** `verify -OnHost -Quote "<q>"` first logs the decision as `feature.ps1 decision -Kind decision -Text "<task>: test run on the host, approved: <q>"` would (same line, same commit rule), then runs the test exactly as today with `where: host`. A phase test run on the host is logged by the lead with `feature.ps1 decision -Kind decision -Text "phase <n>: test run on the host, approved: <q>"` before it runs in `<repo>`.
+*   **Cap.** A sandboxed `verify` and a phase test run through `-SandboxRun -Feature <name>` count toward the cap of 2. The lead follows the cap rule before each. `verify -OnHost` and a host phase test do not take a slot and do not count.
+
+### Files
+
+| File | Change | Why |
+|---|---|---|
+| `skills/delegate/scripts/delegate.ps1` | `-Worktree` and `-Feature` in the `SandboxRun` set; the worktree checks; the pid file; no probe worktree when `-Worktree` is given. | D3, D4, D5. |
+| `skills/delegate/scripts/Sandbox.psm1` | `New-SandboxRun -NoLogin`; `Invoke-SandboxCommand` passes it. | Plain commands get no Cursor login copy. |
+| `skills/delegate/tests/DelegateLaunch.Tests.ps1` | `-SandboxRun -Worktree` tests: the refusals (no container needed), and a container test (tagged `Sandbox`, skipped as the existing ones are) that runs a command in an existing worktree with an uncommitted file, reads it, checks the exit code, and checks that the worktree and the file remain and the pid file is gone. With `-Feature`, a second command reads the pid file while it runs. | Covers the new parameter. |
+| `skills/delegate/tests/Sandbox.Tests.ps1` | A container test: a run with `-NoLogin` has no `auth.json` in its run home while it runs; a run without it does. | Covers `-NoLogin`. |
+| `skills/feature/scripts/feature.ps1` | `verify` runs through `delegate.ps1 -SandboxRun -Worktree` by default; `-OnHost` / `-Quote`; `XAGENT_DELEGATE_SCRIPT`; `where` and `setup`; the decision line for host runs. | G1–G4, D2. |
+| `skills/feature/schemas/verify.schema.json` | `where`, `setup`. | Output contract. |
+| `skills/feature/tests/fixtures/fake-delegate.ps1` | New. Accepts the `-SandboxRun` parameters and runs `-Command` with `pwsh` in `-Worktree`, printing `-SandboxRun`'s JSON. The environment variable `XAGENT_FAKE_SANDBOX` selects `ran` (default), `environment-missing`, `error` (prints `{ok:false, error:"sandbox: fake"}`, exit 1), `nojson` or `timeout`. | Lets `verify` be tested without a container or a repo outside the profile. |
+| `skills/feature/tests/feature.Tests.ps1` | The existing `verify` tests set `XAGENT_DELEGATE_SCRIPT` to the fake. New tests: each mapping row; `-OnHost` with and without `-Quote` and the logged decision; `-Quote` alone refused; the `-TimeoutSec` range; the wrapper file removed afterwards and never in `changed`. | Covers the new behaviour; existing tests keep their meaning. |
+| `skills/feature/stages/build.md` | Verify step: follow the cap rule first; read `test.setup` before `test.passed` (environment-missing -> `-SandboxEnv -Apply` flow, then verify again, not a failed round; sandbox-error -> problem stop); the host fallback (read `tail`; when it looks like a sandbox limit, ask the user, quoting the lines, and on a yes run `verify -OnHost -Quote`). Phase end and "merge main": always `-SandboxRun -Base feature/<name> -Feature <name>`; on `environment-missing`, run the `-SandboxEnv -Apply` flow and run again; host fallback as for verify, logged by the lead. | D1, D2, D5, D6. |
+| `skills/feature/SKILL.md` | The cap rule counts sandboxed `verify` and phase test runs. | D5. |
+| `skills/delegate/SKILL.md` | The `-SandboxRun` row names `-Worktree` and `-Feature`; the Environments paragraph says the `feature` skill runs task and phase tests through it in every repo. | Docs. |
+| `docs/test-plan.md`, `docs/HANDOFF.md` | Results row and state, by the lead at sign-off. | Records. |
+
+### Phases
+
+| Phase | Tasks | Test |
+|---|---|---|
+| 1 | `sbrun-worktree` (`delegate.ps1`, `Sandbox.psm1` and their tests) | `pwsh -NoProfile -File scripts/test.ps1 -Path skills/delegate/tests` |
+| 2 | `verify-sandbox` (`feature.ps1`, schema, fake, `feature.Tests.ps1`); `build-docs` (`build.md`, both `SKILL.md` files) | `pwsh -NoProfile -File scripts/test.ps1 -Path skills/feature/tests` |
+
+`build-docs` depends only on the interfaces fixed above, so it runs in parallel with `verify-sandbox`. Phase 2's test runs in the sandbox under the new phase rule, which exercises D1 on this repo.
+
+### Verification
+
+At sign-off, besides the full suite on the host:
+
+1.  This feature's own phase 2 tasks are checked by the new `verify` (after phase 1 merges, the build uses the new code from `feature/sandbox-verify`): `where: sandbox` and `passed: true` for each.
+2.  A task test that reads a file outside the worktree (for example `Get-Content $env:USERPROFILE\.gitconfig`) fails in the sandbox with an access error. No scratch feature is needed: run `verify` against a throwaway task record in a scratch repo on `D:\`.
+3.  `verify -OnHost -Quote` on the same task passes and leaves its decision line.
+4.  A phase test of a repo with Python projects (the private repo) still passes through `-SandboxRun`.
