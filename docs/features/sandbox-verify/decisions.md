@@ -20,3 +20,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T20:06:14Z [decision] review design-3: declined by the user
 - 2026-11-20T20:06:23Z [gate] design-locked: "Lock the design"
 - 2026-11-20T20:06:27Z [stage] design-review -> plan
+- 2026-11-20T21:26:08Z [dismiss] comprehension plan-1: sbrun-worktree brief does not enumerate the test cases (CM6) — the design's Files row is locked and the task file carries the cases
