@@ -8,3 +8,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T19:13:55Z [dismiss] design_critic p7: lead must check the cap before verify (DC-2) — already in the build.md row of the Files table (follow the cap rule first)
 - 2026-11-20T19:13:55Z [dismiss] design_critic p7: structured state record for host phase runs (DC-6) — decision lines are the committed audit record, as for gates; host-run lines now start with a fixed 'host run:' prefix so they can be searched
 - 2026-11-20T19:13:56Z [dismiss] structural p7: rename headings to the standard's area names (ST-4) — the headings follow the EGM design template used by the repo's other designs; every area is present
+- 2026-11-20T19:13:57Z [dismiss] structural p7: cross-references are not Markdown links (ST-6) — the repo's designs cite paths in backticks; no link format is required by the standard
