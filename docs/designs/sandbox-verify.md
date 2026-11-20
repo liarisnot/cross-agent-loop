@@ -26,7 +26,7 @@ This feature moves that run into the sandbox, so code a worker wrote runs only i
 
 *   **G1.** `feature.ps1 verify` runs the task's test command in the sandbox, in the worker's own worktree with its uncommitted changes, with the same environments a worker gets (`sandbox-env` links for Python projects).
 *   **G2.** The result keeps its current shape (`test.passed`, `exitCode`, `tail`), so `stages/build.md` reads it unchanged, and it records whether the test ran in the sandbox.
-*   **G3.** A test that cannot run in the sandbox never falls back to the host silently. Running on the host needs the user's approval. (The open question below is how wide that approval is.)
+*   **G3.** A test that cannot run in the sandbox never falls back to the host silently. Running on the host needs the user's approval, given for that one run (D2).
 *   **G4.** The worktree is not changed for the lead: the sandboxed run writes only what the test itself writes, and the scope check (`changed`, `outOfScope`) still sees the worker's files and nothing the harness added.
 
 ## Non-Goals
@@ -42,6 +42,13 @@ None. Q1 and Q2 were decided by the author on 2026-11-19 (D1, D2 below).
 
 ## Technical Plan
 
+### Terms from the existing skills
+
+*   **Readiness gate** (`docs/designs/sandbox-env.md`, Rules): before a sandboxed run, `Test-SandboxEnvReady` checks that every Python project at the commit has a built environment. If not, the run does not start and reports `environment-missing` with a build proposal.
+*   **Cap rule** (`skills/feature/SKILL.md`): at most 2 `delegate.ps1` runs of one feature at a time. `feature.ps1 schedule` reports `cap` and `liveRuns`; `liveRuns` is `Get-LiveDelegateRunCount`, which counts live `*.pid` files under `<repo>\.xagent\runs` whose `feature` matches. Worker runs, review lenses and council seats already write such files. This design adds `-SandboxRun` to the same counter.
+*   **Problem stop** (`skills/feature/stages/build.md`): the build pauses, a `[stop]` decision is logged, and the lead reports to the user and waits.
+*   **Size gate** (`skills/delegate/SKILL.md`, "Goldfish preflight"): before a task launches, a reviewer estimates its size and checks that its acceptance command runs only the task's own tests. Task tests are therefore narrow, usually one test file or a filter.
+
 ### Decisions
 
 | # | Decision | Why |
@@ -55,7 +62,7 @@ None. Q1 and Q2 were decided by the author on 2026-11-19 (D1, D2 below).
 
 ### Components
 
-*   **`delegate.ps1 -SandboxRun -Worktree <path>`** (new parameter). Runs the command in an existing worktree of `-Repo` instead of creating a `.probe-<hex>` worktree. The readiness gate uses the worktree's `HEAD`, as a worker launch does. Python environments are linked as for a worker and are left in place afterwards (the worktree's own `-Cleanup` removes them). The worktree is not removed. Both `-SandboxRun` forms go through one helper in `delegate.ps1` (readiness gate, linking, the run); only how the worktree is obtained and the `finally` differ, and only the probe form removes a worktree. With `-Feature <name>`, the run writes a pid file like a worker run's, so `feature.ps1 schedule` counts it (D5). The output keeps its fields, `{ok, status, exitCode, output, seconds, notes}` plus `message` and `proposal` for `environment-missing`, and gains `tail`: the **last** 40 lines of stdout then stderr (`output` stays the first 40).
+*   **`delegate.ps1 -SandboxRun -Worktree <path>`** (new parameter). Runs the command in an existing worktree of `-Repo` instead of creating a `.probe-<hex>` worktree. The readiness gate uses the worktree's `HEAD`, as a worker launch does. Python environments are linked as for a worker and are left in place afterwards (the worktree's own `-Cleanup` removes them). The worktree is not removed. Both `-SandboxRun` forms go through one helper in `delegate.ps1` (readiness gate, linking, the run); only how the worktree is obtained and the `finally` differ, and only the probe form removes a worktree. With `-Feature <name>`, the run writes a pid file like a worker run's, so `feature.ps1 schedule` counts it (D5). The output keeps its fields, `{ok, status, exitCode, output, seconds, notes}` plus `message`, `projects` and `proposal` for `environment-missing`, and gains `tail`: the **last** 40 lines of stdout then stderr (`output` stays the first 40).
 *   **`feature.ps1 verify`** runs the test command through `-SandboxRun -Worktree <task worktree> -Feature <name>` by default. The test command goes into the same wrapper it uses today, passed inside the command line as `pwsh -NoProfile -NonInteractive -EncodedCommand <base64>`, so nothing is written into the worktree. The scope check (`changed`, `outOfScope`) is computed before the test, as today.
 *   **`feature.ps1 verify -OnHost -Quote "<user's words>"`** runs the test on the host exactly as today, and logs a decision with the user's words. `-OnHost` without `-Quote` is refused.
 *   **The `test` object** in `verify`'s output and in `state.json` keeps `command`, `passed`, `exitCode` and `tail`. It gains `where` (`sandbox` or `host`) and, when the sandbox could not run the test at all, `setup` (`{status, message, proposal}`).
@@ -81,7 +88,7 @@ worker finishes
                                     a sandbox limit -> ask the user -> verify -OnHost -Quote "<yes>"
 ```
 
-The phase test follows the same flow at `feature/<name>`, through `-SandboxRun -Base feature/<name>` (a fresh worktree is right there: the phase test runs merged code). A host run of a phase test is approved and logged the same way, by the lead, with `feature.ps1 decision`.
+The phase test follows the same flow at `feature/<name>`, through `-SandboxRun -Repo <repo> -Base feature/<name> -Feature <name> -Command "<phase test>"` (a fresh worktree is right there: the phase test runs merged code). The lead reads `status`, `exitCode` and `tail` directly; there is no `verify` record for a phase, today or after this feature. When the lead judges a failure to be a sandbox limit, it asks the user, quoting the failing lines. On a yes it logs `feature.ps1 decision -Kind decision -Text "phase <n>: test run on the host, approved: <user's words>"`, then runs the phase test command in `<repo>` on `feature/<name>`, as phase tests ran before this feature. The decision line is the whole record of a host phase run, as `verify`'s decision line is for a task (where `test.where: host` is also stored).
 
 ### Risks and Mitigations
 
@@ -147,7 +154,7 @@ None needed. The one open fact, whether this repo's own task tests run inside th
 
 **Output** keeps today's fields, `{ok, status, exitCode, output, seconds, notes}` plus `message`, `projects` and `proposal` when `status` is `environment-missing`, and gains `tail` for `ran` and `timeout`: the last 40 lines of the run's `stdout.txt` followed by `stderr.txt`, each line cut at 400 characters (the same reading `output` uses, from the other end). A refused call or a `sandbox:` error is `{ok: false, error}` with exit 1, as today.
 
-**Pid file.** Every `-SandboxRun` with `-Feature` writes `<repo>\.xagent\runs\probe-<hex>.pid`, beside the run folder and not inside it (`Invoke-SandboxCommand` deletes and recreates `runs\probe-<hex>\` when it starts), holding `{pid, startTime, feature}` (`pid` and `startTime` of the `delegate.ps1` process, `startTime` in UTC ISO 8601 as on worker runs). It is written before the slot is taken and deleted in a `finally`. `feature.ps1`'s `Get-LiveDelegateRunCount` already counts any `*.pid` under `.xagent\runs` with those three fields, so `schedule` needs no change. Without `-Feature`, no pid file is written.
+**Pid file.** Every `-SandboxRun` with `-Feature` writes `<repo>\.xagent\runs\probe-<hex>.pid`, beside the run folder and not inside it (`Invoke-SandboxCommand` deletes and recreates `runs\probe-<hex>\` when it starts; both names use the same `<hex>`), holding `{pid, startTime, feature}` (`pid` and `startTime` of the `delegate.ps1` process, `startTime` in UTC ISO 8601 as on worker runs). It is written before the slot is taken and deleted in a `finally`. `feature.ps1`'s `Get-LiveDelegateRunCount` already counts any `*.pid` under `.xagent\runs` with those three fields, so `schedule` needs no change. Without `-Feature`, no pid file is written.
 
 **`feature.ps1 verify` parameters.** Today's (`-Repo`, `-Name`, `-Task`, optional `-TimeoutSec`) plus:
 
@@ -223,4 +230,6 @@ At sign-off, besides the full suite on the host:
 1.  This feature's own phase 2 tasks are checked by the new `verify` (after phase 1 merges, the build uses the new code from `feature/sandbox-verify`): `where: sandbox` and `passed: true` for each.
 2.  A task test that reads a file outside the worktree (for example `Get-Content $env:USERPROFILE\.gitconfig`) fails in the sandbox with an access error. No scratch feature is needed: run `verify` against a throwaway task record in a scratch repo on `D:\`.
 3.  `verify -OnHost -Quote` on the same task passes and leaves its decision line.
-4.  A phase test of a repo with Python projects (the private repo) still passes through `-SandboxRun`.
+4.  A phase test of a repo with Python projects (the lead's private Python repo used for `sandbox-env`'s live checks, or any repo with a `uv.lock`) still passes through `-SandboxRun`.
+
+For check 2, the scratch repo is a new folder `D:\xagent-verify-check` with `git init`, one commit, a worktree made with `git worktree add`, and a task record set with `feature.ps1 task -Worktree -BaseSha`; it is deleted afterwards.
