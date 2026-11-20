@@ -92,3 +92,33 @@ The phase test follows the same flow at `feature/<name>`, through `-SandboxRun -
 | A repo whose tests always need the host asks the user at every task. | Accepted (D2). The prompt shows the output, so the user can instead fix the repo's tests or the sandbox read list. |
 | The test can read Cursor's login copy. `New-SandboxRun` copies `auth.json` and `cli-config.json` into every run's home, including plain `-SandboxRun` commands. | No new exposure: the worker that wrote the code already ran with the same copy in the same home. Not copying them for plain commands is a small follow-up and is included here (see the implementation plan). |
 | A test writes files into the worktree. | Unchanged from today: the scope check runs first, and the lead's review reads the diff. |
+
+## Alternatives Considered
+
+### Run the test in a fresh worktree at a commit of the worker's changes
+
+The lead would commit the worker's changes first (or `verify` would stash them into a temporary commit) and run `-SandboxRun -Base <that commit>` as it does today.
+
+*   **Pros:** no change to `-SandboxRun`; the run cannot touch the worker's worktree.
+*   **Cons:** `verify` runs before the lead commits, and the build stage's review rounds resume the worker in the same worktree. A temporary commit changes the worktree's history under the worker, and copying the changes adds a second place for files to differ.
+*   **Reason for rejection:** Rejected by author: running in the existing worktree (D3) tests exactly what the worker left, with no extra commit.
+
+### Remember a host approval for the feature or the repo
+
+*   **Pros:** fewer questions for a repo whose tests always need the host.
+*   **Cons:** once given, later tasks run worker code on the host without anyone looking, which is the gap this feature closes.
+*   **Reason for rejection:** Rejected by author (D2).
+
+### Detect sandbox failures automatically and retry on the host
+
+`verify` would look for "access denied" in the output and rerun on the host.
+
+*   **Pros:** no prompt.
+*   **Cons:** a test can print "access denied" because of a real bug, and a sandbox failure can print anything. Either way, worker code runs on the host without approval.
+*   **Reason for rejection:** Rejected by author (D6).
+
+### Keep phase tests on the host outside Python repos
+
+*   **Pros:** no change to the phase step for most repos, and no 14% slowdown there.
+*   **Cons:** two rules for two test steps; a repo stays unprotected because it has no Python projects, not because it needs the host.
+*   **Reason for rejection:** Rejected by author (D1).
