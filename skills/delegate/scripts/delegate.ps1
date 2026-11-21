@@ -92,6 +92,7 @@ param(
     [ValidatePattern('^[a-z0-9]+$')] [string]$Seat,    # names the read-only worktree and logs (council: grok|glm)
 
     [Parameter(ParameterSetName = 'Run')]
+    [Parameter(ParameterSetName = 'SandboxRun')]
     [ValidatePattern('^[a-z0-9][a-z0-9-]*$')] [string]$Feature,   # written to runs.jsonl and the pid file
 
     [Parameter(ParameterSetName = 'Run')]
@@ -127,6 +128,9 @@ param(
 
     [Parameter(Mandatory, ParameterSetName = 'SandboxRun')]
     [string]$Command,
+
+    [Parameter(ParameterSetName = 'SandboxRun')]
+    [string]$Worktree,
 
     [Parameter(Mandatory, ParameterSetName = 'Check')]
     [switch]$SandboxCheck,
@@ -187,6 +191,85 @@ function Import-DelegateSandboxEnv {
         Import-Module (Join-Path $PSScriptRoot 'SandboxEnv.psm1') -Force -ErrorAction Stop
     } catch {
         Fail "sandbox: cannot load SandboxEnv.psm1: $($_.Exception.Message)"
+    }
+}
+
+function Get-DelegateNormalizedPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    return ([IO.Path]::GetFullPath($Path) -replace '/', '\').TrimEnd('\')
+}
+
+function Test-DelegatePathEqual([string]$A, [string]$B) {
+    [string]::Equals((Get-DelegateNormalizedPath $A), (Get-DelegateNormalizedPath $B), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Add-DelegateVenvExclude([string]$ExcludePath) {
+    $parent = Split-Path $ExcludePath -Parent
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $text = ''
+    if (Test-Path -LiteralPath $ExcludePath) {
+        $text = [IO.File]::ReadAllText($ExcludePath, [Text.UTF8Encoding]::new($false))
+    }
+    foreach ($line in @($text -split "`r?`n")) {
+        if ($line -ceq '.venv/') { return }
+    }
+    $append = '.venv/' + "`n"
+    if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $append = "`n" + $append }
+    if (-not (Test-Path -LiteralPath $ExcludePath)) {
+        [IO.File]::WriteAllText($ExcludePath, $append, [Text.UTF8Encoding]::new($false))
+    } else {
+        [IO.File]::AppendAllText($ExcludePath, $append, [Text.UTF8Encoding]::new($false))
+    }
+}
+
+function Invoke-DelegateSandboxRun {
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][string]$RunName,
+        [Parameter(Mandatory)]$Gate,
+        [Parameter(Mandatory)][string]$Command,
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [Parameter(Mandatory)][string]$ExcludePath,
+        [switch]$IsProbe
+    )
+    $envPaths = @()
+    $extraEnv = @{}
+    $pathSuffix = @()
+    $notes = @()
+    $hasReadyProject = $false
+    foreach ($p in @($Gate.projects)) {
+        if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
+    }
+    try {
+        if (@($Gate.projects).Count -gt 0 -and $hasReadyProject) {
+            Add-DelegateVenvExclude -ExcludePath $ExcludePath
+            $links = Add-SandboxEnvLinks -Repo $Repo -Worktree $Worktree -Projects $Gate.projects
+            $envPaths = @($links.envPaths)
+            $extraEnv = $links.extraEnv
+            $pathSuffix = @($links.pathSuffix)
+            $notes = @($links.notes)
+        }
+        $res = Invoke-SandboxCommand -Repo $Repo -Worktree $Worktree -RunName $RunName -Command $Command -TimeoutSec $TimeoutSec `
+            -EnvPaths $envPaths -ExtraEnv $extraEnv -PathSuffix $pathSuffix
+        return [ordered]@{
+            ok       = $true
+            status   = $res.status
+            exitCode = $res.exitCode
+            output   = @($res.output)
+            tail     = @($res.tail)
+            seconds  = $res.seconds
+            notes    = @($notes)
+        }
+    } finally {
+        if ($IsProbe -and (Split-Path $Worktree -Leaf) -like '.probe-*') {
+            if (Test-Path -LiteralPath $Worktree) {
+                Remove-SandboxEnvLinks -Worktree $Worktree | Out-Null
+                try { Remove-Worktree $Worktree } catch { }
+            }
+        }
     }
 }
 
@@ -303,11 +386,44 @@ if ($PSCmdlet.ParameterSetName -eq 'Env') {
 if ($PSCmdlet.ParameterSetName -eq 'SandboxRun') {
     if ($NoSandbox) { Fail '-NoSandbox cannot be used with -SandboxRun' }
     Import-DelegateSandboxEnv
-    $shaOut = @(& git.exe -C $Repo rev-parse --verify "$Base^{commit}" 2>&1)
-    if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read $Base in $Repo" }
-    $sha = ("$($shaOut | Select-Object -First 1)").Trim()
+    $hex = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $runWt = $null
+    $gateSha = $null
+    $isProbe = $false
+    if ($Worktree) {
+        if ($PSBoundParameters.ContainsKey('Base')) { Fail '-Worktree cannot be used with -Base' }
+        if (-not (Test-Path -LiteralPath $Worktree -PathType Container)) { Fail "sandbox: worktree not found: $Worktree" }
+        $repoNorm = Get-DelegateNormalizedPath $Repo
+        $wtNorm = Get-DelegateNormalizedPath $Worktree
+        if (Test-DelegatePathEqual $wtNorm $repoNorm) { Fail "sandbox: -Worktree must not be the repo's own checkout" }
+        $repoCommonRaw = @(& git.exe -C $Repo rev-parse --git-common-dir 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail "sandbox: $Worktree is not a worktree of $Repo" }
+        $repoCommon = "$($repoCommonRaw | Select-Object -First 1)".Trim()
+        if (-not [IO.Path]::IsPathRooted($repoCommon)) { $repoCommon = Join-Path $Repo $repoCommon }
+        $repoCommon = Get-DelegateNormalizedPath $repoCommon
+        $wtTopRaw = @(& git.exe -C $Worktree rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $wtTopRaw.Count -eq 0) { Fail "sandbox: $Worktree is not a worktree of $Repo" }
+        $wtCommonRaw = @(& git.exe -C $Worktree rev-parse --git-common-dir 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $wtCommonRaw.Count -eq 0) { Fail "sandbox: $Worktree is not a worktree of $Repo" }
+        $wtTop = Get-DelegateNormalizedPath ("$($wtTopRaw | Select-Object -First 1)".Trim())
+        $wtCommon = "$($wtCommonRaw | Select-Object -First 1)".Trim()
+        if (-not [IO.Path]::IsPathRooted($wtCommon)) { $wtCommon = Join-Path $Worktree $wtCommon }
+        $wtCommon = Get-DelegateNormalizedPath $wtCommon
+        if (-not (Test-DelegatePathEqual $wtTop $wtNorm) -or -not (Test-DelegatePathEqual $wtCommon $repoCommon)) {
+            Fail "sandbox: $Worktree is not a worktree of $Repo"
+        }
+        $runWt = $wtNorm
+        $headOut = @(& git.exe -C $Worktree rev-parse HEAD 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read the worktree HEAD in $Worktree" }
+        $gateSha = ("$($headOut | Select-Object -First 1)").Trim()
+    } else {
+        $shaOut = @(& git.exe -C $Repo rev-parse --verify "$Base^{commit}" 2>&1)
+        if ($LASTEXITCODE -ne 0) { Fail "sandbox: cannot read $Base in $Repo" }
+        $gateSha = ("$($shaOut | Select-Object -First 1)").Trim()
+    }
+    $pidFile = $null
     try {
-        $g = Test-SandboxEnvReady -Repo $Repo -Commit $sha
+        $g = Test-SandboxEnvReady -Repo $Repo -Commit $gateSha
         if (-not $g.ready) {
             [ordered]@{
                 ok       = $true
@@ -321,47 +437,42 @@ if ($PSCmdlet.ParameterSetName -eq 'SandboxRun') {
             } | ConvertTo-Json -Depth 8 -Compress
             exit 0
         }
-        $hex = [guid]::NewGuid().ToString('N').Substring(0, 8)
-        $probe = Join-Path $wtRoot ".probe-$hex"
-        $out = $null
-        try {
+        if (-not $Worktree) {
+            $isProbe = $true
+            $runWt = Join-Path $wtRoot ".probe-$hex"
             New-Item -ItemType Directory -Force $wtRoot | Out-Null
-            Invoke-Git -C $Repo worktree add --detach $probe $sha | Out-Null
-            $envPaths = @()
-            $extraEnv = @{}
-            $pathSuffix = @()
-            $notes = @()
-            $hasReadyProject = $false
-            foreach ($p in @($g.projects)) {
-                if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
-            }
-            if (@($g.projects).Count -gt 0 -and $hasReadyProject) {
-                $links = Add-SandboxEnvLinks -Repo $Repo -Worktree $probe -Projects $g.projects
-                $envPaths = @($links.envPaths)
-                $extraEnv = $links.extraEnv
-                $pathSuffix = @($links.pathSuffix)
-                $notes = @($links.notes)
-            }
-            $res = Invoke-SandboxCommand -Repo $Repo -Worktree $probe -RunName "probe-$hex" -Command $Command -TimeoutSec $TimeoutSec `
-                -EnvPaths $envPaths -ExtraEnv $extraEnv -PathSuffix $pathSuffix
-            $out = [ordered]@{
-                ok       = $true
-                status   = $res.status
-                exitCode = $res.exitCode
-                output   = @($res.output)
-                seconds  = $res.seconds
-                notes    = @($notes)
-            }
-        } finally {
-            if ($probe -and (Test-Path -LiteralPath $probe)) {
-                Remove-SandboxEnvLinks -Worktree $probe | Out-Null
-                try { Remove-Worktree $probe } catch { }
-            }
+            Invoke-Git -C $Repo worktree add --detach $runWt $gateSha | Out-Null
         }
+        $runsDir = Join-Path $Repo '.xagent\runs'
+        New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
+        if ($Feature) {
+            $pidFile = Join-Path $runsDir "probe-$hex.pid"
+            $me = Get-Process -Id $PID
+            [ordered]@{
+                pid       = $PID
+                startTime = $me.StartTime.ToUniversalTime().ToString('o')
+                feature   = $Feature
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile -Encoding utf8
+        }
+        $helperParams = @{
+            Repo         = $Repo
+            Worktree     = $runWt
+            RunName      = "probe-$hex"
+            Gate         = $g
+            Command      = $Command
+            TimeoutSec   = $TimeoutSec
+            ExcludePath  = $exclude
+        }
+        if ($isProbe) { $helperParams['IsProbe'] = $true }
+        $out = Invoke-DelegateSandboxRun @helperParams
         $out | ConvertTo-Json -Depth 8 -Compress
         exit 0
     } catch {
         Fail $_.Exception.Message
+    } finally {
+        if ($pidFile -and (Test-Path -LiteralPath $pidFile)) {
+            Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -539,6 +650,7 @@ if ($null -ne $envGate) {
         if ([string]$p.status -ceq 'ready') { $hasReadyProject = $true; break }
     }
     if ($hasReadyProject) {
+        Add-DelegateVenvExclude -ExcludePath $exclude
         try { $envLinks = Add-SandboxEnvLinks -Repo $Repo -Worktree $wt -Projects $envGate.projects } catch { Fail $_.Exception.Message }
     }
 }

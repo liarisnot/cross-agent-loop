@@ -2199,7 +2199,7 @@ function Get-SandboxWorktreeName([string]$Worktree) {
     return $name
 }
 
-function Get-SandboxCommandOutputLines([string]$StdoutText, [string]$StderrText) {
+function Get-SandboxCommandLineList([string]$StdoutText, [string]$StderrText) {
     $combined = New-Object System.Collections.Generic.List[string]
     foreach ($text in @($StdoutText, $StderrText)) {
         if ([string]::IsNullOrEmpty($text)) { continue }
@@ -2213,11 +2213,31 @@ function Get-SandboxCommandOutputLines([string]$StdoutText, [string]$StderrText)
         }
         foreach ($line in $parts) { $combined.Add([string]$line) }
     }
+    return ,[string[]]@($combined)
+}
+
+function Get-SandboxCommandOutputLines([string]$StdoutText, [string]$StderrText) {
+    $combined = [string[]](Get-SandboxCommandLineList $StdoutText $StderrText)
     $max = [Math]::Min(40, $combined.Count)
     if ($max -eq 0) { return ,[string[]]::new(0) }
     $out = New-Object string[] $max
     for ($i = 0; $i -lt $max; $i++) {
         $line = $combined[$i]
+        if ($null -eq $line) { $line = '' }
+        if ($line.Length -gt 400) { $line = $line.Substring(0, 400) }
+        $out[$i] = $line
+    }
+    return ,$out
+}
+
+function Get-SandboxCommandTailLines([string]$StdoutText, [string]$StderrText) {
+    $combined = [string[]](Get-SandboxCommandLineList $StdoutText $StderrText)
+    if ($combined.Count -eq 0) { return ,[string[]]::new(0) }
+    $start = [Math]::Max(0, $combined.Count - 40)
+    $count = $combined.Count - $start
+    $out = New-Object string[] $count
+    for ($i = 0; $i -lt $count; $i++) {
+        $line = $combined[$start + $i]
         if ($null -eq $line) { $line = '' }
         if ($line.Length -gt 400) { $line = $line.Substring(0, 400) }
         $out[$i] = $line
@@ -2282,6 +2302,7 @@ function Invoke-SandboxCommand {
     $status = 'ran'
     $exitCode = 0
     $output = [string[]]::new(0)
+    $tail = [string[]]::new(0)
     $seconds = 0
     try {
         $newRunParams = @{
@@ -2326,6 +2347,7 @@ function Invoke-SandboxCommand {
         try { $stdoutText = Read-SandboxSharedText $stdoutPath } catch { $stdoutText = '' }
         try { $stderrText = Read-SandboxSharedText $stderrPath } catch { $stderrText = '' }
         $output = [string[]](Get-SandboxCommandOutputLines $stdoutText $stderrText)
+        $tail = [string[]](Get-SandboxCommandTailLines $stdoutText $stderrText)
     } finally {
         if ($null -ne $slot) {
             Stop-SandboxRun -Run $run -Slot $slot -Handle $h | Out-Null
@@ -2335,6 +2357,7 @@ function Invoke-SandboxCommand {
         status = $status
         exitCode = $exitCode
         output = $output
+        tail = $tail
         seconds = $seconds
     }
 }

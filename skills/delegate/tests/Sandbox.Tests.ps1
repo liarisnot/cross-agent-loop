@@ -605,6 +605,42 @@ Describe 'version choice' {
     }
 }
 
+Describe 'Sandbox command tail' {
+    It 'returns fewer than 40 lines with stdout before stderr' {
+        InModuleScope Sandbox {
+            $out = Get-SandboxCommandTailLines "a`nb`n" "c`n"
+            $out | Should -Be @('a', 'b', 'c')
+        }
+    }
+
+    It 'returns exactly the last 40 lines across stdout and stderr' {
+        InModuleScope Sandbox {
+            $stdout = (1..30 | ForEach-Object { "$_" }) -join "`n"
+            $stderr = (31..50 | ForEach-Object { "$_" }) -join "`n"
+            $out = Get-SandboxCommandTailLines $stdout $stderr
+            $out.Count | Should -Be 40
+            $out[0] | Should -Be '11'
+            $out[-1] | Should -Be '50'
+        }
+    }
+
+    It 'cuts a line longer than 400 characters' {
+        InModuleScope Sandbox {
+            $long = 'x' * 500
+            $out = Get-SandboxCommandTailLines $long ''
+            $out.Count | Should -Be 1
+            $out[0].Length | Should -Be 400
+        }
+    }
+
+    It 'returns an empty array for empty input' {
+        InModuleScope Sandbox {
+            $out = Get-SandboxCommandTailLines '' ''
+            $out | Should -Be @()
+        }
+    }
+}
+
 Describe 'letters' {
     It 'Test-LetterFree reports a real drive as used and a free letter as free' {
         $used = InModuleScope Sandbox { Test-LetterFree -Letter 'c' }
@@ -3444,6 +3480,8 @@ exit 0
         Test-Path -LiteralPath $stdoutPath | Should -BeTrue
         $r.status | Should -Be 'timeout'
         $r.exitCode | Should -Be $null
+        $r.tail | Should -BeOfType [object]
+        @($r.tail) | Should -BeOfType [string]
     }
 }
 
