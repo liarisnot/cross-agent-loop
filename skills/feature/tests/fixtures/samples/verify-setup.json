@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "inScope": true,
+  "changed": ["skills/feature/tests/feature.Tests.ps1"],
+  "outOfScope": [],
+  "test": {
+    "command": "pwsh -NoProfile -c \"exit 0\"",
+    "passed": false,
+    "exitCode": -1,
+    "tail": "",
+    "where": "sandbox",
+    "setup": {
+      "status": "environment-missing",
+      "message": "sandbox: environment not ready",
+      "proposal": {
+        "needsApproval": false,
+        "text": "build 1 environment"
+      }
+    }
+  }
+}

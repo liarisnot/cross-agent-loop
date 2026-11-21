@@ -19,9 +19,28 @@
         "command": { "type": "string" },
         "passed": { "type": "boolean" },
         "exitCode": { "type": "integer" },
-        "tail": { "type": "string" }
+        "tail": { "type": "string" },
+        "where": { "type": "string", "enum": ["sandbox", "host"] },
+        "setup": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["environment-missing", "slot-busy", "sandbox-error"]
+                },
+                "message": { "type": "string" },
+                "proposal": { "type": ["object", "null"] }
+              },
+              "required": ["status", "message", "proposal"],
+              "additionalProperties": false
+            }
+          ]
+        }
       },
-      "required": ["command", "passed", "exitCode", "tail"]
+      "required": ["command", "passed", "exitCode", "tail", "where", "setup"]
     }
   },
   "required": ["ok", "inScope", "changed", "outOfScope", "test"]

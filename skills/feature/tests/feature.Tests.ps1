@@ -6,6 +6,14 @@ BeforeAll {
     $script:SamplesDir = Join-Path $PSScriptRoot 'fixtures/samples'
     $script:TemplatesDir = Join-Path $PSScriptRoot '../templates'
     $script:RunsJsonl = Join-Path $PSScriptRoot 'fixtures/runs.jsonl'
+
+    function script:Get-DecisionLineCount {
+        param([string]$Repo, [string]$Name)
+        $path = "docs/features/$Name/decisions.md"
+        $text = & git -C $Repo show "feature/${Name}:$path" 2>$null
+        if (-not $text) { return 0 }
+        return @($text -split "`n" | Where-Object { $_.Trim() -ne '' }).Count
+    }
 }
 
 Describe 'schemas' {
@@ -34,7 +42,9 @@ Describe 'schemas' {
         'status-selected.json',
         'status-none.json',
         'schedule.json',
-        'verify.json'
+        'verify.json',
+        'verify-setup.json',
+        'verify-error.json'
     )
 
     It 'valid sample <_> passes its schema' -ForEach $validSamples {
@@ -1857,10 +1867,14 @@ Describe 'feature.ps1 verify' {
                     'task', '-Repo', $repo, '-Name', 'vst', '-Task', 't1',
                     '-Worktree', $wt, '-BaseSha', $base, '-Status', 'in-review'
                 ) -WorkingDirectory $repo)
-            Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vst', '-Task', 't1') -WorkingDirectory $repo | Out-Null
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vst', '-Task', 't1') -WorkingDirectory $repo
             $state = Get-Content -Raw (Join-Path $repo '.xagent/features/vst/state.json') | ConvertFrom-Json
             $state.tasks.t1.verify | Should -Not -BeNullOrEmpty
             $state.tasks.t1.status | Should -Be 'in-review'
+            $r.Json.test.where | Should -Be 'host'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+            $state.tasks.t1.verify.test.where | Should -Be 'host'
+            $state.tasks.t1.verify.test.setup | Should -BeNullOrEmpty
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
@@ -1920,6 +1934,147 @@ Describe 'feature.ps1 verify' {
         }
         (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr', '-Task', 'nope') -WorkingDirectory $repo).Json.error | Should -Match 'unknown task'
         (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr') -WorkingDirectory $repo).Json.error | Should -Match '-Task is required'
+    }
+
+    It 'OnHost with Quote records host run and runs test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'voh' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'voh'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'voh', '-Task', 't1', '-OnHost', '-Quote', 'ok go'
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.ok | Should -BeTrue
+            $r.Json.test.where | Should -Be 'host'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+            $r.Json.test.passed | Should -BeTrue
+            (Get-DecisionLineCount -Repo $repo -Name 'voh') | Should -Be ($before + 1)
+            $dec = (& git -C $repo show 'feature/voh:docs/features/voh/decisions.md') -join "`n"
+            $dec | Should -Match '\[decision\] host run: t1, approved: ok go'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost without Quote refuses and does not run test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohnq' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohnq'
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vohnq', '-Task', 't1', '-OnHost') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be "-OnHost requires -Quote with the user's approval"
+            (Get-DecisionLineCount -Repo $repo -Name 'vohnq') | Should -Be $before
+            Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost with whitespace Quote refuses and does not run test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohws' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohws'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vohws', '-Task', 't1', '-OnHost', '-Quote', ' '
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be "-OnHost requires -Quote with the user's approval"
+            (Get-DecisionLineCount -Repo $repo -Name 'vohws') | Should -Be $before
+            Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'Quote without OnHost refuses' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vqoh' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vqoh', '-Task', 't1', '-Quote', 'x') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be '-Quote requires -OnHost'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost off feature branch refuses without test or host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohbr' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohbr'
+            & git -C $repo switch main 2>&1 | Out-Null
+            try {
+                $r = Invoke-Feature @(
+                    'verify', '-Repo', $repo, '-Name', 'vohbr', '-Task', 't1', '-OnHost', '-Quote', 'x'
+                ) -WorkingDirectory $repo
+                $r.ExitCode | Should -Be 1
+                $r.Json.error | Should -Match 'feature/vohbr'
+                (Get-DecisionLineCount -Repo $repo -Name 'vohbr') | Should -Be $before
+                Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+            } finally {
+                & git -C $repo switch 'feature/vohbr' 2>&1 | Out-Null
+            }
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost invalid TimeoutSec refuses without host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohto' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohto'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vohto', '-Task', 't1', '-OnHost', '-Quote', 'x', '-TimeoutSec', '0'
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Match 'invalid -TimeoutSec'
+            (Get-DecisionLineCount -Repo $repo -Name 'vohto') | Should -Be $before
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost missing worktree refuses without host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'vohwt' -Plan (New-OneTaskPlan) | Out-Null
+        $before = Get-DecisionLineCount -Repo $repo -Name 'vohwt'
+        $r = Invoke-Feature @(
+            'verify', '-Repo', $repo, '-Name', 'vohwt', '-Task', 't1', '-OnHost', '-Quote', 'x'
+        ) -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'no worktree in state'
+        (Get-DecisionLineCount -Repo $repo -Name 'vohwt') | Should -Be $before
+    }
+
+    It 'default verify sets where host and setup null' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vdef' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vdef', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.test.where | Should -Be 'host'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
     }
 }
 
