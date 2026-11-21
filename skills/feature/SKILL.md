@@ -228,9 +228,9 @@ A failed seat (`ok: false` or `timedOut: true`): read `stderrTail` and the logs 
 
 ### The cap rule
 
-At most 2 agents of this feature run at a time. The cap counts every `delegate.ps1` run of the feature: preflights, workers, review lenses and council seats.
+At most 2 agents of this feature run at a time. The cap counts every `delegate.ps1` run of the feature: preflights, workers, review lenses and council seats, sandboxed `feature.ps1 verify` runs, and phase tests run through `delegate.ps1 -SandboxRun -Feature <name>`. `verify -OnHost` and a host phase test do not count.
 
-Before any `delegate.ps1` run that does not come from `feature.ps1 schedule` (preflights, lenses, council seats), run `feature.ps1 schedule -Repo <repo> -Name <name>` and read `cap` and `liveRuns`. Start at most `cap - liveRuns` such runs. If none can start, wait for a running call to finish, then check again. Worker tasks listed in `schedule.tasks` are already capped by `schedule`. Stage files call this the cap rule in SKILL.md and do not restate it.
+Before any `delegate.ps1` run that does not come from `feature.ps1 schedule` (preflights, lenses, council seats), and before each sandboxed `verify` and each phase test through `-SandboxRun -Feature <name>`, run `feature.ps1 schedule -Repo <repo> -Name <name>` and read `cap` and `liveRuns`. Start at most `cap - liveRuns` such runs. If none can start, wait for a running call to finish, then check again. Worker tasks listed in `schedule.tasks` are already capped by `schedule`. Stage files call this the cap rule in SKILL.md and do not restate it.
 
 ## Failed delegate.ps1 runs
 
