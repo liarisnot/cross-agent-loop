@@ -3,6 +3,7 @@
 param(
     [Parameter(Position = 0)]
     [string]$Subcommand,
+    [switch]$OnHost,
     [string]$Repo,
     [string]$Name,
     [string]$Cwd,
@@ -1190,8 +1191,13 @@ function Invoke-GateFeature {
     }
 }
 
-function Invoke-DecisionFeature {
-    param([string]$Repository, [string]$FeatureName)
+function Add-FeatureDecision {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$Kind,
+        [string]$Text
+    )
     Assert-OneLine 'Text' $Text
     if (-not $Kind) { throw '-Kind is required' }
     if ($script:DecisionKinds -notcontains $Kind) { throw "invalid kind $Kind" }
@@ -1209,10 +1215,21 @@ function Invoke-DecisionFeature {
         $rel = "docs/features/$FeatureName"
         $suffix = Get-DecisionCommitSuffix $line
         $null = Invoke-FeatureCommit $Repository "feature($FeatureName): $suffix" @($rel)
-        Out-FeatureOk @{ name = $FeatureName; line = $line.TrimEnd("`n") }
+        return $line.TrimEnd("`n")
     } finally {
         Exit-FeatureLock
     }
+}
+
+function Invoke-DecisionFeature {
+    param([string]$Repository, [string]$FeatureName)
+    Assert-OneLine 'Text' $Text
+    if (-not $Kind) { throw '-Kind is required' }
+    if ($script:DecisionKinds -notcontains $Kind) { throw "invalid kind $Kind" }
+    if (-not $Text) { throw '-Text is required' }
+
+    $line = Add-FeatureDecision -Repository $Repository -FeatureName $FeatureName -Kind $Kind -Text $Text
+    Out-FeatureOk @{ name = $FeatureName; line = $line }
 }
 
 function Invoke-ReauditFeature {
@@ -2607,12 +2624,8 @@ function Test-MergeBlockingPorcelainLine([string]$Line) {
     return $true
 }
 
-function Invoke-TaskTestCommand {
-    param(
-        [string]$WorktreePath,
-        [string]$TestCommand,
-        [int]$TimeoutSec
-    )
+function New-TaskTestWrapper {
+    param([string]$TestCommand)
     $wrapper = @"
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new(`$false)
 `$ErrorActionPreference = 'Stop'
@@ -2621,7 +2634,16 @@ try { & { $TestCommand } 2>&1 | ForEach-Object { "`$_" } } catch { "`$_"; exit 1
 exit `$LASTEXITCODE
 "@
     $bytes = [Text.Encoding]::Unicode.GetBytes($wrapper)
-    $encoded = [Convert]::ToBase64String($bytes)
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Invoke-TaskTestCommand {
+    param(
+        [string]$WorktreePath,
+        [string]$TestCommand,
+        [int]$TimeoutSec
+    )
+    $encoded = New-TaskTestWrapper -TestCommand $TestCommand
     $outFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-out-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     $errFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-err-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     $exitCode = 0
@@ -2668,6 +2690,8 @@ exit `$LASTEXITCODE
         passed   = ($exitCode -eq 0)
         exitCode = $exitCode
         tail     = $tail
+        where    = 'host'
+        setup    = $null
     }
 }
 
@@ -2747,6 +2771,16 @@ function Invoke-VerifyFeature {
         $timeout = $parsed
     }
 
+    $onHost = [bool]$OnHost
+    if ($onHost) {
+        Assert-OneLine 'Quote' $Quote
+        if ([string]::IsNullOrWhiteSpace($Quote)) {
+            throw "-OnHost requires -Quote with the user's approval"
+        }
+    } elseif ($Bound.ContainsKey('Quote') -and $Quote) {
+        throw '-Quote requires -OnHost'
+    }
+
     $stateObj = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
     if (-not $stateObj.tasks.ContainsKey($Task)) {
         throw "task $Task has no worktree in state.json; set it with task -Worktree -BaseSha"
@@ -2759,6 +2793,10 @@ function Invoke-VerifyFeature {
     }
     if (-not (Test-Path -LiteralPath $wt)) {
         throw "worktree not found: $wt"
+    }
+
+    if ($onHost) {
+        $null = Add-FeatureDecision -Repository $Repository -FeatureName $FeatureName -Kind decision -Text "host run: $Task, approved: $Quote"
     }
 
     $ignoredCaches = Get-IgnoredCachePaths -WorktreePath $wt
