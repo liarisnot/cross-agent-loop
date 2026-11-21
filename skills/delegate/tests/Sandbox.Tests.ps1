@@ -3480,8 +3480,8 @@ exit 0
         Test-Path -LiteralPath $stdoutPath | Should -BeTrue
         $r.status | Should -Be 'timeout'
         $r.exitCode | Should -Be $null
-        $r.tail | Should -BeOfType [object]
-        @($r.tail) | Should -BeOfType [string]
+        $r.Contains('tail') | Should -BeTrue
+        ($r.tail -is [array]) | Should -BeTrue
     }
 }
 
