@@ -32,3 +32,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-21T01:05:35Z [fix-up] phase 1: 1 files, 2 lines — the timeout test piped an empty tail array to Should; check the key and the array type instead
 - 2026-11-21T01:10:24Z [fix-up] build-docs: 1 files, 1 lines — task branch is xagent/<delegateTaskId>
 - 2026-11-21T04:55:30Z [decision] host run: phase 2, approved: Yes, run on host
+- 2026-11-21T05:12:50Z [stage] build -> signoff
