@@ -273,13 +273,12 @@ function Format-DelegateResult($Result) {
     return $text
 }
 
-function Invoke-DelegateChild {
+function New-DelegateChildStartInfo {
     param(
         [Parameter(Mandatory)][string[]]$ArgumentList,
         [hashtable]$ExtraEnv,
         [string[]]$RemoveEnv,
-        [switch]$UseRealProfile,
-        [int]$WaitMs = 300000
+        [switch]$UseRealProfile
     )
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = (Get-Command pwsh -ErrorAction Stop).Source
@@ -318,18 +317,44 @@ function Invoke-DelegateChild {
             }
         }
     }
+    return $psi
+}
+
+function Start-DelegateChild {
+    param(
+        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [hashtable]$ExtraEnv,
+        [string[]]$RemoveEnv,
+        [switch]$UseRealProfile
+    )
+    $psi = New-DelegateChildStartInfo -ArgumentList $ArgumentList -ExtraEnv $ExtraEnv -RemoveEnv $RemoveEnv -UseRealProfile:$UseRealProfile
     $proc = [System.Diagnostics.Process]::new()
     $proc.StartInfo = $psi
     [void]$proc.Start()
-    $outTask = $proc.StandardOutput.ReadToEndAsync()
-    $errTask = $proc.StandardError.ReadToEndAsync()
+    return @{
+        Process = $proc
+        Stdout  = $proc.StandardOutput.ReadToEndAsync()
+        Stderr  = $proc.StandardError.ReadToEndAsync()
+    }
+}
+
+function Invoke-DelegateChild {
+    param(
+        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [hashtable]$ExtraEnv,
+        [string[]]$RemoveEnv,
+        [switch]$UseRealProfile,
+        [int]$WaitMs = 300000
+    )
+    $started = Start-DelegateChild -ArgumentList $ArgumentList -ExtraEnv $ExtraEnv -RemoveEnv $RemoveEnv -UseRealProfile:$UseRealProfile
+    $proc = $started.Process
     if (-not $proc.WaitForExit($WaitMs)) {
         try { $proc.Kill($true) } catch { }
         try { [void]$proc.WaitForExit(10000) } catch { }
-        throw "delegate.ps1 did not exit within $WaitMs ms`n$(($errTask.GetAwaiter().GetResult()))"
+        throw "delegate.ps1 did not exit within $WaitMs ms`n$(($started.Stderr.GetAwaiter().GetResult()))"
     }
-    $stdout = $outTask.GetAwaiter().GetResult()
-    $stderr = $errTask.GetAwaiter().GetResult()
+    $stdout = $started.Stdout.GetAwaiter().GetResult()
+    $stderr = $started.Stderr.GetAwaiter().GetResult()
     $global:LASTEXITCODE = $proc.ExitCode
     $lines = @($stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') })
     $json = $null
@@ -574,6 +599,8 @@ Describe 'delegate parameter sets' {
         @($runPs[0].Parameters | Where-Object Name -eq 'SandboxRun')[0].IsMandatory | Should -BeTrue
         @($runPs[0].Parameters | Where-Object Name -eq 'Repo')[0].IsMandatory | Should -BeTrue
         @($runPs[0].Parameters | Where-Object Name -eq 'Command')[0].IsMandatory | Should -BeTrue
+        @($runPs[0].Parameters | Where-Object Name -eq 'Worktree')[0].IsMandatory | Should -BeFalse
+        @($runPs[0].Parameters | Where-Object Name -eq 'Feature')[0].IsMandatory | Should -BeFalse
     }
 
     It 'rejects -NoSandbox with -SandboxEnv, -SandboxRun, and -Rebuild without -Apply' {
@@ -1016,7 +1043,265 @@ Describe 'SandboxEnv command' {
         $r.Json.status | Should -Be 'environment-missing' -Because $because
         $r.Json.exitCode | Should -BeNullOrEmpty -Because $because
         $r.Json.message | Should -BeLike 'sandbox: environment not ready:*' -Because $because
+        $r.Json.PSObject.Properties.Name | Should -Not -Contain 'tail' -Because $because
+        $r.Json.PSObject.Properties.Name | Should -Not -Contain 'notes' -Because $because
         @(Get-ChildItem -LiteralPath $wtRoot -Directory -Filter '.probe-*' -ErrorAction SilentlyContinue).Count | Should -Be $before -Because $because
+    }
+}
+
+function Import-TestDelegateFunction {
+    param([Parameter(Mandatory)][string]$Name)
+    $scriptPath = [IO.Path]::GetFullPath((Join-Path $script:Here '../scripts/delegate.ps1'))
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
+    $fn = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+    }, $true)
+    if (-not $fn) { throw "$Name was not found in delegate.ps1" }
+    $text = $fn.Extent.Text -replace "^function\s+$Name\b", "function script:$Name"
+    Invoke-Expression $text
+}
+
+Describe 'SandboxRun worktree' {
+    It 'refuses -Worktree with an explicit -Base' {
+        $repoDir = Join-Path $TestDrive 'wt-refuse-base'
+        New-LaunchRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $wt = Join-Path $TestDrive 'wt-refuse-base-wt'
+        New-Item -ItemType Directory -Force -Path $wt | Out-Null
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Base', 'HEAD', '-Command', 'exit 0'
+        ) -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -Be '-Worktree cannot be used with -Base' -Because $because
+    }
+
+    It 'refuses a missing worktree path' {
+        $repoDir = Join-Path $TestDrive 'wt-missing-repo'
+        New-LaunchRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $missing = Join-Path $TestDrive 'no-such-worktree-folder'
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $missing, '-Command', 'exit 0'
+        ) -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -Be "sandbox: worktree not found: $missing" -Because $because
+    }
+
+    It 'refuses a folder that is not a worktree of the repo' {
+        $repoDir = Join-Path $TestDrive 'wt-main-repo'
+        New-LaunchRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $otherDir = Join-Path $TestDrive 'wt-other-repo'
+        New-LaunchRepo $otherDir
+        $other = Get-DelegateRepoTop $otherDir
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $other, '-Command', 'exit 0'
+        ) -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -Be "sandbox: $other is not a worktree of $repo" -Because $because
+    }
+
+    It 'refuses -Worktree equal to -Repo' {
+        $repoDir = Join-Path $TestDrive 'wt-same-repo'
+        New-LaunchRepo $repoDir
+        $repo = Get-DelegateRepoTop $repoDir
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $repo, '-Command', 'exit 0'
+        ) -ExtraEnv (Get-ChildEnv $script:SafeCursor $script:SafeRoot $script:SafeLog)
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 1 -Because $because
+        $r.Json.error | Should -Be "sandbox: -Worktree must not be the repo's own checkout" -Because $because
+    }
+
+    It 'Add-DelegateVenvExclude appends .venv/ once' {
+        Import-TestDelegateFunction -Name 'Add-DelegateVenvExclude'
+        $exclude = Join-Path $TestDrive 'venv-exclude-once'
+        if (Test-Path -LiteralPath $exclude) { Remove-Item -LiteralPath $exclude -Force }
+        Add-DelegateVenvExclude -ExcludePath $exclude
+        $text = [IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false))
+        @($text -split "`r?`n" | Where-Object { $_ -ceq '.venv/' }).Count | Should -Be 1
+        Add-DelegateVenvExclude -ExcludePath $exclude
+        $text = [IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false))
+        @($text -split "`r?`n" | Where-Object { $_ -ceq '.venv/' }).Count | Should -Be 1
+    }
+
+    It 'Add-DelegateVenvExclude adds a newline when the file has no line terminator' {
+        Import-TestDelegateFunction -Name 'Add-DelegateVenvExclude'
+        $exclude = Join-Path $TestDrive 'venv-exclude-nl'
+        [IO.File]::WriteAllText($exclude, '.xagent/', [Text.UTF8Encoding]::new($false))
+        Add-DelegateVenvExclude -ExcludePath $exclude
+        $text = [IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false))
+        $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+        $lines | Should -Be @('.xagent/', '.venv/')
+    }
+}
+
+Describe 'SandboxRun worktree in the sandbox' -Tag Sandbox {
+    BeforeDiscovery {
+        $script:SwSkipReason = Get-LaunchSkipReason -Kind Sandbox
+        $script:SwSkip = [bool]$script:SwSkipReason
+        if ($script:SwSkip) { Write-Host "SandboxRun worktree skipped: $script:SwSkipReason" }
+    }
+
+    BeforeAll {
+        $script:SwLetters = $null
+        $script:SwTestRoot = $null
+        $script:SwRepo = $null
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        $script:SwRoot = Join-Path $TestDrive 'sw-root'
+        $script:SwLog = Join-Path $TestDrive 'sw-log'
+        New-Item -ItemType Directory -Force -Path $script:SwRoot, $script:SwLog | Out-Null
+        $env:XAGENT_SANDBOX_ROOT = $script:SwRoot
+        $env:XAGENT_CURSOR_ROOT = $script:FakeCursor
+        Import-Module $script:ModulePath -Force
+        $free = @(Get-TestFreeLetters)
+        if ($free.Count -lt 3) { throw 'sandbox: fewer than three free letters D-Z at reservation time' }
+        $script:SwLetters = @([string]$free[0], [string]$free[1], [string]$free[2])
+        Set-SandboxLetters -Letters $script:SwLetters
+        $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:SwTestRoot = Join-Path (Split-Path $script:RepoRoot -Qualifier) ('xagent-tests-' + $suffix)
+        New-Item -ItemType Directory -Force -Path $script:SwTestRoot | Out-Null
+        $script:SwRepo = Join-Path $script:SwTestRoot 'repo'
+        New-LaunchRepo $script:SwRepo
+        $script:SwEnvRepo = Join-Path $script:SwTestRoot 'env-repo'
+        New-DelegateSeRepo $script:SwEnvRepo
+        $script:SwUnbuiltRepo = Join-Path $script:SwTestRoot 'env-repo-unbuilt'
+        New-DelegateSeRepo $script:SwUnbuiltRepo
+    }
+
+    AfterAll {
+        if (Get-LaunchSkipReason -Kind Sandbox) { return }
+        try {
+            Clear-ReservedLetters -Letters $script:SwLetters
+        } finally {
+            Remove-LaunchTree -Root $script:SwTestRoot
+        }
+    }
+
+    It 'runs a command in an existing worktree and keeps uncommitted files' -Skip:$script:SwSkip {
+        $repo = Get-DelegateRepoTop $script:SwRepo
+        $wt = Join-Path $script:SwTestRoot 'worker-wt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '--detach', $wt, 'HEAD')
+        $marker = Join-Path $wt 'uncommitted-marker.txt'
+        [IO.File]::WriteAllText($marker, 'wt-marker-content', [Text.UTF8Encoding]::new($false))
+        $cmd = "Get-Content -LiteralPath 'uncommitted-marker.txt'; exit 4"
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Command', $cmd
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SwRoot $script:SwLog) -WaitMs 180000
+        $because = Format-DelegateResult $r
+        $r.ExitCode | Should -Be 0 -Because $because
+        $r.Json.status | Should -Be 'ran' -Because $because
+        $r.Json.exitCode | Should -Be 4 -Because $because
+        $r.Json.output -join "`n" | Should -Match 'wt-marker-content' -Because $because
+        $r.Json.tail -join "`n" | Should -Match 'wt-marker-content' -Because $because
+        Test-Path -LiteralPath $wt | Should -BeTrue -Because $because
+        Test-Path -LiteralPath $marker | Should -BeTrue -Because $because
+    }
+
+    It 'captures fifty numbered lines in output and tail' -Skip:$script:SwSkip {
+        $repo = Get-DelegateRepoTop $script:SwRepo
+        $wt = Join-Path $script:SwTestRoot 'lines-wt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '--detach', $wt, 'HEAD')
+        $cmd = '1..50 | ForEach-Object { Write-Output $_ }'
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Command', $cmd
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SwRoot $script:SwLog) -WaitMs 180000
+        $because = Format-DelegateResult $r
+        $r.Json.status | Should -Be 'ran' -Because $because
+        @($r.Json.output).Count | Should -Be 40 -Because $because
+        @($r.Json.output)[0] | Should -Be '1' -Because $because
+        @($r.Json.tail).Count | Should -Be 40 -Because $because
+        @($r.Json.tail)[-1] | Should -Be '50' -Because $because
+        Test-Path -LiteralPath $wt | Should -BeTrue -Because $because
+    }
+
+    It 'writes and removes a pid file with -Feature' -Skip:$script:SwSkip {
+        $repo = Get-DelegateRepoTop $script:SwRepo
+        $wt = Join-Path $script:SwTestRoot 'pid-wt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '--detach', $wt, 'HEAD')
+        $runsDir = Join-Path $repo '.xagent\runs'
+        $started = Start-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Feature', 'sv-test',
+            '-Command', 'Start-Sleep 8'
+        ) -ExtraEnv (Get-ChildEnv $script:FakeCursor $script:SwRoot $script:SwLog)
+        $proc = $started.Process
+        $found = $null
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                $pidFiles = @(Get-ChildItem -LiteralPath $runsDir -Filter 'probe-*.pid' -File -ErrorAction SilentlyContinue)
+                if ($pidFiles.Count -ge 1) {
+                    $found = $pidFiles[0]
+                    break
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            $found | Should -Not -BeNullOrEmpty
+            $pidJson = Get-Content -LiteralPath $found.FullName -Raw | ConvertFrom-Json
+            @($pidJson.PSObject.Properties.Name | Sort-Object) | Should -Be @('feature', 'pid', 'startTime')
+            $pidJson.feature | Should -Be 'sv-test'
+            [void]$proc.WaitForExit(180000)
+            $stdout = $started.Stdout.GetAwaiter().GetResult()
+            $lines = @($stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('{') })
+            $json = $lines[-1] | ConvertFrom-Json
+            $json.status | Should -Be 'ran'
+            @(Get-ChildItem -LiteralPath $runsDir -Filter 'probe-*.pid' -File -ErrorAction SilentlyContinue).Count | Should -Be 0
+        } finally {
+            if (-not $proc.HasExited) {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+                Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" -ErrorAction SilentlyContinue |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+            }
+        }
+    }
+
+    It 'adds .venv/ to exclude after a ready -Worktree run' -Skip:$script:SwSkip {
+        $envMap = Get-ChildEnv $script:FakeCursor $script:SwRoot $script:SwLog
+        $envMap['XAGENT_UV_PATH'] = [IO.Path]::GetFullPath((Join-Path $script:Here 'fixtures\sandbox-env\fake-uv.cmd'))
+        $repo = Get-DelegateRepoTop $script:SwEnvRepo
+        $apply = Invoke-DelegateChild -ArgumentList @('-SandboxEnv', '-Repo', $repo, '-Apply') -ExtraEnv $envMap
+        $apply.ExitCode | Should -Be 0
+        $wt = Join-Path $script:SwTestRoot 'venv-wt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '--detach', $wt, 'HEAD')
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Command', 'exit 0'
+        ) -ExtraEnv $envMap -WaitMs 180000
+        $r.Json.status | Should -Be 'ran'
+        $commonDir = (& git.exe -C $repo rev-parse --git-common-dir).Trim()
+        if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $repo $commonDir }
+        $exclude = Join-Path $commonDir 'info\exclude'
+        @([IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false)) -split "`r?`n" | Where-Object { $_ -ceq '.venv/' }).Count | Should -Be 1
+        @(& git.exe -C $wt status --porcelain) | Where-Object { $_ -match '\.venv' } | Should -BeNullOrEmpty
+    }
+
+    It 'does not add .venv/ when environment-missing' -Skip:$script:SwSkip {
+        $repo = Get-DelegateRepoTop $script:SwUnbuiltRepo
+        $wt = Join-Path $script:SwTestRoot 'venv-missing-wt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $wt) | Out-Null
+        Invoke-LaunchGit -ArgumentList @('-C', $repo, 'worktree', 'add', '--detach', $wt, 'HEAD')
+        $commonDir = (& git.exe -C $repo rev-parse --git-common-dir).Trim()
+        if (-not [IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $repo $commonDir }
+        $exclude = Join-Path $commonDir 'info\exclude'
+        $before = [IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false))
+        $envMap = Get-ChildEnv $script:FakeCursor $script:SwRoot $script:SwLog
+        $envMap['XAGENT_UV_PATH'] = [IO.Path]::GetFullPath((Join-Path $script:Here 'fixtures\sandbox-env\fake-uv.cmd'))
+        $r = Invoke-DelegateChild -ArgumentList @(
+            '-SandboxRun', '-Repo', $repo, '-Worktree', $wt, '-Command', 'exit 0'
+        ) -ExtraEnv $envMap
+        $r.Json.status | Should -Be 'environment-missing'
+        $after = [IO.File]::ReadAllText($exclude, [Text.UTF8Encoding]::new($false))
+        @($after -split "`r?`n" | Where-Object { $_ -ceq '.venv/' }).Count | Should -Be 0
+        if ($before -match '\.venv/') { $after | Should -Be $before }
     }
 }
 
