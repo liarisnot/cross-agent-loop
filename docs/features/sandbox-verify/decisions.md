@@ -27,3 +27,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T21:30:58Z [decision] checkin: on-problems
 - 2026-11-20T21:30:59Z [stage] plan -> build
 - 2026-11-20T21:38:03Z [decision] sbrun-worktree: kept whole despite split verdict — the tail reader is about 40 lines and delegate.ps1's -SandboxRun output consumes it directly; one unit with one acceptance command
+- 2026-11-21T00:49:08Z [fix-up] sbrun-worktree: 1 files, 4 lines — environment-missing container test used the already-built repo; gave it its own unbuilt fixture repo
