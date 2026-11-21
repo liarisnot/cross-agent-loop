@@ -29,3 +29,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T21:38:03Z [decision] sbrun-worktree: kept whole despite split verdict — the tail reader is about 40 lines and delegate.ps1's -SandboxRun output consumes it directly; one unit with one acceptance command
 - 2026-11-21T00:49:08Z [fix-up] sbrun-worktree: 1 files, 4 lines — environment-missing container test used the already-built repo; gave it its own unbuilt fixture repo
 - 2026-11-21T00:51:05Z [fix-up] sbrun-worktree: 1 files, 1 lines — pass the normalized -Worktree path to the run, not the caller's spelling (state.json uses forward slashes)
+- 2026-11-21T01:05:35Z [fix-up] phase 1: 1 files, 2 lines — the timeout test piped an empty tail array to Should; check the key and the array type instead
