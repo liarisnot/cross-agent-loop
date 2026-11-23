@@ -69,12 +69,21 @@ This removes the letter mappings, slot containers and runtime cache. It keeps th
 
 ## Status
 
-- [x] Research
-- [x] Install CLIs and run the feasibility tests (see test plan)
-- [x] Draft `delegate` skill + wrapper script (v0)
-- [x] Add permission rule, run T2–T4 edit tests through the script
+- [x] Research and feasibility tests (see the [test plan](docs/test-plan.md))
 - [x] T0 Antigravity policy check (consumer plan: no `agy` in third-party agents)
-- [ ] Background parallel runs, real-repo trial
+- [x] `delegate` skill: workers, goldfish review lenses and a model council through the Cursor CLI
+- [x] `feature` skill v1: design, review, plan, build and sign-off with recorded gates
+- [x] Worker sandbox (Windows AppContainer), per-repo Python environments, tests run in the sandbox
+- [ ] First trial on a real repo outside this one
+- [ ] Swappable models through one config file (vendor-neutral role names)
+- [ ] Plugin packaging
+
+### Known issues
+
+- A killed `-SandboxRun` probe leaves its `<repo>.xagent\.probe-<hex>` worktree behind; remove it by hand (`git worktree remove`).
+- Pester's HKCU test registry is denied inside the sandbox; sandboxed task tests set `TestRegistry.Enabled = $false`.
+- This repo's own full test suite needs a host run (some `delegate` tests read the host drive), which `feature` asks you to approve.
+- Cursor's bundled Node hangs on piped child spawns inside an AppContainer; the sandbox runtime uses a patched copy of `node.exe` until Node ships libuv 1.53.
 
 ## The `feature` skill
 
