@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "inScope": true,
+  "changed": ["skills/feature/tests/feature.Tests.ps1"],
+  "outOfScope": [],
+  "test": {
+    "command": "pwsh -NoProfile -c \"exit 0\"",
+    "passed": false,
+    "exitCode": -1,
+    "tail": "",
+    "where": "sandbox",
+    "setup": {
+      "status": "sandbox-error",
+      "message": "sandbox: no free slot (both slots busy)",
+      "proposal": null
+    }
+  }
+}

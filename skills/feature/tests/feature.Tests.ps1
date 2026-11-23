@@ -1,4 +1,4 @@
-#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
+﻿#Requires -Modules @{ModuleName='Pester';ModuleVersion='5.5'}
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -6,6 +6,14 @@ BeforeAll {
     $script:SamplesDir = Join-Path $PSScriptRoot 'fixtures/samples'
     $script:TemplatesDir = Join-Path $PSScriptRoot '../templates'
     $script:RunsJsonl = Join-Path $PSScriptRoot 'fixtures/runs.jsonl'
+
+    function script:Get-DecisionLineCount {
+        param([string]$Repo, [string]$Name)
+        $path = "docs/features/$Name/decisions.md"
+        $text = & git -C $Repo show "feature/${Name}:$path" 2>$null
+        if (-not $text) { return 0 }
+        return @($text -split "`n" | Where-Object { $_.Trim() -ne '' }).Count
+    }
 }
 
 Describe 'schemas' {
@@ -34,7 +42,9 @@ Describe 'schemas' {
         'status-selected.json',
         'status-none.json',
         'schedule.json',
-        'verify.json'
+        'verify.json',
+        'verify-setup.json',
+        'verify-error.json'
     )
 
     It 'valid sample <_> passes its schema' -ForEach $validSamples {
@@ -1633,6 +1643,30 @@ Describe 'feature.ps1 task' {
 }
 
 Describe 'feature.ps1 verify' {
+    BeforeAll {
+        $script:SavedDelegateScript = $env:XAGENT_DELEGATE_SCRIPT
+        $script:SavedFakeSandbox = $env:XAGENT_FAKE_SANDBOX
+        $script:SavedVerifyGrace = $env:XAGENT_VERIFY_GRACE_SEC
+        $env:XAGENT_DELEGATE_SCRIPT = (Resolve-Path (Join-Path $PSScriptRoot 'fixtures/fake-delegate.ps1')).Path
+    }
+    AfterAll {
+        if ($null -eq $script:SavedDelegateScript) {
+            Remove-Item Env:XAGENT_DELEGATE_SCRIPT -ErrorAction SilentlyContinue
+        } else {
+            $env:XAGENT_DELEGATE_SCRIPT = $script:SavedDelegateScript
+        }
+        if ($null -eq $script:SavedFakeSandbox) {
+            Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue
+        } else {
+            $env:XAGENT_FAKE_SANDBOX = $script:SavedFakeSandbox
+        }
+        if ($null -eq $script:SavedVerifyGrace) {
+            Remove-Item Env:XAGENT_VERIFY_GRACE_SEC -ErrorAction SilentlyContinue
+        } else {
+            $env:XAGENT_VERIFY_GRACE_SEC = $script:SavedVerifyGrace
+        }
+    }
+
     It 'lists committed and uncommitted in-scope changes' -Tag 'Slow' {
         $repo = New-TestRepo
         $wt = $null
@@ -1789,6 +1823,7 @@ Describe 'feature.ps1 verify' {
             $r.ExitCode | Should -Be 0
             $r.Json.test.passed | Should -BeTrue
             $r.Json.test.exitCode | Should -Be 0
+            $r.Json.test.where | Should -Be 'sandbox'
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
@@ -1801,6 +1836,7 @@ Describe 'feature.ps1 verify' {
             $r.ExitCode | Should -Be 0
             $r.Json.test.passed | Should -BeFalse
             $r.Json.test.exitCode | Should -Be 3
+            $r.Json.test.where | Should -Be 'sandbox'
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo2 -WtRoot $wt }
         }
@@ -1814,6 +1850,7 @@ Describe 'feature.ps1 verify' {
             $wt = (Get-TaskWorktreeRoot $ctx)
             $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtail', '-Task', 't1') -WorkingDirectory $repo
             $r.Json.test.tail | Should -Match 'hello'
+            $r.Json.test.where | Should -Be 'sandbox'
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
@@ -1827,10 +1864,18 @@ Describe 'feature.ps1 verify' {
             $cmd = 'pwsh -NoProfile -c ''$PID | Set-Content sleeper.pid; Start-Sleep 30'''
             $ctx = New-TaskWorktree -Repo $repo -Name 'vto' -Test $cmd
             $wt = (Get-TaskWorktreeRoot $ctx)
-            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vto', '-Task', 't1', '-TimeoutSec', '5') -WorkingDirectory $repo
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vto'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vto', '-Task', 't1', '-TimeoutSec', '5',
+                '-OnHost', '-Quote', 'test'
+            ) -WorkingDirectory $repo
             $r.Json.test.exitCode | Should -Be -1
             $r.Json.test.passed | Should -BeFalse
             $r.Json.test.tail | Should -Match 'timed out after 5 s'
+            $r.Json.test.where | Should -Be 'host'
+            (Get-DecisionLineCount -Repo $repo -Name 'vto') | Should -Be ($before + 1)
+            $dec = (& git -C $repo show 'feature/vto:docs/features/vto/decisions.md') -join "`n"
+            $dec | Should -Match '\[decision\] host run: t1, approved: test'
             $pidFile = Join-Path $wt 'sleeper.pid'
             if (Test-Path -LiteralPath $pidFile) {
                 $sleeperPid = [int](Get-Content -LiteralPath $pidFile -Raw).Trim()
@@ -1857,10 +1902,14 @@ Describe 'feature.ps1 verify' {
                     'task', '-Repo', $repo, '-Name', 'vst', '-Task', 't1',
                     '-Worktree', $wt, '-BaseSha', $base, '-Status', 'in-review'
                 ) -WorkingDirectory $repo)
-            Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vst', '-Task', 't1') -WorkingDirectory $repo | Out-Null
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vst', '-Task', 't1') -WorkingDirectory $repo
             $state = Get-Content -Raw (Join-Path $repo '.xagent/features/vst/state.json') | ConvertFrom-Json
             $state.tasks.t1.verify | Should -Not -BeNullOrEmpty
             $state.tasks.t1.status | Should -Be 'in-review'
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+            $state.tasks.t1.verify.test.where | Should -Be 'sandbox'
+            $state.tasks.t1.verify.test.setup | Should -BeNullOrEmpty
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
@@ -1877,6 +1926,15 @@ Describe 'feature.ps1 verify' {
             Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vwt', '-Task', 't1') -WorkingDirectory $repo | Out-Null
             & git -C $wt rev-parse HEAD | Should -Be $head
             @(& git -C $wt status --porcelain) | Should -Be @($porc | Where-Object { $_ })
+            $head2 = & git -C $wt rev-parse HEAD
+            $porc2 = & git -C $wt status --porcelain
+            $beforeOh = Get-DecisionLineCount -Repo $repo -Name 'vwt'
+            Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vwt', '-Task', 't1', '-OnHost', '-Quote', 'ok'
+            ) -WorkingDirectory $repo | Out-Null
+            & git -C $wt rev-parse HEAD | Should -Be $head2
+            @(& git -C $wt status --porcelain) | Should -Be @($porc2 | Where-Object { $_ })
+            (Get-DecisionLineCount -Repo $repo -Name 'vwt') | Should -Be ($beforeOh + 1)
         } finally {
             if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
         }
@@ -1920,6 +1978,484 @@ Describe 'feature.ps1 verify' {
         }
         (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr', '-Task', 'nope') -WorkingDirectory $repo).Json.error | Should -Match 'unknown task'
         (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verr') -WorkingDirectory $repo).Json.error | Should -Match '-Task is required'
+    }
+
+    It 'OnHost with Quote records host run and runs test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'voh' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'voh'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'voh', '-Task', 't1', '-OnHost', '-Quote', 'ok go'
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.ok | Should -BeTrue
+            $r.Json.test.where | Should -Be 'host'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+            $r.Json.test.passed | Should -BeTrue
+            (Get-DecisionLineCount -Repo $repo -Name 'voh') | Should -Be ($before + 1)
+            $dec = (& git -C $repo show 'feature/voh:docs/features/voh/decisions.md') -join "`n"
+            $dec | Should -Match '\[decision\] host run: t1, approved: ok go'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost without Quote refuses and does not run test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohnq' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohnq'
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vohnq', '-Task', 't1', '-OnHost') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be "-OnHost requires -Quote with the user's approval"
+            (Get-DecisionLineCount -Repo $repo -Name 'vohnq') | Should -Be $before
+            Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost with whitespace Quote refuses and does not run test' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohws' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohws'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vohws', '-Task', 't1', '-OnHost', '-Quote', ' '
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be "-OnHost requires -Quote with the user's approval"
+            (Get-DecisionLineCount -Repo $repo -Name 'vohws') | Should -Be $before
+            Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'Quote without OnHost refuses' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vqoh' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vqoh', '-Task', 't1', '-Quote', 'x') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be '-Quote requires -OnHost'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost off feature branch refuses without test or host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohbr' -Test 'pwsh -NoProfile -c "Set-Content ran.txt x"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohbr'
+            & git -C $repo switch main 2>&1 | Out-Null
+            try {
+                $r = Invoke-Feature @(
+                    'verify', '-Repo', $repo, '-Name', 'vohbr', '-Task', 't1', '-OnHost', '-Quote', 'x'
+                ) -WorkingDirectory $repo
+                $r.ExitCode | Should -Be 1
+                $r.Json.error | Should -Match 'feature/vohbr'
+                (Get-DecisionLineCount -Repo $repo -Name 'vohbr') | Should -Be $before
+                Test-Path (Join-Path $wt 'ran.txt') | Should -BeFalse
+            } finally {
+                & git -C $repo switch 'feature/vohbr' 2>&1 | Out-Null
+            }
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost invalid TimeoutSec refuses without host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vohto' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = Get-DecisionLineCount -Repo $repo -Name 'vohto'
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'vohto', '-Task', 't1', '-OnHost', '-Quote', 'x', '-TimeoutSec', '0'
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Match 'invalid -TimeoutSec'
+            (Get-DecisionLineCount -Repo $repo -Name 'vohto') | Should -Be $before
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost missing worktree refuses without host run line' -Tag 'Slow' {
+        $repo = New-TestRepo
+        Import-TestPlan -Repo $repo -Name 'vohwt' -Plan (New-OneTaskPlan) | Out-Null
+        $before = Get-DecisionLineCount -Repo $repo -Name 'vohwt'
+        $r = Invoke-Feature @(
+            'verify', '-Repo', $repo, '-Name', 'vohwt', '-Task', 't1', '-OnHost', '-Quote', 'x'
+        ) -WorkingDirectory $repo
+        $r.ExitCode | Should -Be 1
+        $r.Json.error | Should -Match 'no worktree in state'
+        (Get-DecisionLineCount -Repo $repo -Name 'vohwt') | Should -Be $before
+    }
+
+    It 'default verify sets where sandbox and setup null' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vdef' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vdef', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.setup | Should -BeNullOrEmpty
+            $state = Get-Content -Raw (Join-Path $repo '.xagent/features/vdef/state.json') | ConvertFrom-Json
+            $state.tasks.t1.verify.test.where | Should -Be 'sandbox'
+            $state.tasks.t1.verify.test.setup | Should -BeNullOrEmpty
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'sandbox timeout mode maps tail and exitCode' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_FAKE_SANDBOX
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'timeout'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vtmo' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtmo', '-Task', 't1', '-TimeoutSec', '45') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.tail | Should -Match 'timed out after 45 s$'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'environment-missing mode maps setup' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_FAKE_SANDBOX
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'environment-missing'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'venv' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'venv', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.tail | Should -Be ''
+            $r.Json.test.setup.status | Should -Be 'environment-missing'
+            $r.Json.test.setup.message | Should -Match 'environment not ready'
+            $r.Json.test.setup.proposal.text | Should -Be 'fake'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'error mode maps sandbox-error' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_FAKE_SANDBOX
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'error'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'verrfb' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'verrfb', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.ok | Should -BeTrue
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.tail | Should -Be ''
+            $r.Json.test.setup.status | Should -Be 'sandbox-error'
+            $r.Json.test.setup.message | Should -Be 'sandbox: fake'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'slot-busy mode maps setup' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_FAKE_SANDBOX
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'slot-busy'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vslot' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vslot', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.tail | Should -Be ''
+            $r.Json.test.setup.status | Should -Be 'slot-busy'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'nojson mode maps sandbox-error' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_FAKE_SANDBOX
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'nojson'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vnj' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vnj', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.tail | Should -Be ''
+            $r.Json.test.setup.status | Should -Be 'sandbox-error'
+            $r.Json.test.setup.message | Should -Be 'delegate.ps1 printed no JSON'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'hang mode kills delegate and reports did not finish' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prevMode = $env:XAGENT_FAKE_SANDBOX
+        $prevGrace = $env:XAGENT_VERIFY_GRACE_SEC
+        try {
+            $env:XAGENT_FAKE_SANDBOX = 'hang'
+            $env:XAGENT_VERIFY_GRACE_SEC = '5'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vhang' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vhang', '-Task', 't1', '-TimeoutSec', '30') -WorkingDirectory $repo
+            $sw.Stop()
+            $sw.Elapsed.TotalSeconds | Should -BeLessThan 90
+            $r.ExitCode | Should -Be 0
+            $r.Json.ok | Should -BeTrue
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.exitCode | Should -Be -1
+            $r.Json.test.tail | Should -Be ''
+            $r.Json.test.setup.status | Should -Be 'sandbox-error'
+            $r.Json.test.setup.message | Should -Be 'delegate.ps1 did not finish'
+        } finally {
+            if ($null -eq $prevMode) { Remove-Item Env:XAGENT_FAKE_SANDBOX -ErrorAction SilentlyContinue } else { $env:XAGENT_FAKE_SANDBOX = $prevMode }
+            if ($null -eq $prevGrace) { Remove-Item Env:XAGENT_VERIFY_GRACE_SEC -ErrorAction SilentlyContinue } else { $env:XAGENT_VERIFY_GRACE_SEC = $prevGrace }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'sandbox ran preserves UTF-8 in tail' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $cmd = 'pwsh -NoProfile -c "Write-Output (''caf'' + [char]0xE9)"'
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vutf' -Test $cmd
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vutf', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.tail | Should -Match 'café'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses sandbox TimeoutSec below 30 or above 3600' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vtrng' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            foreach ($t in @('20', '4000')) {
+                (Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vtrng', '-Task', 't1', '-TimeoutSec', $t) -WorkingDirectory $repo).Json.error | Should -Be 'invalid -TimeoutSec'
+            }
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'OnHost accepts large TimeoutSec' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'voht' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'voht', '-Task', 't1', '-OnHost', '-Quote', 'x', '-TimeoutSec', '4000'
+            ) -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $r.Json.test.where | Should -Be 'host'
+            $r.Json.test.passed | Should -BeTrue
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses missing delegate script path' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        $prev = $env:XAGENT_DELEGATE_SCRIPT
+        try {
+            $missing = Join-Path $TestDrive ('missing-delegate-{0}.ps1' -f [guid]::NewGuid())
+            $env:XAGENT_DELEGATE_SCRIPT = $missing
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vdel' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vdel', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be "delegate.ps1 not found: $missing"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:XAGENT_DELEGATE_SCRIPT -ErrorAction SilentlyContinue } else { $env:XAGENT_DELEGATE_SCRIPT = $prev }
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'refuses command line longer than sandbox limit' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $longTest = "pwsh -NoProfile -c `"exit 0`" #" + ('x' * 40000)
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vlong' -Test $longTest
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vlong', '-Task', 't1') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 1
+            $r.Json.error | Should -Be 'test command too long for a sandboxed run'
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'records delegate argument list for sandbox run' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vargs' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $argsFile = Join-Path (Split-Path -Path $wt -Parent) 'fake-delegate-args.txt'
+            if (Test-Path -LiteralPath $argsFile) { Remove-Item -LiteralPath $argsFile -Force }
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vargs', '-Task', 't1', '-TimeoutSec', '120') -WorkingDirectory $repo
+            $r.ExitCode | Should -Be 0
+            $text = Get-Content -LiteralPath $argsFile -Raw
+            $text | Should -Match '-Feature vargs'
+            $text | Should -Match '-TimeoutSec 120'
+            $text | Should -Match ([regex]::Escape((Split-Path -Path $repo -Leaf)))
+            $text | Should -Match ([regex]::Escape((Split-Path -Path $wt -Leaf)))
+            $text | Should -Match ('"\[Console\]::OutputEncoding.*exit \$LASTEXITCODE"')
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+
+    It 'sandbox verify does not add worktree files' -Tag 'Slow' {
+        $repo = New-TestRepo
+        $wt = $null
+        try {
+            $ctx = New-TaskWorktree -Repo $repo -Name 'vclean' -Test 'pwsh -NoProfile -c "exit 0"'
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $before = @(& git -C $wt status --porcelain)
+            Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'vclean', '-Task', 't1') -WorkingDirectory $repo | Out-Null
+            $after = @(& git -C $wt status --porcelain)
+            $after | Should -Be $before
+        } finally {
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+        }
+    }
+}
+
+Describe 'live sandbox verify' -Tag 'Live' {
+    BeforeAll {
+        $script:LvSavedDelegate = $env:XAGENT_DELEGATE_SCRIPT
+        Remove-Item Env:XAGENT_DELEGATE_SCRIPT -ErrorAction SilentlyContinue
+        $script:LvRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
+        $script:LvDelegate = Join-Path $script:LvRepoRoot 'skills/delegate/scripts/delegate.ps1'
+        $script:LvDriveRoot = [IO.Path]::GetPathRoot($script:LvRepoRoot)
+        $script:LvShadowRoot = Join-Path $script:LvDriveRoot ('xagent-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    }
+    AfterAll {
+        if ($null -eq $script:LvSavedDelegate) {
+            Remove-Item Env:XAGENT_DELEGATE_SCRIPT -ErrorAction SilentlyContinue
+        } else {
+            $env:XAGENT_DELEGATE_SCRIPT = $script:LvSavedDelegate
+        }
+    }
+
+    It 'sandbox denies outside file and OnHost passes' {
+        $skip = $null
+        if (-not (Test-Path -LiteralPath $script:LvDelegate)) {
+            $skip = 'delegate.ps1 not found'
+        } else {
+            $checkOut = & pwsh -NoProfile -File $script:LvDelegate -SandboxCheck 2>&1 | Out-String
+            try {
+                $checkJson = ($checkOut.Trim() -split "`n" | Where-Object { $_ } | Select-Object -Last 1) | ConvertFrom-Json
+                if ($checkJson.ok -eq $false) { $skip = 'sandbox check ok false' }
+                elseif ($null -ne $checkJson.support -and $checkJson.support.ok -eq $false) {
+                    $skip = ($checkJson.support.problems -join '; ')
+                }
+            } catch {
+                $skip = 'sandbox check failed to parse'
+            }
+        }
+        if (-not $skip) {
+            try {
+                New-Item -ItemType Directory -Path $script:LvShadowRoot -Force | Out-Null
+            } catch {
+                $skip = "cannot create folder at drive root: $script:LvDriveRoot"
+            }
+        }
+        if ($skip) {
+            Set-ItResult -Inconclusive -Because $skip
+            return
+        }
+
+        $realTestDrive = $TestDrive
+        $repo = $null
+        $wt = $null
+        $outsidePath = Join-Path $realTestDrive 'outside.txt'
+        Set-Content -LiteralPath $outsidePath -Value 'outside-data' -NoNewline
+        try {
+            New-Item -ItemType Directory -Path $script:LvShadowRoot -Force | Out-Null
+            $TestDrive = $script:LvShadowRoot
+            $repo = New-TestRepo
+            $readCmd = "pwsh -NoProfile -c `"Write-Output ('caf' + [char]0xE9); Get-Content -LiteralPath '$outsidePath'`""
+            $ctx = New-TaskWorktree -Repo $repo -Name 'lvsb' -Test $readCmd
+            $wt = (Get-TaskWorktreeRoot $ctx)
+            $r = Invoke-Feature @('verify', '-Repo', $repo, '-Name', 'lvsb', '-Task', 't1') -WorkingDirectory $repo
+            $r.Json.test.where | Should -Be 'sandbox'
+            $r.Json.test.passed | Should -BeFalse
+            $r.Json.test.tail | Should -Match 'denied'
+            $r.Json.test.tail | Should -Match 'café'
+            $before = Get-DecisionLineCount -Repo $repo -Name 'lvsb'
+            $r2 = Invoke-Feature @(
+                'verify', '-Repo', $repo, '-Name', 'lvsb', '-Task', 't1', '-OnHost', '-Quote', 'live check'
+            ) -WorkingDirectory $repo
+            $r2.Json.test.where | Should -Be 'host'
+            $r2.Json.test.passed | Should -BeTrue
+            (Get-DecisionLineCount -Repo $repo -Name 'lvsb') | Should -Be ($before + 1)
+            $dec = (& git -C $repo show 'feature/lvsb:docs/features/lvsb/decisions.md') -join "`n"
+            $dec | Should -Match '\[decision\] host run: t1, approved: live check'
+        } finally {
+            $TestDrive = $realTestDrive
+            if ($wt) { Remove-TaskWorktree -Repo $repo -WtRoot $wt }
+            if (Test-Path -LiteralPath $script:LvShadowRoot) {
+                Remove-Item -LiteralPath $script:LvShadowRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 

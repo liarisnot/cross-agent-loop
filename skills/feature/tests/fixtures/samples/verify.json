@@ -7,6 +7,8 @@
     "command": "pwsh -NoProfile -c \"exit 0\"",
     "passed": true,
     "exitCode": 0,
-    "tail": "line1\nline2\n"
+    "tail": "line1\nline2\n",
+    "where": "sandbox",
+    "setup": null
   }
 }

@@ -3,6 +3,7 @@
 param(
     [Parameter(Position = 0)]
     [string]$Subcommand,
+    [switch]$OnHost,
     [string]$Repo,
     [string]$Name,
     [string]$Cwd,
@@ -1190,8 +1191,13 @@ function Invoke-GateFeature {
     }
 }
 
-function Invoke-DecisionFeature {
-    param([string]$Repository, [string]$FeatureName)
+function Add-FeatureDecision {
+    param(
+        [string]$Repository,
+        [string]$FeatureName,
+        [string]$Kind,
+        [string]$Text
+    )
     Assert-OneLine 'Text' $Text
     if (-not $Kind) { throw '-Kind is required' }
     if ($script:DecisionKinds -notcontains $Kind) { throw "invalid kind $Kind" }
@@ -1209,10 +1215,21 @@ function Invoke-DecisionFeature {
         $rel = "docs/features/$FeatureName"
         $suffix = Get-DecisionCommitSuffix $line
         $null = Invoke-FeatureCommit $Repository "feature($FeatureName): $suffix" @($rel)
-        Out-FeatureOk @{ name = $FeatureName; line = $line.TrimEnd("`n") }
+        return $line.TrimEnd("`n")
     } finally {
         Exit-FeatureLock
     }
+}
+
+function Invoke-DecisionFeature {
+    param([string]$Repository, [string]$FeatureName)
+    Assert-OneLine 'Text' $Text
+    if (-not $Kind) { throw '-Kind is required' }
+    if ($script:DecisionKinds -notcontains $Kind) { throw "invalid kind $Kind" }
+    if (-not $Text) { throw '-Text is required' }
+
+    $line = Add-FeatureDecision -Repository $Repository -FeatureName $FeatureName -Kind $Kind -Text $Text
+    Out-FeatureOk @{ name = $FeatureName; line = $line }
 }
 
 function Invoke-ReauditFeature {
@@ -2607,12 +2624,8 @@ function Test-MergeBlockingPorcelainLine([string]$Line) {
     return $true
 }
 
-function Invoke-TaskTestCommand {
-    param(
-        [string]$WorktreePath,
-        [string]$TestCommand,
-        [int]$TimeoutSec
-    )
+function New-TaskTestWrapper {
+    param([string]$TestCommand)
     $wrapper = @"
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new(`$false)
 `$ErrorActionPreference = 'Stop'
@@ -2621,7 +2634,16 @@ try { & { $TestCommand } 2>&1 | ForEach-Object { "`$_" } } catch { "`$_"; exit 1
 exit `$LASTEXITCODE
 "@
     $bytes = [Text.Encoding]::Unicode.GetBytes($wrapper)
-    $encoded = [Convert]::ToBase64String($bytes)
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Invoke-TaskTestCommand {
+    param(
+        [string]$WorktreePath,
+        [string]$TestCommand,
+        [int]$TimeoutSec
+    )
+    $encoded = New-TaskTestWrapper -TestCommand $TestCommand
     $outFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-out-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     $errFile = Join-Path ([IO.Path]::GetTempPath()) ("xagent-verify-err-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     $exitCode = 0
@@ -2668,7 +2690,209 @@ exit `$LASTEXITCODE
         passed   = ($exitCode -eq 0)
         exitCode = $exitCode
         tail     = $tail
+        where    = 'host'
+        setup    = $null
     }
+}
+
+function Get-VerifySandboxProcessStartInfo {
+    param(
+        [string]$DelegateScript,
+        [string]$Repository,
+        [string]$WorktreePath,
+        [string]$FeatureName,
+        [string]$TestCommand,
+        [int]$TimeoutSec
+    )
+    $encoded = New-TaskTestWrapper -TestCommand $TestCommand
+    $commandArg = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); pwsh -NoProfile -NonInteractive -EncodedCommand ' + $encoded + '; exit $LASTEXITCODE'
+    $pwshPath = (Get-Command pwsh).Source
+    $repoFull = [IO.Path]::GetFullPath($Repository)
+    $wtFull = [IO.Path]::GetFullPath($WorktreePath)
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $pwshPath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    foreach ($a in @(
+            '-NoProfile', '-File', $DelegateScript, '-SandboxRun', '-Repo', $repoFull,
+            '-Worktree', $wtFull, '-Feature', $FeatureName, '-Command', $commandArg,
+            '-TimeoutSec', "$TimeoutSec"
+        )) {
+        $psi.ArgumentList.Add($a) | Out-Null
+    }
+    return $psi
+}
+
+function Get-VerifySandboxCommandLineLength {
+    param([Diagnostics.ProcessStartInfo]$StartInfo)
+    $sum = $StartInfo.FileName.Length
+    foreach ($a in $StartInfo.ArgumentList) {
+        $sum += $a.Length + 3
+    }
+    return $sum
+}
+
+function Get-DelegateSandboxJsonFromStdout {
+    param([string]$Stdout)
+    if ([string]::IsNullOrEmpty($Stdout)) { return $null }
+    $last = $null
+    foreach ($ln in ($Stdout -split "`n")) {
+        $t = $ln.TrimEnd("`r")
+        if (-not [string]::IsNullOrWhiteSpace($t)) { $last = $t }
+    }
+    if ($null -eq $last) { return $null }
+    try {
+        $obj = $last | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if ($null -eq $obj -or $obj -isnot [pscustomobject]) { return $null }
+    if ($null -eq $obj.PSObject.Properties['ok']) { return $null }
+    return $obj
+}
+
+function ConvertFrom-DelegateSandboxResult {
+    param(
+        [pscustomobject]$Obj,
+        [string]$TestCommand,
+        [int]$TimeoutSec
+    )
+    $base = @{
+        command = $TestCommand
+        where   = 'sandbox'
+    }
+    $okProp = $Obj.PSObject.Properties['ok']
+    $okVal = $okProp.Value
+    if ($okVal -eq $false) {
+        $err = ''
+        if ($null -ne $Obj.PSObject.Properties['error']) {
+            $err = [string]$Obj.error
+        }
+        $status = 'sandbox-error'
+        if ($err.StartsWith('sandbox: no free slot')) {
+            $status = 'slot-busy'
+        }
+        return ($base + @{
+            passed   = $false
+            exitCode = -1
+            tail     = ''
+            setup    = @{ status = $status; message = $err; proposal = $null }
+        })
+    }
+    $stProp = $Obj.PSObject.Properties['status']
+    if ($null -eq $stProp) {
+        return ($base + @{
+            passed   = $false
+            exitCode = -1
+            tail     = ''
+            setup    = @{ status = 'sandbox-error'; message = 'delegate.ps1 returned status '; proposal = $null }
+        })
+    }
+    $status = [string]$stProp.Value
+    switch ($status) {
+        'environment-missing' {
+            $msg = ''
+            if ($null -ne $Obj.PSObject.Properties['message']) { $msg = [string]$Obj.message }
+            $proposal = $null
+            if ($null -ne $Obj.PSObject.Properties['proposal']) { $proposal = $Obj.proposal }
+            return ($base + @{
+                passed   = $false
+                exitCode = -1
+                tail     = ''
+                setup    = @{ status = 'environment-missing'; message = $msg; proposal = $proposal }
+            })
+        }
+        'ran' {
+            $code = 0
+            if ($null -ne $Obj.PSObject.Properties['exitCode']) {
+                $code = [int]$Obj.exitCode
+            }
+            $tailArr = @()
+            if ($null -ne $Obj.PSObject.Properties['tail'] -and $null -ne $Obj.tail) {
+                $tailArr = @($Obj.tail | ForEach-Object { [string]$_ })
+            }
+            return ($base + @{
+                passed   = ($code -eq 0)
+                exitCode = $code
+                tail     = ($tailArr -join "`n")
+                setup    = $null
+            })
+        }
+        'timeout' {
+            $tailArr = @()
+            if ($null -ne $Obj.PSObject.Properties['tail'] -and $null -ne $Obj.tail) {
+                $tailArr = @($Obj.tail | ForEach-Object { [string]$_ })
+            }
+            $tailArr += "timed out after $TimeoutSec s"
+            return ($base + @{
+                passed   = $false
+                exitCode = -1
+                tail     = ($tailArr -join "`n")
+                setup    = $null
+            })
+        }
+        default {
+            return ($base + @{
+                passed   = $false
+                exitCode = -1
+                tail     = ''
+                setup    = @{ status = 'sandbox-error'; message = "delegate.ps1 returned status $status"; proposal = $null }
+            })
+        }
+    }
+}
+
+function Invoke-TaskTestCommandInSandbox {
+    param(
+        [string]$Repository,
+        [string]$WorktreePath,
+        [string]$FeatureName,
+        [string]$TestCommand,
+        [int]$TimeoutSec,
+        [string]$DelegateScript
+    )
+    $psi = Get-VerifySandboxProcessStartInfo -DelegateScript $DelegateScript -Repository $Repository `
+        -WorktreePath $WorktreePath -FeatureName $FeatureName -TestCommand $TestCommand -TimeoutSec $TimeoutSec
+    $grace = 0
+    if (-not [int]::TryParse($env:XAGENT_VERIFY_GRACE_SEC, [ref]$grace) -or $grace -le 0) {
+        $grace = 300
+    }
+    $waitMs = [int][Math]::Min(([long]$TimeoutSec + $grace) * 1000, [int]::MaxValue)
+    $proc = [Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+    $finished = $proc.WaitForExit($waitMs)
+    if (-not $finished) {
+        Stop-ProcessTree -ProcessId $proc.Id
+        return @{
+            command  = $TestCommand
+            passed   = $false
+            exitCode = -1
+            tail     = ''
+            where    = 'sandbox'
+            setup    = @{ status = 'sandbox-error'; message = 'delegate.ps1 did not finish'; proposal = $null }
+        }
+    }
+    $proc.WaitForExit()
+    $stdout = $outTask.GetAwaiter().GetResult()
+    $jsonObj = Get-DelegateSandboxJsonFromStdout -Stdout $stdout
+    if ($null -eq $jsonObj) {
+        return @{
+            command  = $TestCommand
+            passed   = $false
+            exitCode = -1
+            tail     = ''
+            where    = 'sandbox'
+            setup    = @{ status = 'sandbox-error'; message = 'delegate.ps1 printed no JSON'; proposal = $null }
+        }
+    }
+    return ConvertFrom-DelegateSandboxResult -Obj $jsonObj -TestCommand $TestCommand -TimeoutSec $TimeoutSec
 }
 
 function Invoke-TaskFeature {
@@ -2747,6 +2971,20 @@ function Invoke-VerifyFeature {
         $timeout = $parsed
     }
 
+    $onHost = [bool]$OnHost
+    if (-not $onHost -and ($timeout -lt 30 -or $timeout -gt 3600)) {
+        throw 'invalid -TimeoutSec'
+    }
+
+    if ($onHost) {
+        Assert-OneLine 'Quote' $Quote
+        if ([string]::IsNullOrWhiteSpace($Quote)) {
+            throw "-OnHost requires -Quote with the user's approval"
+        }
+    } elseif ($Bound.ContainsKey('Quote') -and $Quote) {
+        throw '-Quote requires -OnHost'
+    }
+
     $stateObj = Get-FeatureStateObject -Repository $Repository -FeatureName $FeatureName
     if (-not $stateObj.tasks.ContainsKey($Task)) {
         throw "task $Task has no worktree in state.json; set it with task -Worktree -BaseSha"
@@ -2761,6 +2999,27 @@ function Invoke-VerifyFeature {
         throw "worktree not found: $wt"
     }
 
+    $delegatePath = $null
+    if (-not $onHost) {
+        if (-not [string]::IsNullOrWhiteSpace($env:XAGENT_DELEGATE_SCRIPT)) {
+            $delegatePath = [IO.Path]::GetFullPath($env:XAGENT_DELEGATE_SCRIPT)
+        } else {
+            $delegatePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../delegate/scripts/delegate.ps1'))
+        }
+        if (-not (Test-Path -LiteralPath $delegatePath)) {
+            throw "delegate.ps1 not found: $delegatePath"
+        }
+        $psi = Get-VerifySandboxProcessStartInfo -DelegateScript $delegatePath -Repository $Repository `
+            -WorktreePath $wt -FeatureName $FeatureName -TestCommand ([string]$planTask.test) -TimeoutSec $timeout
+        if ((Get-VerifySandboxCommandLineLength -StartInfo $psi) -gt 30000) {
+            throw 'test command too long for a sandboxed run'
+        }
+    }
+
+    if ($onHost) {
+        $null = Add-FeatureDecision -Repository $Repository -FeatureName $FeatureName -Kind decision -Text "host run: $Task, approved: $Quote"
+    }
+
     $ignoredCaches = Get-IgnoredCachePaths -WorktreePath $wt
     $changed = Get-ChangedPaths -WorktreePath $wt -BaseSha $base
     $scopeFiles = Get-JsonPropertyStringArray $planTask 'files'
@@ -2773,7 +3032,12 @@ function Invoke-VerifyFeature {
     $outArr = @($outOfScope.ToArray())
     $inScope = ($outArr.Count -eq 0)
     $testCmd = [string]$planTask.test
-    $testResult = Invoke-TaskTestCommand -WorktreePath $wt -TestCommand $testCmd -TimeoutSec $timeout
+    if ($onHost) {
+        $testResult = Invoke-TaskTestCommand -WorktreePath $wt -TestCommand $testCmd -TimeoutSec $timeout
+    } else {
+        $testResult = Invoke-TaskTestCommandInSandbox -Repository $Repository -WorktreePath $wt `
+            -FeatureName $FeatureName -TestCommand $testCmd -TimeoutSec $timeout -DelegateScript $delegatePath
+    }
 
     $verifyRec = [ordered]@{
         at            = Get-UtcDecisionTime
