@@ -2,7 +2,7 @@
 
 **Status: resolved** (2026-11-14). Author decisions: D1a, D2b, D3 = reserved letters with per-slot containers (new option c), D4b, D5b (phase 3), D6a, D7c (G3 restated + per-slot containers; host-localhost exemption proven by probe, not granted), D8 measure-first then read-only token, D9a. Part 2 accepted in full with the adjustments those decisions imply (M17 obsolete; repo key and profile-name shortening obsolete with per-slot containers; M11 replaced by end-of-run grant removal plus slot ledger). M20 contested in part (bytes verified); N22 declined.
 
-**Target:** `docs/designs/worker-sandbox.md` (full file, at `aeb5dbb`)
+**Target:** `docs/designs/worker-sandbox.md` (full file, at `23910b0`)
 **Findings:** `docs/features/worker-sandbox/reviews/design-1.md` (B = Blocker, M = Major, N = Nit)
 
 Each finding gets one category:

@@ -1,10 +1,10 @@
-# Implementation readiness, stage 9 round 3 (focused re-audit of `baa1646`)
+# Implementation readiness, stage 9 round 3 (focused re-audit of `81d4ecd`)
 
 | Lens | Model | Time | Result |
 |---|---|---|---|
 | `implementation_readiness` (IR) | DeepSeek V4.1 Flash | ~7 min | 3 Blockers, 9 Majors, 6 Nits |
 
-**Scope:** only the lines `baa1646` changed (the round 2 fixes), plus defects they cause. Raw report: `.xagent/runs/fr-s9r3/`. Every finding was checked against the doc by the lead before triage.
+**Scope:** only the lines `81d4ecd` changed (the round 2 fixes), plus defects they cause. Raw report: `.xagent/runs/fr-s9r3/`. Every finding was checked against the doc by the lead before triage.
 
 **Verdict from the reviewer:** not ready. **Lead's decision, agreed with the user:** fix everything below except M7 and M10, and lock **without a round 4**. Each round since round 1 has found new defects in the previous round's fixes. The remaining risk is local, and the Pester suite covers it at build time (B1, for example, fails test "`done` derived after `finish`" on its first run).
 

@@ -1,6 +1,6 @@
 # Goldfish review report: Stage 7 (Critic Review), round 5
 
-**Target:** `docs/designs/feature-skill.md` at `8ddc6c3`, FeatureRange lines 1–671. Raw reports are in `.xagent/runs/fr-s7r5-{dc,st,sy}/`. This is round 2 of the new convergence count.
+**Target:** `docs/designs/feature-skill.md` at `01cfbd6`, FeatureRange lines 1–671. Raw reports are in `.xagent/runs/fr-s7r5-{dc,st,sy}/`. This is round 2 of the new convergence count.
 
 | Lens | Model | Time | Result |
 |---|---|---|---|

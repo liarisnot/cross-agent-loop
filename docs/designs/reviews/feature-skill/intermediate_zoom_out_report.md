@@ -1,6 +1,6 @@
 # Stage 8: Intermediate zoom out: `docs/designs/feature-skill.md`
 
-*   **Date:** 2026-11-10. **Target:** commit `9186e4a` and later, the full file (1,091 lines).
+*   **Date:** 2026-11-10. **Target:** commit `0be2b32` and later, the full file (1,091 lines).
 *   **Reviewer:** `zoom_out` on **Grok 4.7 medium**, the effort trial: 421 s; 142k input, 17k output and 14k reasoning tokens, plus 322k cache reads.
 *   **Raw report:** `.xagent/runs/fr-s8/`.
 *   **Verdict:** buildable, with no Blocker. Four mechanisms added during review should come out of v1.

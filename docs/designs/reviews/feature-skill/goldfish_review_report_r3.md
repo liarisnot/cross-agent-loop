@@ -1,6 +1,6 @@
 # Goldfish review report: Stage 7 (Critic Review), round 3
 
-**Target:** `docs/designs/feature-skill.md` at `e93a74c`, FeatureRange lines 1–682. Raw reports are in `.xagent/runs/fr-s7r3-{dc,st,sy}/`.
+**Target:** `docs/designs/feature-skill.md` at `2957679`, FeatureRange lines 1–682. Raw reports are in `.xagent/runs/fr-s7r3-{dc,st,sy}/`.
 
 | Lens | Model | Result |
 |---|---|---|

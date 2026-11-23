@@ -5,7 +5,7 @@ Built from:
 - `reviews/raw/sandbox-env-d1-ic-p5.md` (inventive_catalyst, glm-5.2-high)
 - Lead probes P1, P2, P3 and P5 (results in the design doc, "Probes")
 
-The doc was updated after this round (commit `4b1bb97`).
+The doc was updated after this round (commit `e850fa0`).
 
 ## Findings
 

@@ -11,7 +11,7 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-20T19:13:57Z [dismiss] structural p7: cross-references are not Markdown links (ST-6) — the repo's designs cite paths in backticks; no link format is required by the standard
 - 2026-11-20T19:18:41Z [dismiss] zoom_out p8: keep phase tests on the host outside Python repos (ZO8-1) — author decision D1, reconfirmed on 2026-11-20 with this cost shown
 - 2026-11-20T19:18:42Z [dismiss] zoom_out p8: implementation constants (command-line budget, probe leaf check, timeout + 300) are below design altitude (ZO8-3) — kept so the plan leaves no decision to a worker
-- 2026-11-20T19:47:37Z [dismiss] codebase_details p9: three blockers (-Base default, existing tests, verify sample) — written against the design before the readiness fixes; all three were already resolved in a31e18a
+- 2026-11-20T19:47:37Z [dismiss] codebase_details p9: three blockers (-Base default, existing tests, verify sample) — written against the design before the readiness fixes; all three were already resolved in bd3914a
 - 2026-11-20T19:47:38Z [dismiss] codebase_details p9: mark each Files row Create/Modify/Delete — rows say what changes; new files are marked New
 - 2026-11-20T19:47:38Z [dismiss] style p9: N5 dense overview sentence, N12 repeated logging pattern, N15 Components tense — no change needed; the reviewer flagged them for awareness only
 - 2026-11-20T19:49:41Z [reaudit] d2: phase 9
@@ -33,7 +33,7 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-21T01:10:24Z [fix-up] build-docs: 1 files, 1 lines — task branch is xagent/<delegateTaskId>
 - 2026-11-21T04:55:30Z [decision] host run: phase 2, approved: Yes, run on host
 - 2026-11-21T05:12:50Z [stage] build -> signoff
-- 2026-11-23T01:48:08Z [decision] signoff full suite: phase 2 host run at 7fb044b (512 passed, 0 failed) counts; only feature records changed since
+- 2026-11-23T01:48:08Z [decision] signoff full suite: phase 2 host run at e952276 (512 passed, 0 failed) counts; only feature records changed since
 - 2026-11-23T02:04:15Z [dismiss] sandbox-veri-s1-dr: extra refusals (worktree HEAD unreadable, JSON without ok, unknown status, whitespace-only -Quote) are defensive and fail closed
 - 2026-11-23T02:04:16Z [dismiss] sandbox-veri-s1-dr: verify -Quote '' without -OnHost is not refused; an empty quote has no effect
 - 2026-11-23T02:04:17Z [dismiss] sandbox-veri-s1-dr: -Worktree equal to -Repo is checked before the git identity checks; same refusals, different order

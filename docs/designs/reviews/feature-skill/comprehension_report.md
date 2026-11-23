@@ -1,6 +1,6 @@
 # Stage 6: Comprehension test: `docs/designs/feature-skill.md`
 
-*   **Date:** 2026-11-10. **Target:** commit `6bdf3c8`, the whole file (880 lines), passed by file path.
+*   **Date:** 2026-11-10. **Target:** commit `7803a7d`, the whole file (880 lines), passed by file path.
 *   **Reviewer:** `comprehension` on Composer 2.5 (Cursor, worker tier): 42 s, 63k tokens.
 *   **Raw report:** `.xagent/runs/fr-s6/` (local).
 

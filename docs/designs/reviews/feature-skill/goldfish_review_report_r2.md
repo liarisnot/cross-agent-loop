@@ -2,7 +2,7 @@ Status: resolved (2026-11-10)
 
 # Goldfish annotated review report: Stage 7 (Critic Review), round 2
 
-**Target:** `docs/designs/feature-skill.md` at `5f8e920`, FeatureRange lines 1–669.
+**Target:** `docs/designs/feature-skill.md` at `9d04115`, FeatureRange lines 1–669.
 
 **Reviewers.** This is the first round on the new model seats, all run through the Cursor CLI:
 

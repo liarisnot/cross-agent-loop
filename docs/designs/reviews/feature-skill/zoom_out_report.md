@@ -1,6 +1,6 @@
 # Stage 5: Initial Zoom Out review: `docs/designs/feature-skill.md`
 
-*   **Date:** 2026-11-10. **Target:** commit `051183d`, full file.
+*   **Date:** 2026-11-10. **Target:** commit `85e5165`, full file.
 *   **Reviewers (cross-vendor goldfish):**
     *   `zoom_out` on Grok 4.7 high (Cursor): 414 s, 157k tokens.
     *   `inventive_catalyst` on Gemini Argon high (agy): 203 s, 79k tokens.

@@ -1,6 +1,6 @@
 # Stage 9 (implementation readiness) report
 
-**Target:** `docs/designs/feature-skill.md` at `27134f5`, the Detailed Implementation Plan (lines 671–1069), with lines 1–670 as context. Raw reports: `.xagent/runs/fr-s9-{ir,cd,sy}/`.
+**Target:** `docs/designs/feature-skill.md` at `43033eb`, the Detailed Implementation Plan (lines 671–1069), with lines 1–670 as context. Raw reports: `.xagent/runs/fr-s9-{ir,cd,sy}/`.
 
 | Lens | Model | Time | Raw count |
 |---|---|---|---|

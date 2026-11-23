@@ -1,6 +1,6 @@
 # Goldfish Review Report: design round 1
 
-**Target:** `docs/designs/worker-sandbox.md` at commit `aeb5dbb`. Feature spec is lines 1–332; Detailed Implementation Plan is lines 333–542.
+**Target:** `docs/designs/worker-sandbox.md` at commit `23910b0`. Feature spec is lines 1–332; Detailed Implementation Plan is lines 333–542.
 **Preset:** consolidated (all five stages, no checkpoints), chosen by the user 2026-11-14.
 **Built from** `docs/features/worker-sandbox/reviews/raw/`:
 - `worker-sandb-d1-zo-p5.md`

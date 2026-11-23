@@ -2,7 +2,7 @@ Status: resolved (2026-11-10)
 
 # Goldfish annotated review report: Stage 7 (Critic Review), round 1
 
-**Target:** `docs/designs/feature-skill.md` at `6bdf3c8`. FeatureRange is lines 1–477. The Stage 6 comprehension findings on the whole file are carried in, at the author's request.
+**Target:** `docs/designs/feature-skill.md` at `7803a7d`. FeatureRange is lines 1–477. The Stage 6 comprehension findings on the whole file are carried in, at the author's request.
 
 *   **Reviewers (cross-vendor):**
     *   `design_critic` on Grok 4.7 high (Cursor), with `feature-spec-standard`
@@ -178,4 +178,4 @@ Status: resolved (2026-11-10)
 *   **C2: the author overruled the contest.** The "remaining risk" line was dropped.
 *   **Nits: all proposed fixes were applied** (by the author's instruction). DC-n6 was declined, as it resolves itself.
 
-The design doc was rewritten as a whole (commit `94c32fb`) to apply all of these.
+The design doc was rewritten as a whole (commit `d50757a`) to apply all of these.

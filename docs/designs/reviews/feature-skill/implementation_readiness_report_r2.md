@@ -1,6 +1,6 @@
 # Stage 9 re-audit (implementation readiness), round 2
 
-**Target:** the Detailed Implementation Plan at `f51998d` (lines 673–1190). Raw reports are in `.xagent/runs/fr-s9r2-{ir,sy,cd,cd2}/`.
+**Target:** the Detailed Implementation Plan at `6e227e5` (lines 673–1190). Raw reports are in `.xagent/runs/fr-s9r2-{ir,sy,cd,cd2}/`.
 
 | Lens | Model | Time | Result |
 |---|---|---|---|

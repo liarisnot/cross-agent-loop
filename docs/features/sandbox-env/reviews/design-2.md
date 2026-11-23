@@ -7,7 +7,7 @@ Built from the raw reports in `reviews/raw/`:
 - `sandbox-env-d2-zo-p8.md` (intermediate zoom out)
 - `sandbox-env-d2-ir-p9.md`, `sandbox-env-d2-cd-p9.md`, `sandbox-env-d2-sy-p9.md` (readiness, codebase details, style)
 
-`sandbox-env-d2-zo-p5-r1` and `sandbox-env-d2-ic-p5-r1` were not run; the user waived them as duplicates (see `decisions.md`). The doc was updated after each stage; the last update is commit `e9bc9d1` plus the D8 wording fix in the same commit.
+`sandbox-env-d2-zo-p5-r1` and `sandbox-env-d2-ic-p5-r1` were not run; the user waived them as duplicates (see `decisions.md`). The doc was updated after each stage; the last update is commit `718e0c1` plus the D8 wording fix in the same commit.
 
 Each finding below was fixed in the doc or logged as a dismissal with its reason in `decisions.md`. The lead's triage of every finding is in `decisions.md`; this table lists what changed the design.
 

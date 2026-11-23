@@ -1,6 +1,6 @@
 # Stage 5 re-audit: Initial Zoom Out: `docs/designs/feature-skill.md`
 
-*   **Date:** 2026-11-10. **Target:** commit `687b0df`, full file, passed by file path (not embedded).
+*   **Date:** 2026-11-10. **Target:** commit `be92b69`, full file, passed by file path (not embedded).
 *   **Reviewers:** vendors swapped from the first audit, so each lens got a second vendor's view.
     *   `zoom_out` on Gemini Argon high (agy): 108 s, 81k tokens.
     *   `inventive_catalyst` on Grok 4.7 high (Cursor): about 100k tokens.

@@ -1,6 +1,6 @@
-# Intermediate zoom-out (stage 8), round 3: focused on `baa1646`
+# Intermediate zoom-out (stage 8), round 3: focused on `81d4ecd`
 
-**Target:** the lines `baa1646` changed (the stage 9 round 2 fixes). `zoom_out` on Grok 4.7 medium, 370 s. Raw report: `.xagent/runs/fr-s8r3/`.
+**Target:** the lines `81d4ecd` changed (the stage 9 round 2 fixes). `zoom_out` on Grok 4.7 medium, 370 s. Raw report: `.xagent/runs/fr-s8r3/`.
 
 **Verdict:** the design is still the small version. Derived `done`, the id budget, `reaudit`, `reviewRuns`, the schemas files, pid start times and the other derived status fields are the size of the holes they close. No Blocker.
 

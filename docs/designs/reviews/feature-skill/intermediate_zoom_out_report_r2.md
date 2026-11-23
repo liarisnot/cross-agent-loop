@@ -1,6 +1,6 @@
 # Intermediate zoom-out (stage 8), re-run after stage 7 rounds 4–5
 
-**Target:** `docs/designs/feature-skill.md` at `72f8d69`, full file. `zoom_out` on Grok 4.7 medium, 413 s. Raw report: `.xagent/runs/fr-s8r2/`.
+**Target:** `docs/designs/feature-skill.md` at `f190314`, full file. `zoom_out` on Grok 4.7 medium, 413 s. Raw report: `.xagent/runs/fr-s8r2/`.
 
 **Verdict:** the design is still the small version. The stage 5 and first stage 8 cuts hold. Rounds 4–5 added sentences, not machinery (the `main` merge on request, blocking a lens that didn't run, fix-up counts, gate SHAs, the cap counting every run, and token use including cache reads). Keep them.
 

@@ -1,6 +1,6 @@
 # Goldfish review report: Stage 7 (Critic Review), round 4
 
-**Target:** `docs/designs/feature-skill.md` at `67d1c75`, FeatureRange lines 1–668. Raw reports are in `.xagent/runs/fr-s7r4-{dc,st,sy}/`.
+**Target:** `docs/designs/feature-skill.md` at `9138a1e`, FeatureRange lines 1–668. Raw reports are in `.xagent/runs/fr-s7r4-{dc,st,sy}/`.
 
 This is round 1 of a new convergence count (clean = no Blocker or Major left after triage; 2 clean rounds in a row, cap 5).
 

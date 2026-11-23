@@ -1,6 +1,6 @@
 # Plan review round 4
 
-**Target:** `docs/features/worker-sandbox/plan.md`, after `sandbox-access`'s preflight size gate stopped it (comprehension: 550-900 lines, 30-50 min, partly from a mis-calibrated standard, fixed on `main` in `30d2d29`). `sandbox-access` is split into `sandbox-readlist` and `sandbox-grants`; nothing else changed.
+**Target:** `docs/features/worker-sandbox/plan.md`, after `sandbox-access`'s preflight size gate stopped it (comprehension: 550-900 lines, 30-50 min, partly from a mis-calibrated standard, fixed on `main` in `548c884`). `sandbox-access` is split into `sandbox-readlist` and `sandbox-grants`; nothing else changed.
 **Built from:**
 - `reviews/raw/worker-sandb-p4-cm.md`: comprehension, composer-2.5, completed (3 Major, Nits), 55 s.
 - `reviews/raw/worker-sandb-p4-ir.md`: implementation readiness, deepseek-v41-flash-1017-medium, completed (4 Major, 3 Minor, 4 Nit), 139 s.

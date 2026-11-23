@@ -44,7 +44,7 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-15T06:05:09Z [decision] checkin: on-problems
 - 2026-11-15T06:05:10Z [stage] plan -> build
 - 2026-11-15T06:17:26Z [stop] sandbox-access: preflight size gate says split (comprehension: 550-900 lines, 30-50 min); readiness: 1 Blocker, 8 Major spec gaps in the grant-list and ledger contracts
-- 2026-11-15T06:21:03Z [resume] user: make all 3 changes (size-standard calibration and Composer comprehension on main 30d2d29; split sandbox-access in two; pin readiness findings)
+- 2026-11-15T06:21:03Z [resume] user: make all 3 changes (size-standard calibration and Composer comprehension on main 548c884; split sandbox-access in two; pin readiness findings)
 - 2026-11-15T06:21:04Z [stage] build -> plan: make all 3 changes: split sandbox-access in two
 - 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-grants size claim doubtful — readiness estimates 300-430 lines, 15-22 min; the build-time size gate checks again
 - 2026-11-15T06:25:56Z [dismiss] comprehension: sandbox-readlist Decided wording — the task file's Decided list replaces the brief boilerplate

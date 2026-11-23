@@ -1,6 +1,6 @@
 # Goldfish Review Report: design round 2 (re-audit of phases 7 and 9)
 
-**Target:** `docs/designs/worker-sandbox.md` at `b4ede60`. Feature spec is lines 1–511; Detailed Implementation Plan is lines 512–761.
+**Target:** `docs/designs/worker-sandbox.md` at `21c1539`. Feature spec is lines 1–511; Detailed Implementation Plan is lines 512–761.
 **Scope:** a re-audit after round 1's resolution (`resolution-1.md`). The user chose phases 7 and 9 only. The phase 5, 6 and 8 lenses of round 2 are logged as not run, waived by the user.
 **Built from** `docs/features/worker-sandbox/reviews/raw/`:
 - `worker-sandb-d2-dc-p7.md`
