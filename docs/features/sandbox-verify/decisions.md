@@ -43,3 +43,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-23T02:04:20Z [dismiss] sandbox-veri-s1-dr: verify-error.json is a schema sample; its message text does not need to match the slot-busy mapping
 - 2026-11-23T02:04:21Z [dismiss] sandbox-veri-s1-dr: HANDOFF swappable-models item was requested by the user during the build
 - 2026-11-23T02:04:21Z [dismiss] sandbox-veri-s1-dr: test-plan and HANDOFF rows are written by the lead at sign-off
+- 2026-11-23T02:10:26Z [gate] signed-off: "yes sign off"
