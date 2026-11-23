@@ -39,3 +39,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-23T02:04:17Z [dismiss] sandbox-veri-s1-dr: -Worktree equal to -Repo is checked before the git identity checks; same refusals, different order
 - 2026-11-23T02:04:18Z [dismiss] sandbox-veri-s1-dr: probe worktree left only when git worktree add itself fails, so nothing is created
 - 2026-11-23T02:04:18Z [dismiss] sandbox-veri-s1-dr: task environment-missing rebuilds at feature/<name>; when the worker changed environment inputs, the earlier rule rebuilds at the task branch first
+- 2026-11-23T02:04:19Z [dismiss] sandbox-veri-s1-dr: live test reports Inconclusive with a fixed reason when -SandboxCheck has ok false; it still does not fail
