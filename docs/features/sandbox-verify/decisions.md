@@ -34,3 +34,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-21T04:55:30Z [decision] host run: phase 2, approved: Yes, run on host
 - 2026-11-21T05:12:50Z [stage] build -> signoff
 - 2026-11-23T01:48:08Z [decision] signoff full suite: phase 2 host run at 7fb044b (512 passed, 0 failed) counts; only feature records changed since
+- 2026-11-23T02:04:15Z [dismiss] sandbox-veri-s1-dr: extra refusals (worktree HEAD unreadable, JSON without ok, unknown status, whitespace-only -Quote) are defensive and fail closed
