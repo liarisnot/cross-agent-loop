@@ -37,3 +37,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-23T02:04:15Z [dismiss] sandbox-veri-s1-dr: extra refusals (worktree HEAD unreadable, JSON without ok, unknown status, whitespace-only -Quote) are defensive and fail closed
 - 2026-11-23T02:04:16Z [dismiss] sandbox-veri-s1-dr: verify -Quote '' without -OnHost is not refused; an empty quote has no effect
 - 2026-11-23T02:04:17Z [dismiss] sandbox-veri-s1-dr: -Worktree equal to -Repo is checked before the git identity checks; same refusals, different order
+- 2026-11-23T02:04:18Z [dismiss] sandbox-veri-s1-dr: probe worktree left only when git worktree add itself fails, so nothing is created
