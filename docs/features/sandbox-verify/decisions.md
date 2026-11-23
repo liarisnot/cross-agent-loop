@@ -33,3 +33,4 @@ Append-only. One line per entry: `- <ISO time> [<kind>] <text>`. Written only by
 - 2026-11-21T01:10:24Z [fix-up] build-docs: 1 files, 1 lines — task branch is xagent/<delegateTaskId>
 - 2026-11-21T04:55:30Z [decision] host run: phase 2, approved: Yes, run on host
 - 2026-11-21T05:12:50Z [stage] build -> signoff
+- 2026-11-23T01:48:08Z [decision] signoff full suite: phase 2 host run at 7fb044b (512 passed, 0 failed) counts; only feature records changed since
