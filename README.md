@@ -4,6 +4,18 @@ Run our dev loop with **Claude Code as the lead programmer**, delegating coding 
 
 Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project replaces that with Claude Code skills: `delegate` for one-off tasks and `feature` for a full design-to-merge flow, whose design and review stages build on Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model) (see [below](#built-on-googles-elephant-goldfish-model-egm)).
 
+## Why this project
+
+We develop on Windows and wanted one workflow: Claude Code leads, other vendors' models write and review the code in isolated worktrees, and a feature goes from design to merge with the user approving each major step. Before building, we surveyed similar projects ([research §4 and §7](docs/research.md#7-landscape-survey-similar-projects-2026-11-09), November 2026). Parts of the loop existed, but nothing covered it end to end, and the most complete tools assumed Linux or macOS:
+
+- Delegating to another vendor's CLI was well covered. The closest match, delegate-skills, even records native Windows runs, but it has no worktrees, council or design-to-merge flow.
+- The feature-level frameworks (Superpowers, GitHub Spec Kit, BMAD and others) run every stage on Claude only. kodo, the closest to our `feature` skill, has no independent verification gate and bypasses permission checks.
+- The heavier orchestrators that isolate workers do it with Linux or macOS sandboxing. Omnigent, for example, is documented as degraded on Windows, with no filesystem or network isolation.
+
+So we built it for native Windows and PowerShell. That includes a worker sandbox based on Windows AppContainers.
+
+**Built with itself.** Every part of this repo after the first `delegate` draft was built with the skills while they were still being written. Cursor workers wrote the code through `delegate`, and goldfish lenses reviewed the designs and task files. The later features (`worker-sandbox`, `sandbox-env`, `sandbox-verify`) each ran through `feature`, from design to merge. Their records are in `docs/features/`. What went wrong along the way, and what it fixed, is logged in the [test plan](docs/test-plan.md) (the "Dogfooding `delegate`" rows D1-D28 and the `feature` manual checklist).
+
 **Workers in v1:** only the Cursor CLI (`agent`). We do not call Google Antigravity (`agy`) from agents. Google's Antigravity FAQ (checked 2026-11-10, [T0 in the test plan](docs/test-plan.md#t0-policy-check-antigravity)) forbids wrapping `agy` inside third-party coding agents on consumer plans and names Claude Code as an example. That is the policy reason; the Google Pro subscription stays for your own interactive use.
 
 ## Constraints
