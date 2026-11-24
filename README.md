@@ -2,7 +2,7 @@
 
 Run our dev loop with **Claude Code as the lead programmer**, delegating coding and review subtasks to **Cursor** through its headless CLI, then reviewing and iterating on the results.
 
-Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project replaces that with Claude Code skills: `delegate` for one-off tasks and `feature` for a full design-to-merge flow.
+Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project replaces that with Claude Code skills: `delegate` for one-off tasks and `feature` for a full design-to-merge flow, whose design and review stages build on Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model) (see [below](#built-on-googles-elephant-goldfish-model-egm)).
 
 **Workers in v1:** only the Cursor CLI (`agent`). We do not call Google Antigravity (`agy`) from agents. Google's Antigravity FAQ (checked 2026-11-10, [T0 in the test plan](docs/test-plan.md#t0-policy-check-antigravity)) forbids wrapping `agy` inside third-party coding agents on consumer plans and names Claude Code as an example. That is the policy reason; the Google Pro subscription stays for your own interactive use.
 
@@ -65,7 +65,7 @@ This removes the letter mappings, slot containers and runtime cache. It keeps th
 | [docs/test-plan.md](docs/test-plan.md) | Feasibility tests and the `feature` manual checklist |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Licenses and attribution for vendored third-party material (Google EGM, Apache-2.0) |
 | `skills/delegate/` | Claude Code skill: `SKILL.md` + `scripts/delegate.ps1` |
-| `skills/feature/` | Claude Code skill: router, stages, `feature.ps1`, schemas, EGM workflow copy |
+| `skills/feature/` | Claude Code skill: router, stages, `feature.ps1`, schemas, and the vendored EGM workflow (`egm/`) |
 
 ## Status
 
@@ -88,6 +88,35 @@ This removes the letter mappings, slot containers and runtime cache. It keeps th
 ## The `feature` skill
 
 `feature` takes one feature from a problem statement to a merge into `main`. You speak in plain language; Claude Code is the lead, Cursor workers code through `delegate`, and you approve each major gate. State lives in the repo (`feature/<name>`, `docs/features/<name>/`, `docs/designs/<name>.md`), so work survives `/clear` and new sessions.
+
+### Built on Google's Elephant-Goldfish Model (EGM)
+
+The design half of `feature`, and the reviewer personas in `delegate`, come from **[Elephant-Goldfish Model (EGM)](https://github.com/google/elephant-goldfish-model)**, an Apache-2.0 Claude Code plugin published by Google. We vendored it at commit `b7d9e27` (2026-11-09). EGM is "not an officially supported Google product", and nothing here implies endorsement by Google or its authors. The full file list, upstream paths and license are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); the reasoning is in [decision 001](docs/decisions/001-vendor-egm-workflow.md).
+
+**EGM terms you will see in this repo:**
+
+| Term | Meaning |
+|---|---|
+| Elephant | The lead (Claude Code here), which holds the whole conversation's context. |
+| Goldfish | A reviewer or worker that sees only one document or task file and no conversation history, so it notices what the elephant left unsaid. |
+| Lens / persona | One goldfish reviewer's angle: zoom out, comprehension, design critic, implementation readiness, inventive catalyst, codebase details, structural, style. Each is a prompt file in `skills/delegate/personas/`. |
+| Standard | A checklist a persona applies (implementation readiness, zoom out, feature spec). |
+| Synthesizer | Merges the lenses' findings into one deduplicated report ranked Blocker / Major / Nit. |
+| Phases 5-9 | EGM's review phases: 5 initial zoom out, 6 comprehension, 7 critic, 8 intermediate zoom out, 9 implementation readiness. Review records name them ("stage 9 round 2"). |
+| Drift report | A check of what was built against the design. |
+
+**What we use unchanged:** EGM's draft, review, review-loop and resolve workflows, the synthesizer, the execution instructions (all under `skills/feature/egm/`), the eight reviewer personas and three standards (under `skills/delegate/personas/`). These files are byte-identical to upstream.
+
+**What we changed, and why:**
+
+- **Wrapped, not edited.** EGM's skills set `disable-model-invocation`, so only a typed `/egm-*` command can start them. To keep plain-language entry, `feature` ships a copy of the workflow text, and its own stage files (`skills/feature/stages/design.md`, `design-review.md`) tell the lead to follow it "with these differences": write into the feature's design doc instead of `design_draft.md`, commit each approved section, never ask for a slash command.
+- **Reviewers from other model families.** Where EGM spawns a Claude subagent for each lens, `feature` runs each lens through `delegate` on a Cursor model (Grok, GLM, DeepSeek), read-only and sandboxed, so the reviewer does not share the author's blind spots. The lead does the synthesizer's job itself, following EGM's synthesizer text.
+- **Recorded gates.** EGM's checkpoint questions stay chat questions. Only three gates (design-locked, plan-approved, signed-off) are recorded, with the user's own words, so work resumes from disk.
+- **One adapted file.** `skills/delegate/personas/drift_report.md` is rewritten from EGM's drift-report skill into a single read-only pass over the locked design and the branch diff, returning missing, added and changed behaviour for sign-off. Its header states the changes (Apache-2.0 §4(b)).
+- **Ideas reused without copying text:** the Blocker / Major / Nit format (`skills/delegate/review.schema.json`) and the anti-sycophancy rules in the council prompt. `delegate`'s goldfish preflight applies the goldfish idea to worker task files: a no-context model reads the task file before a worker runs.
+- **Ours, not EGM's:** EGM stops at a reviewed design doc. The plan, build and sign-off stages, `feature.ps1` (state, resume after a killed session, locks), the multi-model council and the worker sandbox are this project's.
+
+**Tracking upstream:** each month we compare upstream `HEAD` with `b7d9e27`, per vendored file. Unchanged files are copied over when upstream changes; the adapted file is merged by hand.
 
 **Example entry phrases** (paraphrases count; the skill must not fire on sentences that only mention a feature):
 
