@@ -21,6 +21,17 @@ So we built it for native Windows and PowerShell. That includes a worker sandbox
 
 **Workers in v1:** only the Cursor CLI (`agent`). We do not call Google Antigravity (`agy`) from agents. Google's Antigravity FAQ (checked 2026-11-10, [T0 in the test plan](docs/test-plan.md#t0-policy-check-antigravity)) forbids wrapping `agy` inside third-party coding agents on consumer plans and names Claude Code as an example. That is the policy reason; the Google Pro subscription stays for your own interactive use.
 
+## Results so far
+
+These numbers cover **only this repo**: the runs made while building it, plus the throwaway test repos its own checklists create. Runs the skills made in any other repo are left out. They come from the log `delegate.ps1` writes for every run, totalled in [benchmarks/REPORT.md](benchmarks/REPORT.md) (`python benchmarks/bench.py usage`).
+
+- **293 `delegate` runs** from 2026-11-09 to 2026-11-22, 110 of them in the Windows AppContainer sandbox.
+- **Building this repo:** 104 runs for the `feature` skill's own design reviews and build and for one-off fixes (made with `delegate` directly, before `feature` existed), then 80 for `worker-sandbox`, 47 for `sandbox-env` and 27 for `sandbox-verify`, each run through `feature`.
+- **Who did what:** Composer 2.5 wrote most of the code (58 runs) and ran the quick comprehension checks (63). DeepSeek V4.1 Flash ran the readiness reviews (65). Grok 4.7 and GLM 5.2 were the design and code reviewers (77 runs together) and the council seats. Grok 4.7 high took the 12 hardest coding tasks.
+- **Reliability:** 287 of 293 runs finished cleanly; 4 timed out.
+
+A clean finish says nothing about quality. The quality side is written up, not counted, in the [test plan](docs/test-plan.md): the lead's probes found real bugs that the workers' passing tests missed (rows D11 and D14), and the first real use of `feature` found seven problems (S1-S7) that three rounds of design review had not caught. Treat all of this as one project's experience, not a benchmark.
+
 ## Constraints
 
 - **Local only** (for now): no cloud agents, no Cursor Cloud Agents API.
@@ -79,6 +90,7 @@ This removes the letter mappings, slot containers and runtime cache. It keeps th
 | [docs/designs/feature-skill.md](docs/designs/feature-skill.md) | Locked design of the `feature` skill |
 | [docs/test-plan.md](docs/test-plan.md) | Feasibility tests and the `feature` manual checklist |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Licenses and attribution for vendored third-party material (Google EGM, Apache-2.0) |
+| [benchmarks/REPORT.md](benchmarks/REPORT.md) | Usage totals of every `delegate` run in this repo (`bench.py usage`); the head-to-head mode in `bench.py` is dormant |
 | `skills/delegate/` | Claude Code skill: `SKILL.md` + `scripts/delegate.ps1` |
 | `skills/feature/` | Claude Code skill: router, stages, `feature.ps1`, schemas, and the vendored EGM workflow (`egm/`) |
 

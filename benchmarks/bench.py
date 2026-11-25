@@ -1,10 +1,14 @@
-"""Benchmark bookkeeping for the delegate skill (stdlib only).
+"""Usage report and (dormant) head-to-head benchmark for the delegate skill (stdlib only).
 
+  python bench.py usage [--repo PATH]         -> rebuild REPORT.md: totals of every delegate run in this repo
+
+Head-to-head mode (dormant: it needs a second worker provider, and agy may not be automated;
+see docs/test-plan.md T0). Its report is head-to-head.md, written only when records exist.
   python bench.py status                      -> is benchmark mode on, how many tasks left
   python bench.py on [N] [--profile P]        -> enable for the next N tasks (default 8)
   python bench.py off
   python bench.py add <judgment.json>         -> record one head-to-head task, count down, rebuild REPORT.md
-  python bench.py report                      -> rebuild REPORT.md from records.jsonl + runs.jsonl
+  python bench.py report                      -> rebuild head-to-head.md from records.jsonl + runs.jsonl
 
 Token usage / seconds are NOT typed in by the lead: they are summed from runs.jsonl
 (written automatically by delegate.ps1 for every run, in $XAGENT_LOG_DIR or %LOCALAPPDATA%/xagent) by matching repo + taskId.
@@ -23,13 +27,15 @@ judgment.json (written by the lead after reviewing both):
 """
 import json
 import os
+import statistics
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONFIG, RECORDS, REPORT = (HERE / n for n in ("config.json", "records.jsonl", "REPORT.md"))
+CONFIG, RECORDS, H2H, REPORT = (HERE / n for n in ("config.json", "records.jsonl", "head-to-head.md", "REPORT.md"))
 # runs.jsonl lives outside every repo (delegate.ps1 writes it there), so private usage data is never committed
 LOG_DIR = Path(os.environ.get("XAGENT_LOG_DIR") or Path(os.environ["LOCALAPPDATA"]) / "xagent")
 RUNS = LOG_DIR / "runs.jsonl"
@@ -105,6 +111,8 @@ def comparison(j):
 
 def report():
     recs = load_jsonl(RECORDS)
+    if not recs:
+        return
     agg = defaultdict(lambda: defaultdict(float))
     for r in recs:
         for e in r["entries"]:
@@ -142,7 +150,63 @@ def report():
               "- **rubric** (lead's judgment, 1-5): correctness, instruction-following/scope, code quality.",
               "- Tokens are as reported by each CLI. Subscription plans don't expose a $ cost, so token counts are the comparable cost proxy. The CLIs report caching differently (Cursor splits out cache reads; agy has so far reported 0 cached), so compare **incl. cache** totals for volume; cache reads are usually billed/quota-weighted lower.",
               "- Small sample sizes: treat early numbers as directional."]
+    H2H.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def under(path, root):
+    path, root = norm(path), norm(root)
+    return path == root or path.startswith(root + "\\")
+
+
+def usage(repo):
+    """Totals of delegate runs in `repo` (and its subfolders) plus throwaway test repos under the
+    system temp folder. Runs in any other repo are left out, and no repo path is printed, so the
+    report is safe to commit in a public repo."""
+    runs = load_jsonl(RUNS)
+    temp = tempfile.gettempdir()
+    kept = [r for r in runs if under(r.get("repo", ""), repo) or under(r.get("repo", ""), temp)]
+    if not kept:
+        sys.exit("no runs for this repo in " + str(RUNS))
+
+    def table(title, key, note=""):
+        groups = defaultdict(list)
+        for r in kept:
+            groups[key(r)].append(r)
+        out = [f"## {title}", ""] + ([note, ""] if note else []) + [
+            "| | runs | clean exits | timeouts | wall hours | median minutes | tokens excl. cache (M) | cache reads (M) |",
+            "|---|---|---|---|---|---|---|---|"]
+        for k, rs in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            u = [r.get("usage") or {} for r in rs]
+            secs = [r.get("seconds") or 0 for r in rs]
+            ok = sum(r.get("exitCode") == 0 and not r.get("timedOut") for r in rs)
+            out.append(f"| {k} | {len(rs)} | {ok} | {sum(bool(r.get('timedOut')) for r in rs)} | {sum(secs)/3600:.1f} | "
+                       f"{statistics.median(secs)/60:.1f} | {sum(x.get('total', 0) for x in u)/1e6:.2f} | "
+                       f"{sum(x.get('cacheRead', 0) for x in u)/1e6:.1f} |")
+        return out + [""]
+
+    first, last = min(r["ts"] for r in kept)[:10], max(r["ts"] for r in kept)[:10]
+    lines = ["# Usage report: delegate runs in this repo",
+             f"_Generated {datetime.now():%Y-%m-%d} by `python benchmarks/bench.py usage` from {len(kept)} runs, {first} to {last}._", "",
+             "Every `delegate.ps1` run appends one line (model, profile, feature, seconds, tokens, exit code) to a log outside the repo. "
+             "This report totals the runs made while building this repo, plus the throwaway test repos its checklists create. "
+             "Runs in any other repo are left out.", "",
+             "A clean exit means the run finished; it says nothing about the quality of the result. Review rounds and the bugs the lead "
+             "found are written up in `docs/test-plan.md` (the \"Dogfooding `delegate`\" rows and the manual checklist results).", ""]
+    lines += table("By feature", lambda r: f"`{r['feature']}`" if r.get("feature") else "(no feature: `delegate` used directly)",
+                   "Runs from before the `feature` skill existed (its own design reviews and build) and one-off fixes carry no feature name. "
+                   "In this repo's history, `subtract-divide` and `power-and-mean` were throwaway sandbox repos for the `feature` manual "
+                   "checklist (2026-11-12), and `regress` and `feature` were the regression checks of build step 1 (2026-11-11).")
+    lines += table("By model and role", lambda r: f"{r.get('model')} ({r.get('profile')})",
+                   "Role is the `delegate` profile: `code` and `code-hard` write code; `review` is a read-only lens or preflight; "
+                   "`council` is one council seat.")
+    lines += table("Sandboxed or not", lambda r: "AppContainer sandbox" if r.get("sandboxed") else "no sandbox",
+                   "The worker sandbox became the default on 2026-11-16.")
+    lines += ["## Notes", "",
+              "- Tokens are as the Cursor CLI reports them. Cache reads are listed apart because they are usually billed or rate-limited lower.",
+              "- The plans are flat-rate subscriptions, so there is no dollar cost per run; tokens and wall time are the cost measures.",
+              "- `agy` rows are trial runs from before the Antigravity policy check (`docs/test-plan.md`, T0)."]
     REPORT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"wrote {REPORT} from {len(kept)} runs ({len(runs) - len(kept)} runs in other repos left out)")
 
 
 def main(argv):
@@ -175,7 +239,10 @@ def main(argv):
         add(argv[1])
     elif argv[0] == "report":
         report()
-        print(f"wrote {REPORT}")
+        print(f"wrote {H2H}" if load_jsonl(RECORDS) else "no head-to-head records")
+    elif argv[0] == "usage":
+        root = argv[argv.index("--repo") + 1] if "--repo" in argv else HERE.parent
+        usage(root)
     else:
         sys.exit(__doc__)
 

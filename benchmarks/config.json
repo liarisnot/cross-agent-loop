@@ -1,5 +1,5 @@
 {
-  "_comment": "Benchmark mode for the delegate skill. When enabled, each delegated implementation task runs on BOTH cursor and agy with the same task file; the lead scores both and records the comparison. remainingTasks counts down per recorded task; mode turns itself off at 0.",
+  "_comment": "DORMANT: needs a second worker provider (agy may not be automated, docs/test-plan.md T0); bench.py usage writes REPORT.md instead. Benchmark mode for the delegate skill. When enabled, each delegated implementation task runs on BOTH cursor and agy with the same task file; the lead scores both and records the comparison. remainingTasks counts down per recorded task; mode turns itself off at 0.",
   "enabled": false,
   "remainingTasks": 0,
   "profile": "code"

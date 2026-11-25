@@ -149,7 +149,7 @@ pwsh -NoProfile -File <skill dir>/scripts/delegate.ps1 -Agent cursor -Profile re
 
 ## Benchmark mode: unavailable in v1
 
-The head-to-head benchmark needs a second worker provider, and `agy` is disabled. `benchmarks/bench.py` and its records stay for when one exists. Every delegate run still appends its token usage to `runs.jsonl` in `$env:XAGENT_LOG_DIR`, or `%LOCALAPPDATA%\xagent\` when unset, outside every repo, so usage from private projects is never committed.
+The head-to-head benchmark needs a second worker provider, and `agy` is disabled, so it is dormant; `benchmarks/bench.py` keeps it for when one exists. `python benchmarks/bench.py usage` totals this repo's runs into `benchmarks/REPORT.md` instead (runs in other repos are left out). Every delegate run still appends its token usage to `runs.jsonl` in `$env:XAGENT_LOG_DIR`, or `%LOCALAPPDATA%\xagent\` when unset, outside every repo, so usage from private projects is never committed.
 
 ## Council: multi-model deliberation (read-only)
 
