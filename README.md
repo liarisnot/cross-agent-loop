@@ -1,12 +1,15 @@
 # cross-agent-loop
 
-Run our dev loop with **Claude Code as the lead programmer**, delegating coding and review subtasks to **Cursor** through its headless CLI, then reviewing and iterating on the results.
+Claude Code skills for Windows that take a feature from design through review to merged code, with **Claude Code as the lead** and models from other vendors (through the Cursor CLI) doing the reviews and the coding:
 
-Today the alternatives are Haiku sub-agents or manually copy-pasting instructions between platforms. This project replaces that with Claude Code skills: `delegate` for one-off tasks and `feature` for a full design-to-merge flow, whose design and review stages build on Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model) (see [below](#built-on-googles-elephant-goldfish-model-egm)).
+- **`feature`** runs the whole flow: design the feature with you section by section, review the design with cross-vendor reviewers and lock it, plan the tasks, build them, then test and sign off against the locked design. You approve each major gate in plain language. Its design and review stages build on Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model) (see [below](#built-on-googles-elephant-goldfish-model-egm)).
+- **`delegate`** is the engine underneath, and also usable on its own: it sends a coding task to a Cursor worker in an isolated, sandboxed git worktree, runs a read-only review of a document or diff with another model family (Grok, GLM, DeepSeek), or convenes a multi-model council on a hard decision. Claude Code reviews every result and iterates before merging.
+
+Without it, the options were Claude-only sub-agents, which share the author's blind spots and use up the Claude quota, or copying instructions and results by hand between tools.
 
 ## Why this project
 
-We develop on Windows and wanted one workflow: Claude Code leads, other vendors' models write and review the code in isolated worktrees, and a feature goes from design to merge with the user approving each major step. Before building, we surveyed similar projects ([research §4 and §7](docs/research.md#7-landscape-survey-similar-projects-2026-11-09), November 2026). Parts of the loop existed, but nothing covered it end to end, and the most complete tools assumed Linux or macOS:
+We develop on Windows and wanted one workflow: Claude Code leads, other vendors' models review the designs and write and review the code in isolated worktrees, and a feature goes from design to merge with the user approving each major step. Before building, we surveyed similar projects ([research §4 and §7](docs/research.md#7-landscape-survey-similar-projects-2026-11-09), November 2026). Parts of the loop existed, but nothing covered it end to end, and the most complete tools assumed Linux or macOS:
 
 - Delegating to another vendor's CLI was well covered. The closest match, delegate-skills, even records native Windows runs, but it has no worktrees, council or design-to-merge flow.
 - The feature-level frameworks (Superpowers, GitHub Spec Kit, BMAD and others) run every stage on Claude only. kodo, the closest to our `feature` skill, has no independent verification gate and bypasses permission checks.
